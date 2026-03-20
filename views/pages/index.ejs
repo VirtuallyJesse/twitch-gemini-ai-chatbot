@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <%- include('../partials/head') %>
+    <link rel="stylesheet" href="/public/style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gemini Bot Dashboard</title>
+</head>
+<body class="dashboard-body<%= storageConfigured ? '' : ' no-storage' %>">
+    <div class="dashboard-container">
+        <!-- LEFT PANEL: CHAT LOG -->
+        <div class="panel left-panel">
+            <div class="panel-header">
+                <div class="channel-tabs" id="channel-tabs">
+                    <!-- Tabs injected here -->
+                    <div class="tab">Loading...</div>
+                </div>
+            </div>
+            <div class="chat-log" id="chat-log">
+                <!-- Messages injected here -->
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL: MEDIA GALLERY -->
+        <div class="panel right-panel">
+            <div class="panel-header">
+                <div class="header-title">Media Gallery</div>
+                <div class="filters">
+                    <button class="filter-btn active" onclick="setFilter('all')">All</button>
+                    <button class="filter-btn" onclick="setFilter('image')">Images</button>
+                    <button class="filter-btn" onclick="setFilter('video')">Videos</button>
+                    <button class="filter-btn" onclick="setFilter('audio')">Audio</button>
+                </div>
+            </div>
+            <div class="pagination-controls" id="pagination-controls"></div>
+            <div class="media-gallery" id="media-gallery">
+                <!-- Media cards injected here -->
+            </div>
+        </div>
+    </div>
+
+    <% if (!storageConfigured) { %>
+    <div class="critical-banner">
+        🚨 <strong>Upstash Redis is REQUIRED</strong> — Authorization token refreshing and chat persistence will not work without it.
+        Set <code>UPSTASH_REDIS_URL</code> in your environment variables to enable the bot.
+        <a href="https://upstash.com" target="_blank" rel="noopener">Get a free database →</a>
+    </div>
+<% } %>
+
+    <script>
+        // --- STATE ---
+        const state = {
+            channels: [],
+            activeChannel: null,
+            chatData: {}, // Map<channel, Array<msg>>
+            mediaData: [],
+            mediaFilter: 'all',
+            mediaPage: 1,
+            mediaPerPage: 12,
+            socket: null,
+
+            // channel -> twitch userId (from server, so client can call BTTV/FFZ/7TV APIs directly)
+            channelIds: {},
+
+            // Provider caches (loaded in the browser; no images stored server-side)
+            emoteGlobals: {
+                bttv: null,
+                ffz: null,
+                seventv: null,
+                _loading: null
+            },
+            // channel -> combined emote map { code: { url, provider } }
+            emoteMapsByChannel: {},
+            // channel -> in-flight Promise
+            emoteFetchByChannel: {}
+        };
+
+        // --- DOM ELEMENTS ---
+        const els = {
+            tabs: document.getElementById('channel-tabs'),
+            chatLog: document.getElementById('chat-log'),
+            gallery: document.getElementById('media-gallery'),
+            pagination: document.getElementById('pagination-controls')
+        };
+
+        // --- INITIALIZATION ---
+        async function init() {
+            try {
+                // 1. Fetch Channels
+                const channelsRes = await fetch('/api/channels');
+                state.channels = await channelsRes.json();
+
+                // 1b. Fetch channel -> Twitch ID mapping (enables direct 3P emote fetches from the browser)
+                const idsRes = await fetch('/api/channel-ids');
+                state.channelIds = await idsRes.json();
+
+                if (state.channels.length > 0) {
+                    state.activeChannel = state.channels[0];
+                    renderTabs();
+                }
+
+                // 2. Fetch Initial Chat for active channel
+                if (state.activeChannel) {
+                    await Promise.all([
+                        fetchChat(state.activeChannel),
+                        ensureEmotesLoaded(state.activeChannel)
+                    ]);
+                    renderChat(); // rerender with emotes if loaded
+                }
+
+                // 3. Fetch Initial Media
+                const mediaRes = await fetch('/api/media');
+                state.mediaData = await mediaRes.json();
+                renderGallery();
+
+                // 4. Connect WebSocket
+                connectWS();
+
+            } catch (e) {
+                console.error("Init failed", e);
+            }
+        }
+
+        // --- CHAT LOGIC ---
+        async function fetchChat(channel) {
+            const safeChannel = channel.replace('#', '');
+            const res = await fetch(`/api/chat/${safeChannel}`);
+            const data = await res.json();
+            state.chatData[channel] = data;
+            if (state.activeChannel === channel) {
+                renderChat();
+            }
+        }
+
+        function switchChannel(channel) {
+            state.activeChannel = channel;
+            renderTabs();
+
+            // Ensure we have 3P emote maps for this channel (async, cached)
+            ensureEmotesLoaded(channel).then(() => {
+                // Rerender once emote maps arrive (so old text tokens turn into images)
+                if (state.activeChannel === channel) renderChat();
+            }).catch(() => { /* non-fatal */ });
+
+            // Check if we have data, if not fetch it
+            if (!state.chatData[channel]) {
+                fetchChat(channel);
+            } else {
+                renderChat();
+            }
+        }
+
+        function renderTabs() {
+            els.tabs.innerHTML = state.channels.map(ch => `
+                <div class="tab ${ch === state.activeChannel ? 'active' : ''}" 
+                     onclick="switchChannel('${ch}')">
+                    ${ch}
+                </div>
+            `).join('');
+        }
+
+        function renderChat() {
+            const msgs = state.chatData[state.activeChannel] || [];
+            // Optimize: only render last 200 to keep DOM light
+            const visibleMsgs = msgs.slice(-200);
+
+            els.chatLog.innerHTML = visibleMsgs.map(msg => {
+                const date = new Date(msg.timestamp);
+                const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
+
+                const rendered = renderMessageHtml(msg.message, state.activeChannel, msg.meta);
+
+                return `
+                    <div class="chat-msg">
+                        <span class="ts">[${timeStr}]</span>
+                        <span class="user" style="color: ${getUsernameColor(msg.username)}">${escapeHtml(msg.username)}:</span>
+                        <span class="text">${rendered}</span>
+                    </div>
+                `;
+            }).join('');
+
+            scrollToBottom();
+        }
+
+        function appendMessage(channel, msg) {
+            if (!state.chatData[channel]) state.chatData[channel] = [];
+            state.chatData[channel].push(msg);
+
+            // Limit buffer
+            if (state.chatData[channel].length > 1000) state.chatData[channel].shift();
+
+            if (state.activeChannel === channel) {
+                const isScrolledBottom = els.chatLog.scrollHeight - els.chatLog.scrollTop === els.chatLog.clientHeight;
+
+                const date = new Date(msg.timestamp);
+                const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
+
+                const rendered = renderMessageHtml(msg.message, channel, msg.meta);
+
+                const html = `
+                    <div class="chat-msg">
+                        <span class="ts">[${timeStr}]</span>
+                        <span class="user" style="color: ${getUsernameColor(msg.username)}">${escapeHtml(msg.username)}:</span>
+                        <span class="text">${rendered}</span>
+                    </div>
+                `;
+                els.chatLog.insertAdjacentHTML('beforeend', html);
+
+                if (isScrolledBottom) scrollToBottom();
+            }
+        }
+
+        function scrollToBottom() {
+            els.chatLog.scrollTop = els.chatLog.scrollHeight;
+        }
+
+        // --- MEDIA LOGIC ---
+        function setFilter(type) {
+            state.mediaFilter = type;
+            state.mediaPage = 1;
+            document.querySelectorAll('.filter-btn').forEach(b => {
+                b.classList.toggle('active', b.getAttribute('onclick').includes(type));
+            });
+            renderGallery();
+        }
+
+        function renderGallery() {
+            const filtered = state.mediaFilter === 'all' 
+                ? state.mediaData 
+                : state.mediaData.filter(m => m.mediaType === state.mediaFilter);
+
+            const totalPages = Math.max(1, Math.ceil(filtered.length / state.mediaPerPage));
+            if (state.mediaPage > totalPages) state.mediaPage = totalPages;
+            if (state.mediaPage < 1) state.mediaPage = 1;
+
+            const start = (state.mediaPage - 1) * state.mediaPerPage;
+            const pageItems = filtered.slice(start, start + state.mediaPerPage);
+
+            els.gallery.innerHTML = pageItems.map(item => createMediaCard(item)).join('');
+            
+            renderPagination(totalPages, filtered.length);
+            observeImages();
+        }
+
+        function prependMedia(item) {
+            state.mediaData.unshift(item);
+            if (state.mediaFilter === 'all' || state.mediaFilter === item.mediaType) {
+                renderGallery();
+            }
+        }
+
+        function createMediaCard(item) {
+            const date = new Date(item.timestamp);
+            const timeStr = date.toLocaleString();
+            
+            let mediaContent = '';
+            if (item.mediaType === 'image') {
+                mediaContent = `<img data-src="${item.mediaUrl}" class="lazy-media" alt="Generated Image" onclick="window.open('${item.mediaUrl}', '_blank')">`;
+            } else if (item.mediaType === 'video') {
+                mediaContent = `
+                    <video controls preload="none" poster="">
+                        <source src="${item.mediaUrl}" type="video/mp4">
+                        Your browser does not support the video tag.
+                    </video>`;
+            } else if (item.mediaType === 'audio') {
+                mediaContent = `
+                    <div class="audio-player">
+                        <div class="audio-icon">🎵</div>
+                        <audio controls preload="none">
+                            <source src="${item.mediaUrl}" type="audio/mpeg">
+                        </audio>
+                    </div>`;
+            }
+
+            return `
+                <div class="media-card">
+                    <div class="media-content">
+                        ${mediaContent}
+                    </div>
+                    <div class="media-info">
+                        <div class="prompt" title="${escapeHtml(item.prompt)}">"${item.prompt}"</div>
+                        <div class="meta" title="${escapeHtml(item.command)} by ${escapeHtml(item.username)} - ${timeStr}">
+                            <span class="cmd">${item.command}</span>
+                            <span class="by">by ${escapeHtml(item.username)}</span>
+                            <span class="at">${timeStr}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function observeImages() {
+            const observer = new IntersectionObserver((entries, obs) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const img = entry.target;
+                        img.src = img.dataset.src;
+                        img.classList.remove('lazy-media');
+                        obs.unobserve(img);
+                    }
+                });
+            });
+            document.querySelectorAll('.lazy-media').forEach(img => observer.observe(img));
+        }
+
+        function renderPagination(totalPages, totalItems) {
+            if (!els.pagination) return;
+            if (totalPages <= 1) {
+                els.pagination.innerHTML = `<span class="page-info">${totalItems} item${totalItems !== 1 ? 's' : ''}</span>`;
+                return;
+            }
+
+            let html = '';
+            html += `<button class="page-btn" onclick="goToPage(1)" ${state.mediaPage === 1 ? 'disabled' : ''}>&laquo;</button>`;
+            html += `<button class="page-btn" onclick="goToPage(${state.mediaPage - 1})" ${state.mediaPage === 1 ? 'disabled' : ''}>&lsaquo;</button>`;
+
+            const maxVisible = 5;
+            let startPage = Math.max(1, state.mediaPage - Math.floor(maxVisible / 2));
+            let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+            if (endPage - startPage + 1 < maxVisible) {
+                startPage = Math.max(1, endPage - maxVisible + 1);
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                html += `<button class="page-btn ${i === state.mediaPage ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
+            }
+
+            html += `<button class="page-btn" onclick="goToPage(${state.mediaPage + 1})" ${state.mediaPage === totalPages ? 'disabled' : ''}>&rsaquo;</button>`;
+            html += `<button class="page-btn" onclick="goToPage(${totalPages})" ${state.mediaPage === totalPages ? 'disabled' : ''}>&raquo;</button>`;
+            html += `<span class="page-info">Page ${state.mediaPage} of ${totalPages} (${totalItems} items)</span>`;
+
+            els.pagination.innerHTML = html;
+        }
+
+        function goToPage(page) {
+            state.mediaPage = page;
+            renderGallery();
+            els.gallery.scrollTop = 0;
+        }
+
+        // --- WEBSOCKET ---
+        function connectWS() {
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${protocol}://${window.location.host}/ws`;
+            state.socket = new WebSocket(wsUrl);
+
+            state.socket.onopen = () => console.log("WS Connected");
+            state.socket.onclose = () => setTimeout(connectWS, 3000); // Reconnect
+            state.socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'chat') {
+                    appendMessage(data.channel, data.entry);
+                } else if (data.type === 'media') {
+                    prependMedia(data.entry);
+                }
+            };
+        }
+
+        // --- HELPERS ---
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        function isUrlToken(token) {
+            return /^https?:\/\/\S+$/i.test(token);
+        }
+
+        function getTwitchEmoteUrlById(id) {
+            // Twitch CDN template: https://static-cdn.jtvnw.net/emoticons/v2/{{id}}/{{format}}/{{theme_mode}}/{{scale}}
+            // Use "default" format so Twitch serves the right asset for static vs animated where applicable.
+            return `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/default/dark/2.0`;
+        }
+
+        function getEmoteMatch(token, channel, msgMeta) {
+            const raw = String(token || '');
+            const name = raw.startsWith('emote:') ? raw.slice('emote:'.length) : raw;
+
+            // 1) Twitch-native emotes (per-message; includes real IDs)
+            const twitchMap = msgMeta && msgMeta.twitchEmotesByName ? msgMeta.twitchEmotesByName : null;
+            if (twitchMap && twitchMap[name]) {
+                return { provider: 'twitch', url: getTwitchEmoteUrlById(twitchMap[name]), alt: name };
+            }
+
+            // 2) Third-party emotes (cached per channel)
+            const map = state.emoteMapsByChannel[channel];
+            if (map && map[name]) {
+                return { provider: map[name].provider, url: map[name].url, alt: name };
+            }
+
+            return null;
+        }
+
+        function renderTokenHtml(token, channel, msgMeta) {
+            if (!token) return '';
+
+            // URLs
+            if (isUrlToken(token)) {
+                const safeUrl = escapeHtml(token);
+                return `<a href="${safeUrl}" target="_blank" rel="noreferrer noopener">${safeUrl}</a>`;
+            }
+
+            // Emotes (either flagged as emote:NAME or raw NAME)
+            const match = getEmoteMatch(token, channel, msgMeta);
+            if (match && match.url) {
+                const safeUrl = escapeHtml(match.url);
+                const safeAlt = escapeHtml(match.alt || '');
+                const safeTitle = escapeHtml(`${match.alt} (${match.provider})`);
+                return `<img class="emote-img" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${safeUrl}" alt="${safeAlt}" title="${safeTitle}">`;
+            }
+
+            // If token was flagged but we don't have a URL, strip the prefix for readability
+            const cleaned = String(token).startsWith('emote:') ? String(token).slice('emote:'.length) : String(token);
+            return escapeHtml(cleaned);
+        }
+
+        function renderMessageHtml(text, channel, msgMeta) {
+            // Split into tokens while preserving whitespace
+            const parts = String(text || '').split(/(\s+)/);
+
+            return parts.map(part => {
+                if (/^\s+$/.test(part)) return part; // keep whitespace as-is
+                return renderTokenHtml(part, channel, msgMeta);
+            }).join('');
+        }
+
+        function getUsernameColor(username) {
+            // Simple hash for consistent colors
+            let hash = 0;
+            for (let i = 0; i < username.length; i++) {
+                hash = username.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+            return '#' + '00000'.substring(0, 6 - c.length) + c;
+        }
+
+        // --- 3P EMOTE FETCHING (Browser) ---
+        async function fetchJson(url, timeoutMs = 10000) {
+            const controller = new AbortController();
+            const t = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const res = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+                if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+                return await res.json();
+            } finally {
+                clearTimeout(t);
+            }
+        }
+
+        function ensureHttps(u) {
+            if (!u) return u;
+            if (u.startsWith('//')) return 'https:' + u;
+            return u;
+        }
+
+        // BTTV
+        async function loadBttvGlobals() {
+            if (state.emoteGlobals.bttv) return state.emoteGlobals.bttv;
+
+            const data = await fetchJson('https://api.betterttv.net/3/cached/emotes/global');
+            const map = {};
+            for (const e of data || []) {
+                if (!e || !e.code || !e.id) continue;
+                // common CDN format (webp is widely used by clients)
+                map[e.code] = { url: `https://cdn.betterttv.net/emote/${e.id}/3x.webp`, provider: 'bttv' };
+            }
+            state.emoteGlobals.bttv = map;
+            return map;
+        }
+
+        async function loadBttvChannel(twitchId) {
+            if (!twitchId) return {};
+            const data = await fetchJson(`https://api.betterttv.net/3/cached/users/twitch/${encodeURIComponent(twitchId)}`);
+
+            const map = {};
+            const channelEmotes = Array.isArray(data?.channelEmotes) ? data.channelEmotes : [];
+            const sharedEmotes = Array.isArray(data?.sharedEmotes) ? data.sharedEmotes : [];
+
+            for (const e of [...channelEmotes, ...sharedEmotes]) {
+                if (!e || !e.code || !e.id) continue;
+                map[e.code] = { url: `https://cdn.betterttv.net/emote/${e.id}/3x.webp`, provider: 'bttv' };
+            }
+            return map;
+        }
+
+        // FFZ
+        function pickFfzUrl(urlsObj) {
+            if (!urlsObj || typeof urlsObj !== 'object') return null;
+            // Prefer highest scale available (4 -> 2 -> 1)
+            const keys = Object.keys(urlsObj).map(k => Number(k)).filter(n => Number.isFinite(n)).sort((a,b) => b-a);
+            for (const k of keys) {
+                const u = urlsObj[String(k)];
+                if (u) return ensureHttps(u);
+            }
+            return null;
+        }
+
+        async function loadFfzGlobals() {
+            if (state.emoteGlobals.ffz) return state.emoteGlobals.ffz;
+
+            const data = await fetchJson('https://api.frankerfacez.com/v1/set/global');
+            const map = {};
+
+            const defaultSets = Array.isArray(data?.default_sets) ? data.default_sets : [];
+            const sets = data?.sets && typeof data.sets === 'object' ? data.sets : {};
+
+            for (const setId of defaultSets) {
+                const set = sets[String(setId)];
+                const emoticons = Array.isArray(set?.emoticons) ? set.emoticons : [];
+                for (const e of emoticons) {
+                    const url = pickFfzUrl(e?.urls);
+                    if (e?.name && url) map[e.name] = { url, provider: 'ffz' };
+                }
+            }
+
+            state.emoteGlobals.ffz = map;
+            return map;
+        }
+
+        async function loadFfzChannel(twitchId) {
+            if (!twitchId) return {};
+            const data = await fetchJson(`https://api.frankerfacez.com/v1/room/id/${encodeURIComponent(twitchId)}`);
+
+            const map = {};
+            const sets = data?.sets && typeof data.sets === 'object' ? data.sets : {};
+            for (const set of Object.values(sets)) {
+                const emoticons = Array.isArray(set?.emoticons) ? set.emoticons : [];
+                for (const e of emoticons) {
+                    const url = pickFfzUrl(e?.urls);
+                    if (e?.name && url) map[e.name] = { url, provider: 'ffz' };
+                }
+            }
+            return map;
+        }
+
+        // 7TV
+        function pick7tvFile(files) {
+            if (!Array.isArray(files) || files.length === 0) return null;
+
+            // Prefer webp, then avif, then anything; and prefer largest scale token in filename.
+            const score = (f) => {
+                const name = String(f?.name || '');
+                const lower = name.toLowerCase();
+
+                const extScore =
+                    lower.endsWith('.webp') ? 30 :
+                    lower.endsWith('.avif') ? 20 :
+                    lower.endsWith('.gif')  ? 10 :
+                    lower.endsWith('.png')  ? 5  : 0;
+
+                const scaleScore =
+                    lower.includes('4x') ? 4 :
+                    lower.includes('3x') ? 3 :
+                    lower.includes('2x') ? 2 :
+                    lower.includes('1x') ? 1 : 0;
+
+                return extScore * 10 + scaleScore;
+            };
+
+            const sorted = [...files].sort((a,b) => score(b) - score(a));
+            return sorted[0] || null;
+        }
+
+        function extract7tvMapFromEmoteSetPayload(payload) {
+            const emotes = Array.isArray(payload?.emotes) ? payload.emotes
+                        : Array.isArray(payload?.data?.emotes) ? payload.data.emotes
+                        : [];
+
+            const map = {};
+            for (const e of emotes) {
+                const name = e?.name ?? e?.data?.name;
+                const host = e?.data?.host ?? e?.host ?? null;
+                const files = host?.files ?? e?.data?.host?.files ?? null;
+
+                if (!name || !host?.url) continue;
+
+                const file = pick7tvFile(files);
+                if (!file?.name) continue;
+
+                const base = host.url.startsWith('http') ? host.url : `https:${host.url}`;
+                const url = `${base}/${file.name}`;
+
+                map[name] = { url, provider: '7tv' };
+            }
+            return map;
+        }
+
+        async function load7tvGlobals() {
+            if (state.emoteGlobals.seventv) return state.emoteGlobals.seventv;
+
+            const data = await fetchJson('https://7tv.io/v3/emote-sets/global');
+            const map = extract7tvMapFromEmoteSetPayload(data);
+
+            state.emoteGlobals.seventv = map;
+            return map;
+        }
+
+        async function load7tvChannel(twitchId) {
+            if (!twitchId) return {};
+
+            const userData = await fetchJson(`https://7tv.io/v3/users/twitch/${encodeURIComponent(twitchId)}`);
+
+            // Sometimes emote_set is embedded; if not, fetch by id
+            const setLike =
+                userData?.emote_set ??
+                userData?.connections?.find(c => c?.platform === 'TWITCH')?.emote_set ??
+                null;
+
+            if (setLike?.emotes) {
+                return extract7tvMapFromEmoteSetPayload(setLike);
+            }
+
+            const setId = setLike?.id ?? userData?.emote_set_id ?? userData?.emote_set?.id ?? null;
+            if (!setId) return {};
+
+            const setPayload = await fetchJson(`https://7tv.io/v3/emote-sets/${encodeURIComponent(setId)}`);
+            return extract7tvMapFromEmoteSetPayload(setPayload);
+        }
+
+        async function ensureEmotesLoaded(channel) {
+            if (state.emoteMapsByChannel[channel]) return state.emoteMapsByChannel[channel];
+            if (state.emoteFetchByChannel[channel]) return state.emoteFetchByChannel[channel];
+
+            state.emoteFetchByChannel[channel] = (async () => {
+                const twitchId = state.channelIds[channel];
+
+                // Load globals once (shared across channels)
+                const [bttvG, ffzG, s7G] = await Promise.all([
+                    loadBttvGlobals().catch(() => ({})),
+                    loadFfzGlobals().catch(() => ({})),
+                    load7tvGlobals().catch(() => ({}))
+                ]);
+
+                // Load channel emotes
+                const [bttvC, ffzC, s7C] = await Promise.all([
+                    loadBttvChannel(twitchId).catch(() => ({})),
+                    loadFfzChannel(twitchId).catch(() => ({})),
+                    load7tvChannel(twitchId).catch(() => ({}))
+                ]);
+
+                // Merge within provider: global then channel (channel wins)
+                const ffz = { ...ffzG, ...ffzC };
+                const bttv = { ...bttvG, ...bttvC };
+                const seventv = { ...s7G, ...s7C };
+
+                // Final precedence across providers: 7TV > BTTV > FFZ
+                const combined = { ...ffz, ...bttv, ...seventv };
+
+                state.emoteMapsByChannel[channel] = combined;
+                return combined;
+            })().finally(() => {
+                delete state.emoteFetchByChannel[channel];
+            });
+
+            return state.emoteFetchByChannel[channel];
+        }
+
+        // Start
+        init();
+    </script>
+</body>
+</html>
