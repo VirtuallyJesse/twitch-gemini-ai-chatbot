@@ -67,7 +67,7 @@ services:
       - key: MODEL_NAME
         value: "gemini-2.5-flash"
       - key: POLLINATIONS_IMAGE_MODEL
-        value: "klein"
+        value: "gptimage"
       - key: POLLINATIONS_VIDEO_MODEL
         value: "seedance"
       - key: POLLINATIONS_TTS_MODEL
