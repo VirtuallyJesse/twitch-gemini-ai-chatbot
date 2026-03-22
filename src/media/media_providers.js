@@ -39,7 +39,7 @@ export class PollinationsClient {
         }
     }
 
-    generateImage(prompt, opts = {}) { return this._requestMedia('image', prompt, { model: opts.model || process.env.POLLINATIONS_IMAGE_MODEL || 'klein', nologo: true, enhance: true }, 120000); }
+    generateImage(prompt, opts = {}) { return this._requestMedia('image', prompt, { model: opts.model || process.env.POLLINATIONS_IMAGE_MODEL || 'gptimage', nologo: true, enhance: true }, 120000); }
     generateVideo(prompt, opts = {}) { return this._requestMedia('video', prompt, { model: opts.model || process.env.POLLINATIONS_VIDEO_MODEL || 'seedance', duration: 5 }, 180000); }
     generateAudio(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_TTS_MODEL || 'elevenlabs', voice: process.env.POLLINATIONS_TTS_VOICE || 'charlotte' }, 120000); }
     generateMusic(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_MUSIC_MODEL || 'elevenmusic', duration: opts.duration || 30 }, 180000); }

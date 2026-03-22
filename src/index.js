@@ -620,7 +620,7 @@ async function initializeTwitchRuntime() {
                 await executeMediaPipeline({
                     channel, user, message, command: musicCommand,
                     service: 'pollinations', mediaType: 'music',
-                    providerCall: (prompt) => pollinationsClient.generateMusic(prompt, { duration: 30 })
+                    providerCall: (prompt) => pollinationsClient.generateMusic(prompt)
                 });
             } else if (ttsCommand) {
                 await executeMediaPipeline({
