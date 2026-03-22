@@ -227,7 +227,12 @@
         function renderGallery() {
             const filtered = state.mediaFilter === 'all' 
                 ? state.mediaData 
-                : state.mediaData.filter(m => m.mediaType === state.mediaFilter);
+                : state.mediaData.filter(m => {
+                    if (state.mediaFilter === 'audio') {
+                        return['audio', 'music', 'tts'].includes(m.mediaType);
+                    }
+                    return m.mediaType === state.mediaFilter;
+                });
 
             const totalPages = Math.max(1, Math.ceil(filtered.length / state.mediaPerPage));
             if (state.mediaPage > totalPages) state.mediaPage = totalPages;
@@ -244,7 +249,9 @@
 
         function prependMedia(item) {
             state.mediaData.unshift(item);
-            if (state.mediaFilter === 'all' || state.mediaFilter === item.mediaType) {
+            if (state.mediaFilter === 'all' || 
+                state.mediaFilter === item.mediaType || 
+                (state.mediaFilter === 'audio' &&['audio', 'music', 'tts'].includes(item.mediaType))) {
                 renderGallery();
             }
         }
@@ -262,7 +269,7 @@
                         <source src="${item.mediaUrl}" type="video/mp4">
                         Your browser does not support the video tag.
                     </video>`;
-            } else if (item.mediaType === 'audio') {
+            } else if (item.mediaType === 'audio' || item.mediaType === 'music' || item.mediaType === 'tts') {
                 mediaContent = `
                     <div class="audio-player">
                         <div class="audio-icon">🎵</div>
