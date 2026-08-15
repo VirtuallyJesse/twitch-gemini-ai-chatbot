@@ -334,7 +334,7 @@ Gemini can natively watch YouTube videos. When you supply a `YOUTUBE_API_KEY`, i
 
 <br>
 
-Yes, for development and testing. Create a `.env` file with the same variable names from `render.yaml`, then run `npm start`.
+Yes, for development and testing. Create a `.env` file with the same variable names from `render.yaml`, then run `start-local-dev.bat`.
 
 > ⚠️ **Use separate credentials for local development.** Create a different Twitch application (with `http://localhost:3000/auth/callback` as the redirect URL) and either omit `UPSTASH_REDIS_URL` or point it to a separate database. Using the same credentials as production will overwrite your live tokens and data.
 
