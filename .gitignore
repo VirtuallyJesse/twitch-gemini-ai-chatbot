@@ -24,6 +24,7 @@ coverage
 
 # nyc test coverage
 .nyc_output
+# Tests are local-only and not shipped to the public repo
 test/
 
 # Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
