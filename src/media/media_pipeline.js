@@ -156,6 +156,7 @@ export class MediaPipeline {
         provider,
         uploader,
         storage,
+        aiEngine,
         aiOperations,
         errorHandler = new ErrorHandler(),
         emotes,
@@ -168,7 +169,7 @@ export class MediaPipeline {
         this.provider = provider;
         this.uploader = uploader;
         this.storage = storage;
-        this.aiOperations = aiOperations;
+        this.aiEngine = aiEngine ?? aiOperations;
         this.errorHandler = errorHandler || new ErrorHandler();
         this.emotes = emotes;
         this.onMediaSaved = onMediaSaved;
@@ -213,7 +214,7 @@ export class MediaPipeline {
                 command
             );
 
-            const result = await this.aiOperations?.make_gemini_call(
+            const result = await this.aiEngine?.generate(
                 `User requested: ${prompt}`,
                 {
                     disableMultimedia: true,

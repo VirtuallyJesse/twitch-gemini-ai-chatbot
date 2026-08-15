@@ -2,16 +2,13 @@ import express from 'express';
 import expressWs from 'express-ws';
 import fs from 'fs';
 import { job } from './utils/keep_alive.js';
-import { AIOperations } from './ai/operations.js';
+import { AIEngine } from './ai/ai_engine.js';
 import { TwitchBot } from './twitch/twitch_bot.js';
 import { EmotePool } from './twitch/emote_pool.js';
-import { ImageDownloader } from './ai/image_downloader.js';
 import { MediaUploader } from './media/media_uploader.js';
 import { MediaPipeline } from './media/media_pipeline.js';
-import UrlHandler from './media/url_handler.js';
 import ErrorHandler from './utils/error_handler.js';
-import SystemInstructionBuilder from './ai/system_instruction_builder.js';
-import { getHelixIds } from './twitch/apiClient.js';
+import { getHelixIds, getChannelInfo } from './twitch/apiClient.js';
 import { PollinationsClient } from './media/media_providers.js';
 import { Storage } from './utils/storage.js';
 import {
@@ -153,26 +150,59 @@ async function sendReply(botInstance, channel, text) {
     chunks.forEach((chunk, i) => setTimeout(() => botInstance.say(channel, chunk), 1000 * i));
 }
 
-const imageDownloader = new ImageDownloader();
-const mediaUploader = new MediaUploader();
-const urlHandler = new UrlHandler();
-const errorHandler = new ErrorHandler();
-const systemInstructionBuilder = new SystemInstructionBuilder(urlHandler);
-const pollinationsClient = new PollinationsClient();
-let mediaPipeline = null;
-
-let bot = null;
-let geminiOps = null;
-let botId = null;
-let channelIdMap = {};
-let twitchRuntimeStarted = false;
-let twitchRuntimePromise = null;
-
 try {
     fileContext = fs.readFileSync('./system_instructions.txt', 'utf8');
 } catch (error) {
     console.error('Error reading system_instructions.txt:', error);
 }
+
+const mediaUploader = new MediaUploader();
+const errorHandler = new ErrorHandler();
+const pollinationsClient = new PollinationsClient();
+const aiEngine = new AIEngine({
+    apiKeys: GEMINI_API_KEY,
+    modelName: MODEL_NAME,
+    fileContext,
+    historyLength: AI_HISTORY_LENGTH,
+    enableSearchGrounding: ENABLE_SEARCH_GROUNDING,
+    youtubeApiKey: YOUTUBE_API_KEY,
+    maxResponseLength: parseInt(process.env.GEMINI_MAX_RESPONSE_LENGTH, 10) || 450,
+    errorHandler,
+    verbose: process.env.AI_VERBOSE === 'true'
+});
+
+const CHAT_CONTEXT_LENGTH = parseInt(process.env.CHAT_CONTEXT_LENGTH, 10) || 10;
+const allCommandNames = [
+    ...commandNames, ...imageCommandNames, ...videoCommandNames,
+    ...ttsCommandNames, ...musicCommandNames
+];
+
+async function buildAiContext(twitchBot, channel) {
+    const clean = channel.replace('#', '').toLowerCase();
+    const broadcasterId = channelIdMap[clean];
+
+    let channelContext = null;
+    if (broadcasterId) {
+        try {
+            channelContext = await getChannelInfo(broadcasterId);
+        } catch (e) {
+            console.error('[Twitch] getChannelInfo failed:', e.message);
+        }
+    }
+
+    const recentLogs = CHAT_CONTEXT_LENGTH > 0
+        ? twitchBot.getRecentMessages(channel, CHAT_CONTEXT_LENGTH, allCommandNames)
+        : [];
+
+    return { channelContext, recentLogs };
+}
+
+let mediaPipeline = null;
+let bot = null;
+let botId = null;
+let channelIdMap = {};
+let twitchRuntimeStarted = false;
+let twitchRuntimePromise = null;
 
 
 
@@ -387,7 +417,8 @@ async function initializeTwitchRuntime() {
                 }
 
                 const prompt = `Message from user ${user.username}: ${textForAi}`;
-                const rawResponse = await geminiOps.make_gemini_call(prompt, { channel });
+                const { channelContext, recentLogs } = await buildAiContext(twitchBot, channel);
+                const rawResponse = await aiEngine.generate(prompt, { channel, channelContext, recentLogs });
                 await sendReply(twitchBot, channel, emotes.decorateReply(channel, rawResponse, { maxLength }));
             }
         });
@@ -401,25 +432,12 @@ async function initializeTwitchRuntime() {
         });
 
         bot = twitchBot;
-        geminiOps = new AIOperations(
-            fileContext,
-            GEMINI_API_KEY,
-            MODEL_NAME,
-            AI_HISTORY_LENGTH,
-            ENABLE_SEARCH_GROUNDING,
-            YOUTUBE_API_KEY,
-            imageDownloader,
-            urlHandler,
-            errorHandler,
-            systemInstructionBuilder,
-            bot
-        );
 
         mediaPipeline = new MediaPipeline({
             provider: pollinationsClient,
             uploader: mediaUploader,
             storage,
-            aiOperations: geminiOps,
+            aiEngine,
             errorHandler,
             emotes,
             onMediaSaved: entry => {
@@ -447,7 +465,6 @@ async function initializeTwitchRuntime() {
         return true;
     })().catch(error => {
         bot = null;
-        geminiOps = null;
         mediaPipeline = null;
         twitchRuntimeStarted = false;
         console.error('[Twitch] Runtime initialization failed:', error);
@@ -598,15 +615,10 @@ app.all('/', (req, res) => {
 });
 
 app.get('/gemini/:text', async (req, res) => {
-    if (!geminiOps) {
-        res.status(503).send('Bot is not ready yet. Complete Twitch authorization first.');
-        return;
-    }
-
     const text = req.params.text;
 
     try {
-        const answer = await geminiOps.make_gemini_call(text);
+        const answer = await aiEngine.generate(text);
         res.send(emotes.decorateReply(null, answer, { appendEmote: false }));
     } catch (error) {
         console.error('Error generating response:', error);

@@ -139,11 +139,6 @@ class ErrorHandler {
             }
         }
 
-        // Block reasons
-        if (blockReason === 'PROHIBITED_CONTENT' || (error && error.message === "Safety block")) {
-            return this.getMessage('CONTENT_BLOCKED');
-        }
-
         // Safety ratings
         if (safetyRatings && safetyRatings.some(r => r.probability === 'HIGH' || r.probability === 'MEDIUM')) {
             console.error('Safety ratings from API:', JSON.stringify(safetyRatings, null, 2));
@@ -156,6 +151,11 @@ class ErrorHandler {
                 }).join(', ');
 
             return this.getMessage('SAFETY_FILTER', { categories: flaggedCategories || 'unspecified content' });
+        }
+
+        // Block reasons
+        if (blockReason === 'PROHIBITED_CONTENT' || (error && error.message === "Safety block")) {
+            return this.getMessage('CONTENT_BLOCKED');
         }
 
         // Permission Denied (Often triggered by restricted/copyrighted YouTube videos)
