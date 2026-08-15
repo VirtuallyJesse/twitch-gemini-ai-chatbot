@@ -12,10 +12,7 @@ export class PollinationsClient {
     }
 
     async _requestMedia(type, prompt, params, timeoutMs, errorType = type) {
-        let baseUrl;
-        if (type === 'image') baseUrl = 'https://enter.pollinations.ai/api/generate/image';
-        else if (type === 'video') baseUrl = `${POLLINATIONS_BASE}/image`; // API peculiarity
-        else baseUrl = `${POLLINATIONS_BASE}/${type}`;
+        const baseUrl = `${POLLINATIONS_BASE}/${type}`;
         
         let mode = `text-to-${type}`;
         const urlMatch = prompt.match(/(https?:\/\/[^\s]+)/);
