@@ -35,7 +35,7 @@ class ErrorHandler {
         }
 
         // Unified Pollinations Error Handling
-        const pollMatch = error && error.message && error.message.match(/Pollinations(?: (Audio|Music|Video|Text))? HTTP (\d+)(?:: (.+))?/);
+        const pollMatch = error && error.message && error.message.match(/Pollinations(?: (Image|Audio|Music|Video|Text))? HTTP (\d+)(?:: (.+))?/i);
         if (pollMatch) {
             const modelType = pollMatch[1] || 'Image';
             const statusCode = parseInt(pollMatch[2], 10);
@@ -75,12 +75,26 @@ class ErrorHandler {
             return this.getMessage('POLLINATIONS_GENERIC_ERROR', { modelType });
         }
 
-        // Video upload failures
-        if (error && error.message && error.message.includes('Video upload failed')) {
+        // Upload failures (Image, Video, Audio)
+        const uploadMatch = error?.message?.match(/^(Image|Video|Audio) upload failed/i);
+        if (uploadMatch) {
+            const prefix = uploadMatch[1].toUpperCase();
             const lowerMessage = error.message.toLowerCase();
-            if (lowerMessage.includes('<none>') || lowerMessage.includes('empty')) return this.getMessage('VIDEO_UPLOAD_EMPTY');
-            if (lowerMessage.includes('timeout')) return this.getMessage('VIDEO_UPLOAD_TIMEOUT');
-            return this.getMessage('VIDEO_UPLOAD_FAILED');
+
+            if (lowerMessage.includes('<none>') || lowerMessage.includes('empty')) {
+                return this.getMessage(`${prefix}_UPLOAD_EMPTY`);
+            }
+            if (lowerMessage.includes('bad gateway') || lowerMessage.includes('502')) {
+                return this.getMessage(`${prefix}_UPLOAD_BAD_GATEWAY`);
+            }
+            if (lowerMessage.includes('service unavailable') || lowerMessage.includes('503')) {
+                return this.getMessage(`${prefix}_UPLOAD_SERVICE_UNAVAILABLE`);
+            }
+            if (lowerMessage.includes('timeout')) {
+                return this.getMessage(`${prefix}_UPLOAD_TIMEOUT`);
+            }
+
+            return this.getMessage(`${prefix}_UPLOAD_FAILED`);
         }
 
         // Video size errors
@@ -112,16 +126,6 @@ class ErrorHandler {
             if (lowerMsg.includes('aborted') || error.name === 'AbortError') {
                 return this.getMessage('REQUEST_ABORTED');
             }
-        }
-
-        // Image upload failures
-        if (error && error.message && error.message.includes('Image upload failed')) {
-            const lowerMessage = error.message.toLowerCase();
-            if (lowerMessage.includes('<none>') || lowerMessage.includes('empty')) return this.getMessage('IMAGE_UPLOAD_EMPTY');
-            if (lowerMessage.includes('bad gateway') || lowerMessage.includes('502')) return this.getMessage('IMAGE_UPLOAD_BAD_GATEWAY');
-            if (lowerMessage.includes('service unavailable') || lowerMessage.includes('503')) return this.getMessage('IMAGE_UPLOAD_SERVICE_UNAVAILABLE');
-            if (lowerMessage.includes('timeout')) return this.getMessage('IMAGE_UPLOAD_TIMEOUT');
-            return this.getMessage('IMAGE_UPLOAD_FAILED');
         }
 
         // Image download/processing errors

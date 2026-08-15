@@ -16,7 +16,7 @@ const C = {
 
 export class AIOperations {
     constructor(file_context, api_key, model_name, history_length, enable_search_grounding, youtube_api_key = null,
-        imageProcessor = null, urlHandler = null, errorHandler = null, systemInstructionBuilder = null, bot = null) {
+        imageDownloader = null, urlHandler = null, errorHandler = null, systemInstructionBuilder = null, bot = null) {
         this.modelName = model_name;
         this.apiKeys = api_key.split(',').map(k => k.trim()).filter(k => k);
         if (this.apiKeys.length === 0) {
@@ -32,7 +32,7 @@ export class AIOperations {
         this.histories = new Map();
 
         // Dependency injection for helper modules
-        this.imageProcessor = imageProcessor;
+        this.imageDownloader = imageDownloader;
         this.urlHandler = urlHandler;
         this.errorHandler = errorHandler;
         this.systemInstructionBuilder = systemInstructionBuilder;
@@ -181,9 +181,9 @@ export class AIOperations {
                 const youtubeMatch = disableMultimedia ? null : text.match(youtubeRegex);
 
                 let imageUrl = null;
-                if (!disableMultimedia && this.imageProcessor) {
+                if (!disableMultimedia && this.imageDownloader) {
                     for (const url of allUrls) {
-                        if (await this.imageProcessor.isImageUrlAsync(url)) {
+                        if (await this.imageDownloader.isImageUrlAsync(url)) {
                             imageUrl = url;
                             break;
                         }
@@ -211,7 +211,7 @@ export class AIOperations {
                 } else if (imageUrl) {
                     try {
                         const textPrompt = text.replace(imageUrl, '').trim();
-                        const imageData = await this.imageProcessor.downloadImageAsBase64(imageUrl);
+                        const imageData = await this.imageDownloader.downloadImageAsBase64(imageUrl);
                         if (imageData) {
                             userParts = [{ text: textPrompt }, { inlineData: { mimeType: imageData.mimeType, data: imageData.data } }];
                         } else {

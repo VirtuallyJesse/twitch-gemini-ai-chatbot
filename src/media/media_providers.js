@@ -1,12 +1,17 @@
 // media_providers.js
 const POLLINATIONS_BASE = 'https://gen.pollinations.ai';
 
+function capitalize(str) {
+    if (!str) return '';
+    return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
 export class PollinationsClient {
     constructor(options = {}) {
         this.apiKey = options.apiKey || process.env.POLLINATIONS_API_KEY;
     }
 
-    async _requestMedia(type, prompt, params, timeoutMs) {
+    async _requestMedia(type, prompt, params, timeoutMs, errorType = type) {
         let baseUrl;
         if (type === 'image') baseUrl = 'https://enter.pollinations.ai/api/generate/image';
         else if (type === 'video') baseUrl = `${POLLINATIONS_BASE}/image`; // API peculiarity
@@ -31,7 +36,9 @@ export class PollinationsClient {
                 headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {},
                 signal: controller.signal
             });
-            if (!res.ok) throw new Error(`Pollinations HTTP ${res.status}: ${await res.text()}`);
+            if (!res.ok) {
+                throw new Error(`Pollinations ${capitalize(errorType)} HTTP ${res.status}: ${await res.text()}`);
+            }
             const buffer = Buffer.from(await res.arrayBuffer());
             return { buffer, mimeType: res.headers.get('content-type') || `${type}/*`, generatedUrl: url, mode };
         } finally {
@@ -39,8 +46,10 @@ export class PollinationsClient {
         }
     }
 
-    generateImage(prompt, opts = {}) { return this._requestMedia('image', prompt, { model: opts.model || process.env.POLLINATIONS_IMAGE_MODEL || 'gptimage', nologo: true, enhance: true }, 120000); }
-    generateVideo(prompt, opts = {}) { return this._requestMedia('video', prompt, { model: opts.model || process.env.POLLINATIONS_VIDEO_MODEL || 'seedance', duration: 5 }, 180000); }
-    generateAudio(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_TTS_MODEL || 'elevenlabs', voice: process.env.POLLINATIONS_TTS_VOICE || 'charlotte' }, 120000); }
-    generateMusic(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_MUSIC_MODEL || 'elevenmusic', duration: opts.duration || 30 }, 180000); }
+    generateImage(prompt, opts = {}) { return this._requestMedia('image', prompt, { model: opts.model || process.env.POLLINATIONS_IMAGE_MODEL || 'gptimage', nologo: true, enhance: true }, 120000, 'Image'); }
+    generateVideo(prompt, opts = {}) { return this._requestMedia('video', prompt, { model: opts.model || process.env.POLLINATIONS_VIDEO_MODEL || 'seedance', duration: 5 }, 180000, 'Video'); }
+    generateAudio(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_TTS_MODEL || 'elevenlabs', voice: process.env.POLLINATIONS_TTS_VOICE || 'charlotte' }, 120000, 'Audio'); }
+    generateMusic(prompt, opts = {}) { return this._requestMedia('audio', prompt, { model: opts.model || process.env.POLLINATIONS_MUSIC_MODEL || 'elevenmusic', duration: opts.duration || 30 }, 180000, 'Music'); }
 }
+
+export default PollinationsClient;
