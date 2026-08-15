@@ -112,7 +112,7 @@ export class AIOperations {
         console.log(`\n   ${color}─── ${title} ───${C.reset}`);
     }
 
-    async make_gemini_call(text, { disableMultimedia = false, overrideFileContext = null, channel = null, ephemeralContext = null, emoteHandler = null } = {}) {
+    async make_gemini_call(text, { disableMultimedia = false, overrideFileContext = null, channel = null, ephemeralContext = null } = {}) {
         let attempt = 0;
         const maxAttempts = this.apiKeys.length;
         const requestStartTime = Date.now();
@@ -121,27 +121,12 @@ export class AIOperations {
             try {
                 const genAI = new GoogleGenAI({ apiKey: this.apiKeys[this.currentKeyIndex] });
 
-                let filteredText = text;
-                let emotesWereProcessed = false;
-
-                if (emoteHandler) {
-                    filteredText = emoteHandler.processEmotesForLogs(text);
-                    emotesWereProcessed = filteredText.includes('emote:');
-                }
-
                 // ═══════════════════════════════════════════════════════════════
                 // REQUEST LOGGING
                 // ═══════════════════════════════════════════════════════════════
                 this.logHeader('GEMINI REQUEST');
                 console.log(`   ${C.dim}Model:${C.reset} ${this.modelName} ${C.dim}│ Grounding:${C.reset} ${this.enable_search_grounding}`);
-
-                // Show input - only show filtered separately if there was a change
-                if (emotesWereProcessed) {
-                    console.log(`   ${C.dim}Original:${C.reset} ${text}`);
-                    console.log(`   ${C.dim}Filtered:${C.reset} ${filteredText}`);
-                } else {
-                    console.log(`   ${C.dim}Input:${C.reset} ${text}`);
-                }
+                console.log(`   ${C.dim}Input:${C.reset} ${text}`);
 
                 this.check_history_length(channel);
 
@@ -168,8 +153,8 @@ export class AIOperations {
 
                         const rawLogs = this.bot.getRecentMessages(channel, logLength, allCommandNames);
 
-                        if (rawLogs.length > 0 && emoteHandler) {
-                            twitchLogs = rawLogs.map(log => emoteHandler.processEmotesForLogs(log));
+                        if (rawLogs.length > 0) {
+                            twitchLogs = rawLogs;
 
                             // Consolidated Twitch context logging
                             this.logSubsection('Twitch Context');
@@ -186,14 +171,14 @@ export class AIOperations {
                 // Build system instruction
                 const systemInstruction = this.systemInstructionBuilder ?
                     await this.systemInstructionBuilder.buildSystemInstruction(
-                        this.file_context, ephemeralContext, overrideFileContext, filteredText, this.youtube_api_key, twitchLogs, channelContext
+                        this.file_context, ephemeralContext, overrideFileContext, text, this.youtube_api_key, twitchLogs, channelContext
                     ) : '';
 
                 // Parse URLs once for both multimedia handling and tool selection
                 const youtubeRegex = /(https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)[\w-]+|https?:\/\/youtu\.be\/[\w-]+)/;
                 const urlRegex = /(https?:\/\/[^\s]+)/g;
-                const allUrls = disableMultimedia ? [] : (filteredText.match(urlRegex) || []);
-                const youtubeMatch = disableMultimedia ? null : filteredText.match(youtubeRegex);
+                const allUrls = disableMultimedia ? [] : (text.match(urlRegex) || []);
+                const youtubeMatch = disableMultimedia ? null : text.match(youtubeRegex);
 
                 let imageUrl = null;
                 if (!disableMultimedia && this.imageProcessor) {
@@ -207,10 +192,10 @@ export class AIOperations {
 
                 let userParts = [];
                 if (disableMultimedia) {
-                    userParts = [{ text: filteredText }];
+                    userParts = [{ text }];
                 } else if (youtubeMatch) {
                     const rawUrl = youtubeMatch[0];
-                    const textPrompt = filteredText.replace(rawUrl, '').trim();
+                    const textPrompt = text.replace(rawUrl, '').trim();
                     
                     let normalizedUrl = rawUrl;
                     if (this.urlHandler) {
@@ -225,19 +210,19 @@ export class AIOperations {
                     userParts = [{ text: textPrompt }, { fileData: { fileUri: normalizedUrl } }];
                 } else if (imageUrl) {
                     try {
-                        const textPrompt = filteredText.replace(imageUrl, '').trim();
+                        const textPrompt = text.replace(imageUrl, '').trim();
                         const imageData = await this.imageProcessor.downloadImageAsBase64(imageUrl);
                         if (imageData) {
                             userParts = [{ text: textPrompt }, { inlineData: { mimeType: imageData.mimeType, data: imageData.data } }];
                         } else {
-                            userParts = [{ text: filteredText }];
+                            userParts = [{ text }];
                         }
                     } catch (imageError) {
                         const errorMessage = this.errorHandler.getMessage('IMAGE_LOAD_ERROR_INLINE', { message: imageError.message });
-                        userParts = [{ text: `${filteredText}\n\n${errorMessage}` }];
+                        userParts = [{ text: `${text}\n\n${errorMessage}` }];
                     }
                 } else {
-                    userParts = [{ text: filteredText }];
+                    userParts = [{ text }];
                 }
 
                 const history = this.getHistory(channel);
@@ -501,16 +486,6 @@ export class AIOperations {
                     return p;
                 });
                 history.push({ role: "model", parts: sanitizedModelParts });
-
-                // Sanitize the final response to remove "emote:" prefixes and add proper spacing
-                if (emoteHandler) {
-                    agent_response = emoteHandler.processResponse(
-                        agent_response,
-                        false, // isImageGen
-                        emotesWereProcessed || agent_response.includes('emote:')
-                    );
-                }
-
                 return agent_response;
 
             } catch (error) {

@@ -4,7 +4,7 @@ import fs from 'fs';
 import { job } from './utils/keep_alive.js';
 import { AIOperations } from './ai/operations.js';
 import { TwitchBot } from './twitch/twitch_bot.js';
-import EmoteHandler from './twitch/emote_handler.js';
+import { EmotePool } from './twitch/emote_pool.js';
 import MediaProcessor from './media/media_processor.js';
 import UrlHandler from './media/url_handler.js';
 import ErrorHandler from './utils/error_handler.js';
@@ -18,14 +18,6 @@ import {
     exchangeCodeForTokens,
     isAuthorized
 } from './twitch/tokenManager.js';
-import {
-    fetchSevenTvChannelEmotesForTwitchIds,
-    fetchSevenTvGlobalEmotes,
-    fetchBttvChannelEmotesForTwitchIds,
-    fetchBttvGlobalEmotes,
-    fetchFfzChannelEmotesForTwitchIds,
-    fetchFfzGlobalEmotes
-} from './twitch/emote_providers.js';
 
 job.start();
 
@@ -74,20 +66,7 @@ const COOLDOWN_DURATION = process.env.COOLDOWN_DURATION !== undefined ? parseInt
 const ENABLE_SEARCH_GROUNDING = process.env.ENABLE_SEARCH_GROUNDING || 'true';
 const IGNORED_USERNAMES = process.env.IGNORED_USERNAMES || '';
 const ignoredUsernames = IGNORED_USERNAMES.split(',').map(user => user.trim().toLowerCase()).filter(Boolean);
-const ENABLE_EMOTE_APPENDING = process.env.ENABLE_EMOTE_APPENDING || 'true';
-const EMOTE_APPEND_EXCLUDE_PREFIXES = process.env.EMOTE_APPEND_EXCLUDE_PREFIXES || '';
 
-const ENABLE_7TV_EMOTES = process.env.ENABLE_7TV_EMOTES || 'true';
-const ENABLE_BTTV_EMOTES = process.env.ENABLE_BTTV_EMOTES || 'true';
-const ENABLE_FFZ_EMOTES = process.env.ENABLE_FFZ_EMOTES || 'false';
-
-const INCLUDE_7TV_GLOBAL_EMOTES = process.env.INCLUDE_7TV_GLOBAL_EMOTES || 'false';
-const INCLUDE_BTTV_GLOBAL_EMOTES = process.env.INCLUDE_BTTV_GLOBAL_EMOTES || 'false';
-const INCLUDE_FFZ_GLOBAL_EMOTES = process.env.INCLUDE_FFZ_GLOBAL_EMOTES || 'false';
-
-const EMOTE_FETCH_TIMEOUT_MS = process.env.EMOTE_FETCH_TIMEOUT_MS !== undefined
-    ? parseInt(process.env.EMOTE_FETCH_TIMEOUT_MS, 10)
-    : 10000;
 
 if (!GEMINI_API_KEY) {
     console.error('No GEMINI_API_KEY found. Please set it as an environment variable.');
@@ -165,80 +144,16 @@ function userHasCustomCommandRole(user, requiredRole) {
 
 const customCommands = loadCustomCommands();
 
-const excludedPrefixes = EMOTE_APPEND_EXCLUDE_PREFIXES.split(',')
-    .map(prefix => prefix.trim().toLowerCase())
-    .filter(prefix => prefix.length > 0);
+const emotes = new EmotePool();
 
-const channelEmotesForFiltering = new Map();
-const channelEmotesForAppending = new Map();
-const channelEmotePools = new Map();
-const channelEmoteHandlers = new Map();
-
-const EMOTE_PLATFORMS = ['7tv', 'bttv', 'ffz'];
-
-const cleanEmoteList = (list) =>
-    [...new Set((list || [])
-        .filter(e => typeof e === 'string')
-        .map(e => e.trim())
-        .filter(Boolean)
-    )].sort((a, b) => a.localeCompare(b));
-
-function normalizeEmoteData(raw) {
-    const out = Object.fromEntries(EMOTE_PLATFORMS.map(k => [k, []]));
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-    for (const k of EMOTE_PLATFORMS) out[k] = cleanEmoteList(raw[k]);
-    return out;
-}
-
-function rebuildEmotePoolForChannel(channelKey) {
-    const appending = channelEmotesForAppending.get(channelKey);
-    const pool = new Set();
-    for (const k of EMOTE_PLATFORMS) {
-        for (const e of (appending?.[k] || [])) pool.add(e);
+async function sendReply(botInstance, channel, text) {
+    if (!text) return;
+    if (text.length <= maxLength) {
+        await botInstance.say(channel, text);
+        return;
     }
-    channelEmotePools.set(channelKey, [...pool]);
-    console.log(`[Emotes] Random append pool rebuilt for ${channelKey}: ${channelEmotePools.get(channelKey).length} emotes`);
-}
-
-function normalizeChannelKey(channel) {
-    const clean = channel.replace('#', '').toLowerCase();
-    return `#${clean}`;
-}
-
-const fallbackEmoteHandler = new EmoteHandler();
-
-function getEmoteHandler(channel) {
-    if (!channel) return fallbackEmoteHandler;
-    return channelEmoteHandlers.get(normalizeChannelKey(channel)) || fallbackEmoteHandler;
-}
-
-function shouldExcludeEmoteAppending(response) {
-    if (excludedPrefixes.length === 0) {
-        return false;
-    }
-
-    const lowerResponse = response.toLowerCase();
-    return excludedPrefixes.some(prefix => lowerResponse.startsWith(prefix));
-}
-
-function getRandomEmote(channel) {
-    if (ENABLE_EMOTE_APPENDING !== 'true') {
-        return '';
-    }
-
-    try {
-        const key = channel ? normalizeChannelKey(channel) : null;
-        const pool = key ? channelEmotePools.get(key) : null;
-
-        if (!pool || pool.length === 0) {
-            return '';
-        }
-
-        return pool[Math.floor(Math.random() * pool.length)];
-    } catch (error) {
-        console.error('Error selecting a random emote:', error);
-        return '';
-    }
+    const chunks = text.match(new RegExp(`.{1,${maxLength}}`, 'g')) || [];
+    chunks.forEach((chunk, i) => setTimeout(() => botInstance.say(channel, chunk), 1000 * i));
 }
 
 const mediaInstructionsTemplate = `ATTENTION: this is NOT a request to generate {media_type} — the {media_type} was already generated by the system.
@@ -285,93 +200,7 @@ const errorHandler = new ErrorHandler();
 const systemInstructionBuilder = new SystemInstructionBuilder(urlHandler);
 const pollinationsClient = new PollinationsClient();
 
-async function initializeEmotes() {
-    const twitchIds = [...new Set(Object.values(channelIdMap || {}).filter(Boolean))];
-    const timeoutOpts = { timeoutMs: EMOTE_FETCH_TIMEOUT_MS };
 
-    const providers = [
-        {
-            key: '7tv',
-            name: '7TV',
-            enabled: ENABLE_7TV_EMOTES === 'true',
-            includeGlobals: INCLUDE_7TV_GLOBAL_EMOTES === 'true',
-            fetchChannel: fetchSevenTvChannelEmotesForTwitchIds,
-            fetchGlobal: fetchSevenTvGlobalEmotes
-        },
-        {
-            key: 'bttv',
-            name: 'BTTV',
-            enabled: ENABLE_BTTV_EMOTES === 'true',
-            includeGlobals: INCLUDE_BTTV_GLOBAL_EMOTES === 'true',
-            fetchChannel: fetchBttvChannelEmotesForTwitchIds,
-            fetchGlobal: fetchBttvGlobalEmotes
-        },
-        {
-            key: 'ffz',
-            name: 'FFZ',
-            enabled: ENABLE_FFZ_EMOTES === 'true',
-            includeGlobals: INCLUDE_FFZ_GLOBAL_EMOTES === 'true',
-            fetchChannel: fetchFfzChannelEmotesForTwitchIds,
-            fetchGlobal: fetchFfzGlobalEmotes
-        }
-    ];
-
-    const globalEmotes = Object.fromEntries(EMOTE_PLATFORMS.map(k => [k, []]));
-    const channelEmotesByProvider = Object.fromEntries(EMOTE_PLATFORMS.map(k => [k, new Map()]));
-
-    for (const p of providers) {
-        if (!p.enabled) {
-            console.log(`[Emotes] ${p.name} disabled.`);
-            continue;
-        }
-
-        try {
-            const perIdMap = (await p.fetchChannel(twitchIds, timeoutOpts)) || new Map();
-            channelEmotesByProvider[p.key] = perIdMap;
-
-            if (p.includeGlobals) {
-                globalEmotes[p.key] = (await p.fetchGlobal(timeoutOpts)) || [];
-            }
-
-            const totalChannel = [...perIdMap.values()].reduce((s, a) => s + a.length, 0);
-            console.log(`[Emotes] ${p.name} loaded: channel=${totalChannel} (across ${perIdMap.size} channels), global=${globalEmotes[p.key].length}`);
-        } catch (error) {
-            console.error(`[Emotes] ${p.name} fetch failed:`, error.message || error);
-        }
-    }
-
-    for (const ch of channels) {
-        const cleanName = ch.replace('#', '').toLowerCase();
-        const twitchId = channelIdMap[cleanName];
-        const channelKey = `#${cleanName}`;
-
-        const filtering = Object.fromEntries(EMOTE_PLATFORMS.map(k => [k, []]));
-        const appending = Object.fromEntries(EMOTE_PLATFORMS.map(k => [k, []]));
-
-        for (const k of EMOTE_PLATFORMS) {
-            const channelSpecific = (twitchId && channelEmotesByProvider[k]?.get(twitchId)) || [];
-            const global = globalEmotes[k] || [];
-            const combined = cleanEmoteList([...channelSpecific, ...global]);
-            filtering[k] = combined;
-            appending[k] = combined;
-        }
-
-        const normalizedFiltering = normalizeEmoteData(filtering);
-        const normalizedAppending = normalizeEmoteData(appending);
-
-        channelEmotesForFiltering.set(channelKey, normalizedFiltering);
-        channelEmotesForAppending.set(channelKey, normalizedAppending);
-
-        const handler = new EmoteHandler();
-        handler.setEmoteData(normalizedFiltering);
-        channelEmoteHandlers.set(channelKey, handler);
-
-        rebuildEmotePoolForChannel(channelKey);
-
-        const total = Object.values(normalizedFiltering).reduce((sum, arr) => sum + arr.length, 0);
-        console.log(`[Emotes] ${channelKey}: ${total} emotes loaded`);
-    }
-}
 
 function getRequestOrigin(req) {
     return `${req.protocol}://${req.get('host')}`;
@@ -502,8 +331,7 @@ async function executeMediaPipeline({
         const rawResponse = await geminiOps.make_gemini_call(userPrompt, {
             disableMultimedia: true,
             channel,
-            ephemeralContext,
-            emoteHandler: getEmoteHandler(channel)
+            ephemeralContext
         });
 
         let finalResponse = rawResponse || '';
@@ -518,23 +346,7 @@ async function executeMediaPipeline({
             finalResponse = errorHandler.getMessage('MEDIA_FALLBACK_RESPONSE', { mediaType, username, url: finalMediaUrl });
         }
 
-        let responseWithEmote = finalResponse;
-
-        if (ENABLE_EMOTE_APPENDING === 'true' && !shouldExcludeEmoteAppending(finalResponse)) {
-            const emote = getRandomEmote(channel);
-            responseWithEmote = emote ? `${finalResponse} ${emote}` : finalResponse;
-        }
-
-        if (responseWithEmote.length > maxLength) {
-            const messages = responseWithEmote.match(new RegExp(`.{1,${maxLength}}`, 'g'));
-            for (const [index, msg] of messages.entries()) {
-                setTimeout(() => {
-                    bot.say(channel, msg);
-                }, 1000 * index);
-            }
-        } else {
-            await bot.say(channel, responseWithEmote);
-        }
+        await sendReply(bot, channel, emotes.decorateReply(channel, finalResponse, { maxLength }));
     } catch (error) {
         console.error(`${service} ${mediaType} generation error:`, error);
         await bot.say(channel, errorHandler.createErrorResponse(error));
@@ -568,9 +380,7 @@ async function initializeTwitchRuntime() {
         };
 
         twitchBot.onMessage(async (channel, user, message, self) => {
-            if (self || (user && user.username && user.username.toLowerCase() === TWITCH_USERNAME.toLowerCase())) {
-                return;
-            }
+            if (self || (user && user.username && user.username.toLowerCase() === TWITCH_USERNAME.toLowerCase())) return;
 
             const username = (user && (user['display-name'] || user.username || user.name)) || '';
             const loginName = (user && user.username) ? user.username.toLowerCase() : '';
@@ -579,13 +389,19 @@ async function initializeTwitchRuntime() {
                 return;
             }
 
-            const handler = getEmoteHandler(channel);
-            const messageForLogs = handler.processIncomingChatMessageForLogs(message, user, message);
-            const twitchEmotesByName = handler.extractTwitchEmoteIdNameMap(message, user);
+            const lower = message.toLowerCase();
+            const imageCommand = imageCommandNames.find(cmd => lower.startsWith(cmd));
+            const videoCommand = videoCommandNames.find(cmd => lower.startsWith(cmd));
+            const ttsCommand = ttsCommandNames.find(cmd => lower.startsWith(cmd));
+            const musicCommand = musicCommandNames.find(cmd => lower.startsWith(cmd));
+            const command = commandNames.find(cmd => lower.startsWith(cmd));
 
-            twitchBot.addMessageToBuffer(channel, username, messageForLogs, {
-                twitchEmotesByName
+            // One pass: log text, AI text, web emote metadata, emote-only verdict.
+            const { textForAi, textForLogs, emoteIdMap, isEmoteOnly } = emotes.ingestMessage({
+                channel, text: message, tags: user, prefix: command || ''
             });
+
+            twitchBot.addMessageToBuffer(channel, username, textForLogs, { twitchEmotesByName: emoteIdMap });
 
             const messageLower = message.trim().toLowerCase();
             const customCommandKey = [...customCommands.keys()].find(cmd =>
@@ -609,12 +425,6 @@ async function initializeTwitchRuntime() {
 
             const currentTime = Date.now();
             const elapsedTime = (currentTime - lastResponseTime) / 1000;
-
-            const imageCommand = imageCommandNames.find(cmd => message.toLowerCase().startsWith(cmd));
-            const videoCommand = videoCommandNames.find(cmd => message.toLowerCase().startsWith(cmd));
-            const ttsCommand = ttsCommandNames.find(cmd => message.toLowerCase().startsWith(cmd));
-            const musicCommand = musicCommandNames.find(cmd => message.toLowerCase().startsWith(cmd));
-            const command = commandNames.find(cmd => message.toLowerCase().startsWith(cmd));
 
             if (musicCommand) {
                 await executeMediaPipeline({
@@ -641,6 +451,11 @@ async function initializeTwitchRuntime() {
                     providerCall: (prompt) => pollinationsClient.generateImage(prompt)
                 });
             } else if (command) {
+                if (isEmoteOnly) {
+                    console.log(`Command ${command} ignored: emote-only message`);
+                    return;
+                }
+
                 if (COOLDOWN_DURATION > 0) {
                     if (elapsedTime < COOLDOWN_DURATION) {
                         const remainingTime = (COOLDOWN_DURATION - elapsedTime).toFixed(1);
@@ -650,40 +465,9 @@ async function initializeTwitchRuntime() {
                     lastResponseTime = currentTime;
                 }
 
-                let text = message.slice(command.length).replace(/^,\s*/, '').trim();
-
-                const twitchEmoteNames = handler.extractTwitchEmoteNames(message, user);
-                text = handler.flagTwitchEmotesInText(text, twitchEmoteNames);
-
-                const processedUserText = handler.processEmotesForLogs(text);
-                const emoteOnlyRegex = /^(?:\s*emote:\S+\s*)+$/;
-                if (emoteOnlyRegex.test(processedUserText.trim())) {
-                    console.log(`Command ${command} ignored: emote-only message`);
-                    return;
-                }
-
-                text = `Message from user ${user.username}: ${text}`;
-
-                const rawResponse = await geminiOps.make_gemini_call(text, { channel, emoteHandler: handler });
-                const response = handler.sanitizeResponse(rawResponse);
-
-                let responseWithEmote = response;
-
-                if (ENABLE_EMOTE_APPENDING === 'true' && !shouldExcludeEmoteAppending(response)) {
-                    const emote = getRandomEmote(channel);
-                    responseWithEmote = emote ? `${response} ${emote}` : response;
-                }
-
-                if (responseWithEmote.length > maxLength) {
-                    const messages = responseWithEmote.match(new RegExp(`.{1,${maxLength}}`, 'g'));
-                    for (const [index, msg] of messages.entries()) {
-                        setTimeout(() => {
-                            twitchBot.say(channel, msg);
-                        }, 1000 * index);
-                    }
-                } else {
-                    await twitchBot.say(channel, responseWithEmote);
-                }
+                const prompt = `Message from user ${user.username}: ${textForAi}`;
+                const rawResponse = await geminiOps.make_gemini_call(prompt, { channel });
+                await sendReply(twitchBot, channel, emotes.decorateReply(channel, rawResponse, { maxLength }));
             }
         });
 
@@ -711,7 +495,7 @@ async function initializeTwitchRuntime() {
         );
 
         try {
-            await initializeEmotes();
+            await emotes.seed(channels, channelIdMap);
             console.log('Emote initialization completed');
         } catch (error) {
             console.error('Failed to initialize emotes:', error);
@@ -889,7 +673,7 @@ app.get('/gemini/:text', async (req, res) => {
 
     try {
         const answer = await geminiOps.make_gemini_call(text);
-        res.send(answer);
+        res.send(emotes.decorateReply(null, answer, { appendEmote: false }));
     } catch (error) {
         console.error('Error generating response:', error);
         res.status(500).send('An error occurred while generating the response.');
