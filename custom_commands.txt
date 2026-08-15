@@ -33,7 +33,7 @@
 #   - Command names are case-insensitive (!Hello and !hello are the same)
 #   - Responses are sent exactly as written (plaintext only, no variables)
 #   - If duplicate command names exist, the last one wins
-#   - Custom commands are checked BEFORE built-in commands
+#   - Custom commands take priority and override built-in env commands (e.g., !gemini, !image)
 #   - The global cooldown (COOLDOWN_DURATION) applies to custom commands
 #   - If a user lacks the required role, the command is silently ignored
 #
