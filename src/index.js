@@ -41,7 +41,7 @@ app.set('view engine', 'ejs');
 const AI_HISTORY_LENGTH = process.env.AI_HISTORY_LENGTH || 5;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
-const MODEL_NAME = process.env.MODEL_NAME || 'gemini-2.5-flash';
+const MODEL_NAME = process.env.MODEL_NAME || 'gemini-3.7-flash';
 const IMAGE_COMMAND_NAME = process.env.IMAGE_COMMAND_NAME || '!image';
 const VIDEO_COMMAND_NAME = process.env.VIDEO_COMMAND_NAME || '!video';
 const TTS_COMMAND_NAME = process.env.TTS_COMMAND_NAME || '!tts';
@@ -50,7 +50,8 @@ const TWITCH_USERNAME = process.env.TWITCH_USERNAME || '';
 const BOT_COMMAND_NAME = process.env.BOT_COMMAND_NAME || '!gemini';
 const JOIN_CHANNELS = process.env.JOIN_CHANNELS || '';
 const COOLDOWN_DURATION = process.env.COOLDOWN_DURATION !== undefined ? parseInt(process.env.COOLDOWN_DURATION, 10) : 1;
-const ENABLE_SEARCH_GROUNDING = process.env.ENABLE_SEARCH_GROUNDING || 'true';
+const ENABLE_SEARCH_GROUNDING = process.env.ENABLE_SEARCH_GROUNDING || 'false';
+const THINKING_LEVEL = process.env.THINKING_LEVEL || 'medium';
 const IGNORED_USERNAMES = process.env.IGNORED_USERNAMES || '';
 const ignoredUsernames = IGNORED_USERNAMES.split(',').map(user => user.trim().toLowerCase()).filter(Boolean);
 
@@ -83,6 +84,7 @@ const aiEngine = new AIEngine({
     fileContext,
     historyLength: AI_HISTORY_LENGTH,
     enableSearchGrounding: ENABLE_SEARCH_GROUNDING,
+    thinkingLevel: THINKING_LEVEL,
     youtubeApiKey: YOUTUBE_API_KEY,
     maxResponseLength: parseInt(process.env.GEMINI_MAX_RESPONSE_LENGTH, 10) || 450,
     errorHandler,

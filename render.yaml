@@ -63,9 +63,11 @@ services:
       - key: COOLDOWN_DURATION
         value: "1"
       - key: ENABLE_SEARCH_GROUNDING
-        value: "true"
+        value: "false"
       - key: MODEL_NAME
-        value: "gemini-2.5-flash"
+        value: "gemini-3.7-flash"
+      - key: THINKING_LEVEL
+        value: "medium"
       - key: POLLINATIONS_IMAGE_MODEL
         value: "gptimage"
       - key: POLLINATIONS_VIDEO_MODEL

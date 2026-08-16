@@ -254,22 +254,15 @@ On the free tier, each API key under a project at [`console.cloud.google.com`](h
 </details>
 
 <details>
-<summary><strong>Why does this use Gemini 2.5 Flash?</strong></summary>
+<summary><strong>Does the bot search the web?</strong></summary>
 
 <br>
 
-Only Gemini 2.5 and Gemini 3.0 are available on the free tier, both offering ~20 calls per day per key. However, Gemini 2.5 Flash is currently the only model that supports free grounded Google searching.
+Not automatically. Free-tier Gemini keys don't support search grounding, so it's off by default.
 
-If you don't need search grounding — or you're using a paid key — you can change `MODEL_NAME` to `gemini-3-flash-preview` and set `ENABLE_SEARCH_GROUNDING` to `false`.
+It can still read pages directly — paste a link in chat and Gemini will pull in that page's content via URL context, no search required.
 
-</details>
-
-<details>
-<summary><strong>How do I get the bot to use Google search more often?</strong></summary>
-
-<br>
-
-Gemini decides when to use its search tool automatically based on the user's prompt and the system instructions. If the bot isn't searching often enough, tell it to do so in your `system_instructions.txt`.
+> A free dedicated search feature may be added down the line — no ETA yet.
 
 </details>
 

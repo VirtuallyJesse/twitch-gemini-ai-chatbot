@@ -2,7 +2,8 @@ import { GoogleGenAI } from '@google/genai';
 import ErrorHandler from '../utils/error_handler.js';
 import { ImageDownloader } from './image_downloader.js';
 
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_MODEL = 'gemini-3.7-flash';
+const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
 
 const YT_ID_RE = /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
 const YT_URL_RE = /(https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)[\w-]+|https?:\/\/youtu\.be\/[\w-]+)/;
@@ -30,7 +31,8 @@ export class AIEngine {
         modelName = DEFAULT_MODEL,
         fileContext = 'You are a helpful Twitch Chatbot.',
         historyLength = 5,
-        enableSearchGrounding = 'true',
+        enableSearchGrounding = false,
+        thinkingLevel = 'medium',
         youtubeApiKey = null,
         maxResponseLength = 450,
         errorHandler = new ErrorHandler(),
@@ -49,6 +51,8 @@ export class AIEngine {
         this.fileContext = fileContext;
         this.historyLength = parseInt(historyLength, 10) || 5;
         this.enableSearchGrounding = String(enableSearchGrounding) === 'true' || enableSearchGrounding === true;
+        const level = String(thinkingLevel || 'medium').toLowerCase();
+        this.thinkingLevel = ALLOWED_THINKING_LEVELS.has(level) ? level : 'medium';
         this.youtubeApiKey = youtubeApiKey;
         this.maxResponseLength = parseInt(maxResponseLength, 10) || 450;
         this.errorHandler = errorHandler;
@@ -126,7 +130,7 @@ export class AIEngine {
     /**
      * Compiles the full system instruction string including date, channel context, logs, and YouTube snippets.
      */
-    async #compileSystemInstruction({ prompt, channelContext, recentLogs, ephemeralContext, overrideFileContext }) {
+    async #compileSystemInstruction({ prompt, channelContext, recentLogs, ephemeralContext, overrideFileContext, tools }) {
         const timeString = new Date().toLocaleString('en-US', {
             timeZone: 'UTC',
             weekday: 'long',
@@ -159,6 +163,10 @@ export class AIEngine {
             if (meta) {
                 out += `\n\nYouTube Video Context:\nVideo Title: ${meta.title}\nVideo Description: ${meta.description}\nChannel Name: ${meta.channelName}`;
             }
+        }
+
+        if (!tools || tools.length === 0) {
+            out += '\n\nDo not attempt to browse URLs, search the web, or invoke external tools (including fetch_web_page). Answer directly from internal knowledge and the context already provided.';
         }
 
         return out;
@@ -218,75 +226,53 @@ export class AIEngine {
     }
 
     /**
-     * Selects appropriate grounding tools or determines if REST url_context should be called.
+     * Picks SDK grounding tools for this turn.
+     * Webpage URLs → urlContext. Search flag → googleSearch.
+     * Multimodal data (images/YouTube) can combine with googleSearch when search is on.
      */
     #selectTools({ allUrls, youtubeMatch, imageUrl, disableMultimedia }) {
-        if (!this.enableSearchGrounding || disableMultimedia) {
-            return { tools: [], useRest: false };
+        if (disableMultimedia) return undefined;
+
+        const tools = [];
+        const hasWebpageUrls = allUrls.some(url => url !== imageUrl && !YT_URL_RE.test(url));
+        if (hasWebpageUrls) {
+            tools.push({ urlContext: {} });
         }
-        if (allUrls.length > 0 && !youtubeMatch && !imageUrl) {
-            return { tools: [], useRest: true };
+        if (this.enableSearchGrounding) {
+            tools.push({ googleSearch: {} });
         }
-        if (!imageUrl && !youtubeMatch) {
-            return { tools: [{ googleSearch: {} }], useRest: false };
-        }
-        return { tools: [], useRest: false };
+        return tools.length > 0 ? tools : undefined;
     }
 
     /**
-     * Directly calls Google Generative Language REST endpoint with url_context grounding.
+     * Executes generation call via the Google GenAI SDK.
      */
-    async #callRestUrlContext({ contents, systemInstruction, generationConfig, safetySettings }) {
-        const key = this.apiKeys[this.currentKeyIndex];
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.modelName)}:generateContent?key=${key}`;
-        const res = await this.fetchImpl(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents,
-                systemInstruction: { parts: [{ text: systemInstruction }] },
-                tools: [{ url_context: {} }],
-                generationConfig,
-                safetySettings
-            })
-        });
-        if (!res.ok) {
-            const err = new Error(`HTTP ${res.status}: ${await res.text()}`);
-            err.status = res.status;
-            throw err;
-        }
-        return res.json();
-    }
-
-    /**
-     * Dispatches generation call to either REST url_context endpoint or Google GenAI SDK.
-     */
-    async #executeModelCall({ contents, systemInstruction, generationConfig, safetySettings, tools, useRest }) {
-        if (useRest) {
-            return await this.#callRestUrlContext({
-                contents,
-                systemInstruction,
-                generationConfig,
-                safetySettings
-            });
-        }
-
+    async #executeModelCall({ contents, systemInstruction, safetySettings, tools }) {
         const client = this.#clientFor(this.apiKeys[this.currentKeyIndex]);
-        const config = {
-            generationConfig,
-            safetySettings,
-            tools: tools?.length > 0 ? tools : undefined,
-            thinkingConfig: {
-                thinkingBudget: 24576,
-                includeThoughts: true
-            },
-            systemInstruction
-        };
         return await client.models.generateContent({
             model: this.modelName,
             contents,
-            config
+            config: {
+                maxOutputTokens: 8192,
+                thinkingConfig: {
+                    thinkingLevel: this.thinkingLevel,
+                    includeThoughts: true
+                },
+                tools,
+                systemInstruction,
+                safetySettings
+            }
         });
+    }
+
+    #extractCandidateContent(result) {
+        const candidate = result.candidates?.[0];
+        const rawParts = candidate?.content?.parts || [];
+        const thoughtParts = rawParts.filter(p => p.thought === true);
+        const textParts = rawParts.filter(
+            p => !p.thought && typeof p.text === 'string' && p.text.trim().length > 0
+        );
+        return { candidate, thoughtParts, textParts };
     }
 
     #getKeyErrorReason(error) {
@@ -337,7 +323,7 @@ export class AIEngine {
         started
     }) {
         this.#logHeader('GEMINI REQUEST');
-        console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.enableSearchGrounding}`);
+        console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.enableSearchGrounding} ${COLORS.dim}│ Thinking:${COLORS.reset} ${this.thinkingLevel}`);
         console.log(`   ${COLORS.dim}Input:${COLORS.reset} ${prompt}`);
 
         if (channelContext || recentLogs?.length) {
@@ -355,26 +341,20 @@ export class AIEngine {
             }
         }
 
+        const { userParts, allUrls, youtubeMatch, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
+        const tools = this.#selectTools({ allUrls, youtubeMatch, imageUrl, disableMultimedia });
+
         const systemInstruction = await this.#compileSystemInstruction({
             prompt,
             channelContext,
             recentLogs,
             ephemeralContext,
-            overrideFileContext
+            overrideFileContext,
+            tools
         });
-
-        const { userParts, allUrls, youtubeMatch, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
-        const { tools, useRest } = this.#selectTools({ allUrls, youtubeMatch, imageUrl, disableMultimedia });
 
         const history = this.getHistory(channel);
         const contents = [...history, { role: 'user', parts: userParts }];
-
-        const generationConfig = {
-            maxOutputTokens: 8192,
-            temperature: 0.9,
-            topK: 40,
-            topP: 0.95,
-        };
 
         const safetySettings = [
             { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -383,19 +363,15 @@ export class AIEngine {
             { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
         ];
 
-        if (useRest) {
-            console.log(`   ${COLORS.dim}Tools:${COLORS.reset} urlContext (REST)`);
-        } else if (tools.length > 0) {
-            console.log(`   ${COLORS.dim}Tools:${COLORS.reset} googleSearch`);
+        if (tools?.length) {
+            console.log(`   ${COLORS.dim}Tools:${COLORS.reset} ${tools.map(t => Object.keys(t)[0]).join(', ')}`);
         }
 
         let result = await this.#executeModelCall({
             contents,
             systemInstruction,
-            generationConfig,
             safetySettings,
-            tools,
-            useRest
+            tools
         });
 
         this.#logSection('GEMINI RESPONSE');
@@ -419,19 +395,17 @@ export class AIEngine {
         }
 
         // Extract thoughts and text parts
-        const rawParts = result.candidates?.[0]?.content?.parts || [];
-        const thoughtParts = rawParts.filter(p => p.thought === true);
-        let parts = rawParts.filter(p => !p.thought);
+        const { candidate, thoughtParts, textParts } = this.#extractCandidateContent(result);
 
         if (thoughtParts.length > 0) {
             this.#logSubsection('Thinking', COLORS.magenta);
             thoughtParts.forEach(p => {
-                const lines = (p.text || '').split('\n');
+                const lines = String(p.text || '').split('\n');
                 lines.forEach(line => console.log(`   ${COLORS.magenta}${line}${COLORS.reset}`));
             });
         }
 
-        if (parts.length === 0) {
+        if (textParts.length === 0) {
             if (thoughtParts.length > 0) {
                 console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Model returned thoughts but no final response`);
             }
@@ -441,7 +415,7 @@ export class AIEngine {
             return errMsg;
         }
 
-        let agentResponse = parts[parts.length - 1].text || "";
+        let agentResponse = textParts[textParts.length - 1].text;
 
         // Length retry loop
         let retries = 0;
@@ -462,17 +436,13 @@ export class AIEngine {
                 const retryResult = await this.#executeModelCall({
                     contents: retryContents,
                     systemInstruction,
-                    generationConfig,
                     safetySettings,
-                    tools,
-                    useRest
+                    tools
                 });
-                const retryRawParts = retryResult.candidates?.[0]?.content?.parts || [];
-                const retryParts = retryRawParts.filter(p => !p.thought);
-                const retryText = retryParts[retryParts.length - 1]?.text || '';
+                const retryExtracted = this.#extractCandidateContent(retryResult);
+                const retryText = retryExtracted.textParts[retryExtracted.textParts.length - 1]?.text || '';
                 if (retryText.trim()) {
                     agentResponse = retryText;
-                    parts = [{ text: agentResponse }];
                 }
             } catch (retryError) {
                 console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Length retry #${retries} failed (${this.#getKeyErrorReason(retryError)}), using existing response`);
@@ -482,14 +452,6 @@ export class AIEngine {
 
         if (retries === 3 && agentResponse.length > this.maxResponseLength) {
             console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Max retries reached, response may exceed limit`);
-        }
-
-        const finalAgentTextPart = parts[parts.length - 1]?.text;
-        if (typeof finalAgentTextPart === 'string') {
-            agentResponse = finalAgentTextPart;
-        } else {
-            console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Final part not text, joining all text parts`);
-            agentResponse = parts.filter(p => p.text).map(p => p.text).join(' ');
         }
 
         if (!agentResponse || !agentResponse.trim()) {
@@ -502,7 +464,18 @@ export class AIEngine {
         this.#logSubsection('Text Response', COLORS.green);
         console.log(`   ${COLORS.green}${agentResponse}${COLORS.reset}`);
 
-        const groundingMetadata = result.candidates?.[0]?.groundingMetadata;
+        const urlMeta = candidate?.urlContextMetadata || candidate?.url_context_metadata;
+        if (urlMeta) {
+            this.#logSubsection('URL Context', COLORS.green);
+            const entries = urlMeta.urlMetadata || urlMeta.url_metadata || [];
+            entries.forEach(entry => {
+                const url = entry.retrievedUrl || entry.retrieved_url || '';
+                const status = entry.urlRetrievalStatus || entry.url_retrieval_status || '';
+                console.log(`   ${COLORS.dim}│${COLORS.reset} ${url} ${COLORS.dim}${status}${COLORS.reset}`);
+            });
+        }
+
+        const groundingMetadata = candidate?.groundingMetadata;
         if (groundingMetadata && (groundingMetadata.webSearchQueries?.length > 0 || groundingMetadata.groundingChunks?.length > 0)) {
             this.#logSubsection('Grounding', COLORS.blue);
 
@@ -531,13 +504,6 @@ export class AIEngine {
             }
         }
 
-        const candidate = result.candidates?.[0];
-        if (candidate?.urlContextMetadata || candidate?.url_context_metadata) {
-            console.log(`   ${COLORS.green}✓${COLORS.reset} URL Context was used`);
-        } else if (useRest) {
-            console.log(`   ${COLORS.yellow}⚠${COLORS.reset} URL Context was NOT used despite being configured`);
-        }
-
         if (result.usageMetadata) {
             const usage = result.usageMetadata;
             this.#logSubsection('Usage');
@@ -562,13 +528,7 @@ export class AIEngine {
 
         if (!ephemeralContext) {
             history.push({ role: "user", parts: userParts });
-            const sanitizedModelParts = parts.map(p => {
-                if (p.inlineData) {
-                    return { text: "[image output]" };
-                }
-                return p;
-            });
-            history.push({ role: "model", parts: sanitizedModelParts });
+            history.push({ role: "model", parts: [{ text: agentResponse }] });
         }
 
         return agentResponse;
