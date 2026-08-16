@@ -289,8 +289,17 @@ export class AIEngine {
         });
     }
 
-    #isRateLimitError(error) {
-        return error?.status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate limit/i.test(error?.message || '');
+    #getKeyErrorReason(error) {
+        if (error?.status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate limit/i.test(error?.message || '')) {
+            return 'Rate limit';
+        }
+        if (error?.status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(error?.message || '')) {
+            return 'High demand (503)';
+        }
+        if (error?.status) {
+            return `HTTP ${error.status}`;
+        }
+        return error?.message ? error.message.slice(0, 40) : 'Error';
     }
 
     #logHeader(title) {
@@ -330,8 +339,6 @@ export class AIEngine {
         this.#logHeader('GEMINI REQUEST');
         console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.enableSearchGrounding}`);
         console.log(`   ${COLORS.dim}Input:${COLORS.reset} ${prompt}`);
-
-        this.#checkHistoryLength(channel);
 
         if (channelContext || recentLogs?.length) {
             this.#logSubsection('Twitch Context');
@@ -451,20 +458,25 @@ export class AIEngine {
                 { role: 'user', parts: [{ text: this.errorHandler.getMessage('SYSTEM_RESPONSE_TOO_LONG', { maxLength: currentMax }) }] }
             ];
 
-            const retryResult = await this.#executeModelCall({
-                contents: retryContents,
-                systemInstruction,
-                generationConfig,
-                safetySettings,
-                tools,
-                useRest
-            });
-            const retryRawParts = retryResult.candidates?.[0]?.content?.parts || [];
-            const retryParts = retryRawParts.filter(p => !p.thought);
-            const retryText = retryParts[retryParts.length - 1]?.text || '';
-            if (retryText.trim()) {
-                agentResponse = retryText;
-                parts = [{ text: agentResponse }];
+            try {
+                const retryResult = await this.#executeModelCall({
+                    contents: retryContents,
+                    systemInstruction,
+                    generationConfig,
+                    safetySettings,
+                    tools,
+                    useRest
+                });
+                const retryRawParts = retryResult.candidates?.[0]?.content?.parts || [];
+                const retryParts = retryRawParts.filter(p => !p.thought);
+                const retryText = retryParts[retryParts.length - 1]?.text || '';
+                if (retryText.trim()) {
+                    agentResponse = retryText;
+                    parts = [{ text: agentResponse }];
+                }
+            } catch (retryError) {
+                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Length retry #${retries} failed (${this.#getKeyErrorReason(retryError)}), using existing response`);
+                break;
             }
         }
 
@@ -578,6 +590,9 @@ export class AIEngine {
     } = {}) {
         const started = Date.now();
         let attempt = 0;
+        let lastError = null;
+
+        this.#checkHistoryLength(channel);
 
         while (attempt < this.apiKeys.length) {
             try {
@@ -591,22 +606,21 @@ export class AIEngine {
                     started
                 });
             } catch (error) {
-                if (!this.#isRateLimitError(error)) {
-                    this.#logSubsection('ERROR', COLORS.red);
-                    console.log(`   ${COLORS.red}${error.message || error}${COLORS.reset}`);
-                    this.#logFooter();
-                    return this.errorHandler.createErrorResponse(error);
-                }
-                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Rate limit on key #${this.currentKeyIndex}, switching...`);
+                lastError = error;
+                const reason = this.#getKeyErrorReason(error);
+                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} ${reason} on key #${this.currentKeyIndex}, switching...`);
+                this.#logFooter();
                 this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
                 attempt++;
             }
         }
 
-        this.#logFooter();
-        return this.errorHandler.createErrorResponse(
-            new Error('All API keys exhausted due to rate limits')
-        );
+        const isRateLimit = !lastError || lastError?.status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate limit/i.test(lastError?.message || '');
+        const finalError = isRateLimit
+            ? new Error('All API keys exhausted due to rate limits')
+            : lastError;
+
+        return this.errorHandler.createErrorResponse(finalError);
     }
 }
 
