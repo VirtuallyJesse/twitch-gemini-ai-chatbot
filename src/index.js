@@ -14,7 +14,11 @@ import { ChatRouter } from './twitch/chat_router.js';
 
 job.start();
 
-const storage = new Storage();
+const storage = new Storage({
+    redisUrl: process.env.UPSTASH_REDIS_URL,
+    restUrl: process.env.UPSTASH_REDIS_REST_URL,
+    restToken: process.env.UPSTASH_REDIS_REST_TOKEN
+});
 
 const app = express();
 const wsInstance = expressWs(app);

@@ -1,46 +1,171 @@
-// Lightweight Storage wrapper for Upstash Redis REST API
-// Uses native fetch (Node 18+) to avoid adding heavy dependencies
-export class Storage {
-    constructor() {
-        this.restUrl = null;
-        this.token = null;
-        this.configured = false;
+// src/utils/storage.js
+//
+// Deep Storage module with dual adapters: UpstashRedisAdapter (REST pipelining)
+// and MemoryStorageAdapter (full-fidelity in-memory store).
+// All configuration crosses the constructor; this module reads zero process.env variables.
 
-        // 1. Try generic Redis connection string (from Render/User request)
-        if (process.env.UPSTASH_REDIS_URL) {
-            try {
-                // Parse redis://default:token@host:port
-                const url = new URL(process.env.UPSTASH_REDIS_URL);
-                this.restUrl = `https://${url.hostname}`;
-                this.token = url.password;
-                this.configured = true;
-            } catch (e) {
-                console.error('[Storage] Failed to parse UPSTASH_REDIS_URL:', e.message);
-            }
-        }
-        
-        // 2. Override with explicit REST credentials if provided (Advanced)
-        if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-            this.restUrl = process.env.UPSTASH_REDIS_REST_URL;
-            this.token = process.env.UPSTASH_REDIS_REST_TOKEN;
-            this.configured = true;
-        }
+const DEFAULT_MAX_CHAT_ENTRIES = 1000;
+const DEFAULT_MAX_MEDIA_ENTRIES = 500;
+const DEFAULT_CHAT_READ_LIMIT = 200;
+const TOKENS_KEY = 'twitch:tokens';
+const MEDIA_KEY = 'media_log';
 
-        if (this.configured) {
-            console.log(`[Storage] Connected to ${this.restUrl}`);
-        } else {
-            console.warn('[Storage] No Redis credentials found. Persistence disabled (Memory only).');
-            // Fallbacks for memory-only mode
-            this.memChat = {};
-            this.memMedia = [];
+function normalizeChannel(channel) {
+    return String(channel || '').replace(/^#/, '').toLowerCase();
+}
+
+function chatKey(channel) {
+    return `chat:${normalizeChannel(channel)}`;
+}
+
+function safeJsonParse(value) {
+    if (value == null) return null;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+}
+
+function parseStoredList(items) {
+    if (!Array.isArray(items)) return [];
+    return items.map(safeJsonParse).filter(Boolean);
+}
+
+function normalizeTokenPayload(accessTokenOrPayload, refreshToken, expiration) {
+    if (accessTokenOrPayload && typeof accessTokenOrPayload === 'object') {
+        return {
+            accessToken: accessTokenOrPayload.accessToken,
+            refreshToken: accessTokenOrPayload.refreshToken,
+            expiration: accessTokenOrPayload.expiration
+        };
+    }
+    return {
+        accessToken: accessTokenOrPayload,
+        refreshToken,
+        expiration
+    };
+}
+
+function resolveRedisConnection({ redisUrl, restUrl, restToken } = {}) {
+    let resolvedUrl = null;
+    let resolvedToken = null;
+
+    if (redisUrl) {
+        try {
+            const parsed = new URL(redisUrl);
+            resolvedUrl = `https://${parsed.hostname}`;
+            resolvedToken = parsed.password || null;
+        } catch (error) {
+            console.error('[Storage] Failed to parse redisUrl:', error.message);
         }
     }
 
-    // Helper to send requests
-    async request(endpoint, payload) {
-        if (!this.configured) return null;
+    if (restUrl && restToken) {
+        resolvedUrl = restUrl;
+        resolvedToken = restToken;
+    }
+
+    if (resolvedUrl && resolvedToken) {
+        return { restUrl: resolvedUrl, restToken: resolvedToken };
+    }
+    return null;
+}
+
+export class MemoryStorageAdapter {
+    constructor({
+        maxChatEntries = DEFAULT_MAX_CHAT_ENTRIES,
+        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES
+    } = {}) {
+        this.maxChatEntries = maxChatEntries;
+        this.maxMediaEntries = maxMediaEntries;
+        this.chat = new Map();
+        this.media = [];
+        this.tokens = null;
+        this.configured = false;
+        this.isPersistent = false;
+    }
+
+    async addChatMessage(channel, entry) {
         try {
-            const res = await fetch(`${this.restUrl}${endpoint}`, {
+            const key = normalizeChannel(channel);
+            const list = this.chat.get(key) || [];
+            list.push(entry);
+            if (list.length > this.maxChatEntries) list.shift();
+            this.chat.set(key, list);
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+        }
+    }
+
+    async getChatLog(channel, limit = DEFAULT_CHAT_READ_LIMIT) {
+        try {
+            const list = this.chat.get(normalizeChannel(channel)) || [];
+            return list.slice(-limit);
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return [];
+        }
+    }
+
+    async addMediaEntry(entry) {
+        try {
+            this.media.push(entry);
+            if (this.media.length > this.maxMediaEntries) this.media.shift();
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+        }
+    }
+
+    async getMediaLog(limit = DEFAULT_MAX_MEDIA_ENTRIES) {
+        try {
+            return [...this.media].reverse().slice(0, limit);
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return [];
+        }
+    }
+
+    async setTokens(accessTokenOrPayload, refreshToken, expiration) {
+        try {
+            this.tokens = normalizeTokenPayload(accessTokenOrPayload, refreshToken, expiration);
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+        }
+    }
+
+    async getTokens() {
+        try {
+            return this.tokens ? { ...this.tokens } : null;
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return null;
+        }
+    }
+}
+
+export class UpstashRedisAdapter {
+    constructor({
+        redisUrl,
+        restUrl,
+        restToken,
+        fetchImpl,
+        maxChatEntries = DEFAULT_MAX_CHAT_ENTRIES,
+        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES
+    } = {}) {
+        const connection = resolveRedisConnection({ redisUrl, restUrl, restToken });
+        this.restUrl = connection?.restUrl || restUrl || null;
+        this.token = connection?.restToken || restToken || null;
+        this.fetchImpl = fetchImpl || globalThis.fetch;
+        this.maxChatEntries = maxChatEntries;
+        this.maxMediaEntries = maxMediaEntries;
+        this.configured = true;
+        this.isPersistent = true;
+    }
+
+    async request(endpoint, payload) {
+        try {
+            const res = await this.fetchImpl(`${this.restUrl}${endpoint}`, {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${this.token}`,
@@ -48,7 +173,7 @@ export class Storage {
                 },
                 body: JSON.stringify(payload)
             });
-            
+
             if (!res.ok) {
                 const txt = await res.text();
                 throw new Error(`Upstash ${res.status}: ${txt}`);
@@ -60,113 +185,119 @@ export class Storage {
         }
     }
 
-    /**
-     * Adds a chat message to the channel's log.
-     * Trims list to 1000 items automatically.
-     */
     async addChatMessage(channel, entry) {
-        if (!this.configured) {
-            if (!this.memChat[channel]) this.memChat[channel] = [];
-            this.memChat[channel].push(entry);
-            if (this.memChat[channel].length > 200) this.memChat[channel].shift();
-            return;
-        }
-
-        const key = `chat:${channel.replace('#', '').toLowerCase()}`;
-        const value = JSON.stringify(entry);
-
-        // Use Pipeline: Push + Trim in one go
-        await this.request('/pipeline', [
-            ['RPUSH', key, value],
-            ['LTRIM', key, -1000, -1] // Keep last 1000
-        ]);
-    }
-
-    /**
-     * Gets chat logs for a channel.
-     */
-    async getChatLog(channel, limit = 200) {
-        if (!this.configured) {
-            return (this.memChat[channel] || []).slice(-limit);
-        }
-
-        const key = `chat:${channel.replace('#', '').toLowerCase()}`;
-        const data = await this.request('/', ['LRANGE', key, -limit, -1]);
-        
-        if (!data || !data.result) return [];
-        
-        return data.result.map(item => {
-            try { return JSON.parse(item); } catch { return null; }
-        }).filter(Boolean);
-    }
-
-    /**
-     * Adds a generated media entry (Image/Video/Song).
-     * Trims list to 500 items automatically.
-     */
-    async addMediaEntry(entry) {
-        if (!this.configured) {
-            this.memMedia.push(entry);
-            if (this.memMedia.length > 500) this.memMedia.shift();
-            return;
-        }
-
-        const key = 'media_log';
-        const value = JSON.stringify(entry);
-
-        await this.request('/pipeline', [
-            ['RPUSH', key, value],
-            ['LTRIM', key, -500, -1] // Keep last 500
-        ]);
-    }
-
-    /**
-     * Gets the media gallery.
-     */
-    async getMediaLog(limit = 500) {
-        if (!this.configured) {
-            return [...this.memMedia].reverse(); // newest first
-        }
-
-        const data = await this.request('/', ['LRANGE', 'media_log', -limit, -1]);
-
-        if (!data || !data.result) return [];
-
-        // Redis stores oldest->newest. We usually want newest first for the UI.
-        const parsed = data.result.map(item => {
-            try { return JSON.parse(item); } catch { return null; }
-        }).filter(Boolean);
-
-        return parsed.reverse();
-    }
-
-    /**
-     * Persists OAuth tokens to Redis for survival across restarts.
-     * @param {string} accessToken
-     * @param {string} refreshToken
-     * @param {number} expiration - Timestamp in ms when the access token expires.
-     */
-    async setTokens(accessToken, refreshToken, expiration) {
-        if (!this.configured) return;
-
-        const value = JSON.stringify({ accessToken, refreshToken, expiration });
-        await this.request('/', ['SET', 'twitch:tokens', value]);
-    }
-
-    /**
-     * Loads OAuth tokens from Redis.
-     * @returns {Promise<{accessToken: string, refreshToken: string, expiration: number}|null>}
-     */
-    async getTokens() {
-        if (!this.configured) return null;
-
-        const data = await this.request('/', ['GET', 'twitch:tokens']);
-        if (!data?.result) return null;
-
         try {
-            return JSON.parse(data.result);
-        } catch {
+            const key = chatKey(channel);
+            await this.request('/pipeline', [
+                ['RPUSH', key, JSON.stringify(entry)],
+                ['LTRIM', key, -this.maxChatEntries, -1]
+            ]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
+    async getChatLog(channel, limit = DEFAULT_CHAT_READ_LIMIT) {
+        try {
+            const data = await this.request('/', ['LRANGE', chatKey(channel), -limit, -1]);
+            return parseStoredList(data?.result);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return [];
+        }
+    }
+
+    async addMediaEntry(entry) {
+        try {
+            await this.request('/pipeline', [
+                ['RPUSH', MEDIA_KEY, JSON.stringify(entry)],
+                ['LTRIM', MEDIA_KEY, -this.maxMediaEntries, -1]
+            ]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
+    async getMediaLog(limit = DEFAULT_MAX_MEDIA_ENTRIES) {
+        try {
+            const data = await this.request('/', ['LRANGE', MEDIA_KEY, -limit, -1]);
+            return parseStoredList(data?.result).reverse();
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return [];
+        }
+    }
+
+    async setTokens(accessTokenOrPayload, refreshToken, expiration) {
+        try {
+            const value = JSON.stringify(
+                normalizeTokenPayload(accessTokenOrPayload, refreshToken, expiration)
+            );
+            await this.request('/', ['SET', TOKENS_KEY, value]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
+    async getTokens() {
+        try {
+            const data = await this.request('/', ['GET', TOKENS_KEY]);
+            if (!data?.result) return null;
+            return safeJsonParse(data.result);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
             return null;
         }
+    }
+}
+
+export class Storage {
+    constructor(config = {}) {
+        const connection = resolveRedisConnection(config);
+        const shared = {
+            fetchImpl: config.fetchImpl,
+            maxChatEntries: config.maxChatEntries,
+            maxMediaEntries: config.maxMediaEntries
+        };
+
+        if (connection) {
+            this.adapter = new UpstashRedisAdapter({ ...connection, ...shared });
+            console.log(`[Storage] Connected to ${connection.restUrl}`);
+        } else {
+            this.adapter = new MemoryStorageAdapter(shared);
+            console.warn('[Storage] No Redis credentials found. Persistence disabled (Memory only).');
+        }
+    }
+
+    get configured() {
+        return this.adapter.configured;
+    }
+
+    get isPersistent() {
+        return this.adapter.isPersistent;
+    }
+
+    addChatMessage(channel, entry) {
+        return this.adapter.addChatMessage(channel, entry);
+    }
+
+    getChatLog(channel, limit) {
+        return this.adapter.getChatLog(channel, limit);
+    }
+
+    addMediaEntry(entry) {
+        return this.adapter.addMediaEntry(entry);
+    }
+
+    getMediaLog(limit) {
+        return this.adapter.getMediaLog(limit);
+    }
+
+    setTokens(accessTokenOrPayload, refreshToken, expiration) {
+        return this.adapter.setTokens(accessTokenOrPayload, refreshToken, expiration);
+    }
+
+    getTokens() {
+        return this.adapter.getTokens();
     }
 }
