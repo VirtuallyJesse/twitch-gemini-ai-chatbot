@@ -419,7 +419,7 @@ export class AIEngine {
 
         if (textParts.length === 0) {
             if (thoughtParts.length > 0) {
-                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Model returned thoughts but no final response`);
+                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Model returned thoughts but no final response`);
             }
             const errMsg = this.errorHandler.getMessage('GEMINI_EMPTY_RESPONSE');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
@@ -436,7 +436,7 @@ export class AIEngine {
         while (agentResponse.length > this.maxResponseLength && retries < 3) {
             retries++;
             currentMax -= 50;
-            console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Response too long (${agentResponse.length} chars), retry #${retries}`);
+            console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Response too long (${agentResponse.length} chars), retry #${retries}`);
 
             const retryContents = [
                 ...history,
@@ -459,13 +459,13 @@ export class AIEngine {
                     latestSuccessfulParts = this.#buildCandidatePartsForMemory(retryExtracted.rawParts, retryTextPart);
                 }
             } catch (retryError) {
-                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Length retry #${retries} failed (${this.#getKeyErrorReason(retryError)}), using existing response`);
+                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Length retry #${retries} failed (${this.#getKeyErrorReason(retryError)}), using existing response`);
                 break;
             }
         }
 
         if (retries === 3 && agentResponse.length > this.maxResponseLength) {
-            console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Max retries reached, response may exceed limit`);
+            console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Max retries reached, response may exceed limit`);
         }
 
         if (!agentResponse || !agentResponse.trim()) {
@@ -580,7 +580,7 @@ export class AIEngine {
             } catch (error) {
                 lastError = error;
                 const reason = this.#getKeyErrorReason(error);
-                console.log(`   ${COLORS.yellow}⚠${COLORS.reset} ${reason} on key #${this.currentKeyIndex}, switching...`);
+                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} ${reason} on key #${this.currentKeyIndex}, switching...`);
                 this.#logFooter();
                 this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
                 attempt++;
