@@ -1,2 +1,3 @@
-import 'dotenv/config';
-import './src/index.js';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
+await import('./src/index.js');
