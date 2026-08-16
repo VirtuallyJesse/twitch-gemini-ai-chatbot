@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import ErrorHandler from '../utils/error_handler.js';
 import { ImageDownloader } from './image_downloader.js';
+import { ToolDispatcher } from './tool_dispatcher.js';
 
 const DEFAULT_MODEL = 'gemini-3.7-flash';
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
@@ -25,6 +26,7 @@ const COLORS = {
 export class AIEngine {
     #imageDownloader;
     #clientFor;
+    #toolDispatcher;
 
     constructor({
         apiKeys,
@@ -32,6 +34,10 @@ export class AIEngine {
         fileContext = 'You are a helpful Twitch Chatbot.',
         historyLength = 5,
         enableSearchGrounding = false,
+        searchGrounding = null,
+        searchProvider = null,
+        tools = [],
+        toolTimeoutMs = 3500,
         thinkingLevel = 'medium',
         youtubeApiKey = null,
         maxResponseLength = 450,
@@ -50,7 +56,15 @@ export class AIEngine {
         this.modelName = modelName;
         this.fileContext = fileContext;
         this.historyLength = parseInt(historyLength, 10) || 5;
-        this.enableSearchGrounding = String(enableSearchGrounding) === 'true' || enableSearchGrounding === true;
+
+        this.searchGrounding = ToolDispatcher.resolveSearchMode({
+            searchGrounding,
+            enableSearchGrounding,
+            searchProvider
+        });
+        this.enableSearchGrounding = this.searchGrounding === 'google';
+        this.searchProvider = this.searchGrounding === 'custom' ? searchProvider : null;
+
         const level = String(thinkingLevel || 'medium').toLowerCase();
         this.thinkingLevel = ALLOWED_THINKING_LEVELS.has(level) ? level : 'medium';
         this.youtubeApiKey = youtubeApiKey;
@@ -69,6 +83,14 @@ export class AIEngine {
             : genAIClient
                 ? () => genAIClient
                 : (apiKey) => new GoogleGenAI({ apiKey });
+
+        this.#toolDispatcher = new ToolDispatcher({
+            tools,
+            searchProvider: this.searchProvider,
+            searchMode: this.searchGrounding,
+            fetchImpl,
+            defaultTimeoutMs: toolTimeoutMs
+        });
     }
 
     /**
@@ -166,7 +188,7 @@ export class AIEngine {
         }
 
         if (!tools || tools.length === 0) {
-            out += '\n\nDo not attempt to browse URLs, search the web, or invoke external tools (including fetch_web_page). Answer directly from internal knowledge and the context already provided.';
+            out += '\n\nDo not attempt to browse URLs, search the web, or invoke external tools. Answer directly from internal knowledge and the context already provided.';
         }
 
         return out;
@@ -226,22 +248,11 @@ export class AIEngine {
     }
 
     /**
-     * Picks SDK grounding tools for this turn.
-     * Webpage URLs → urlContext. Search flag → googleSearch.
-     * Multimodal data (images/YouTube) can combine with googleSearch when search is on.
+     * Picks SDK grounding tools and custom tool declarations for this turn.
      */
-    #selectTools({ allUrls, youtubeMatch, imageUrl, disableMultimedia }) {
-        if (disableMultimedia) return undefined;
-
-        const tools = [];
+    #selectTools({ allUrls, imageUrl, disableMultimedia }) {
         const hasWebpageUrls = allUrls.some(url => url !== imageUrl && !YT_URL_RE.test(url));
-        if (hasWebpageUrls) {
-            tools.push({ urlContext: {} });
-        }
-        if (this.enableSearchGrounding) {
-            tools.push({ googleSearch: {} });
-        }
-        return tools.length > 0 ? tools : undefined;
+        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia });
     }
 
     /**
@@ -266,7 +277,7 @@ export class AIEngine {
     }
 
     #extractCandidateContent(result) {
-        const candidate = result.candidates?.[0];
+        const candidate = result?.candidates?.[0];
         const rawParts = candidate?.content?.parts || [];
         const thoughtParts = rawParts.filter(p => p.thought === true);
         const textParts = rawParts.filter(
@@ -274,6 +285,25 @@ export class AIEngine {
         );
         const winningTextPart = textParts[textParts.length - 1] || null;
         return { candidate, thoughtParts, textParts, winningTextPart, rawParts };
+    }
+
+    #logTurnParts(result) {
+        const { thoughtParts, rawParts } = this.#extractCandidateContent(result);
+        if (thoughtParts.length > 0) {
+            this.#logSubsection('Thinking', COLORS.magenta);
+            thoughtParts.forEach(p => {
+                const lines = String(p.text || '').split('\n');
+                lines.forEach(line => console.log(`   ${COLORS.magenta}${line}${COLORS.reset}`));
+            });
+        }
+        const calls = rawParts.filter(p => p.functionCall || p.function_call);
+        if (calls.length > 0) {
+            this.#logSubsection('Function Calls', COLORS.yellow);
+            calls.forEach(p => {
+                const fc = p.functionCall || p.function_call;
+                console.log(`   ${COLORS.dim}│${COLORS.reset} ${fc.name}(${JSON.stringify(fc.args ?? {})})`);
+            });
+        }
     }
 
     /**
@@ -335,7 +365,7 @@ export class AIEngine {
         started
     }) {
         this.#logHeader('GEMINI REQUEST');
-        console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.enableSearchGrounding} ${COLORS.dim}│ Thinking:${COLORS.reset} ${this.thinkingLevel}`);
+        console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.searchGrounding} ${COLORS.dim}│ Thinking:${COLORS.reset} ${this.thinkingLevel}`);
         console.log(`   ${COLORS.dim}Input:${COLORS.reset} ${prompt}`);
 
         if (channelContext || recentLogs?.length) {
@@ -353,8 +383,8 @@ export class AIEngine {
             }
         }
 
-        const { userParts, allUrls, youtubeMatch, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
-        const tools = this.#selectTools({ allUrls, youtubeMatch, imageUrl, disableMultimedia });
+        const { userParts, allUrls, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
+        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia });
 
         const systemInstruction = await this.#compileSystemInstruction({
             prompt,
@@ -376,15 +406,28 @@ export class AIEngine {
         ];
 
         if (tools?.length) {
-            console.log(`   ${COLORS.dim}Tools:${COLORS.reset} ${tools.map(t => Object.keys(t)[0]).join(', ')}`);
+            const names = tools.flatMap(t => t.functionDeclarations
+                ? t.functionDeclarations.map(d => d.name)
+                : Object.keys(t));
+            console.log(`   ${COLORS.dim}Tools:${COLORS.reset} ${names.join(', ')}`);
         }
 
-        let result = await this.#executeModelCall({
+        const loop = await this.#toolDispatcher.executeTurnLoop({
             contents,
-            systemInstruction,
-            safetySettings,
-            tools
+            tools,
+            context: { channel, channelContext },
+            invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
+                const turnResult = await this.#executeModelCall({
+                    contents: turnContents,
+                    systemInstruction,
+                    safetySettings,
+                    tools: turnTools
+                });
+                this.#logTurnParts(turnResult);
+                return turnResult;
+            }
         });
+        let result = loop.result;
 
         this.#logSection('GEMINI RESPONSE');
 
@@ -408,14 +451,6 @@ export class AIEngine {
 
         // Extract thoughts and text parts
         const { candidate, thoughtParts, textParts, winningTextPart, rawParts } = this.#extractCandidateContent(result);
-
-        if (thoughtParts.length > 0) {
-            this.#logSubsection('Thinking', COLORS.magenta);
-            thoughtParts.forEach(p => {
-                const lines = String(p.text || '').split('\n');
-                lines.forEach(line => console.log(`   ${COLORS.magenta}${line}${COLORS.reset}`));
-            });
-        }
 
         if (textParts.length === 0) {
             if (thoughtParts.length > 0) {
@@ -450,7 +485,7 @@ export class AIEngine {
                     contents: retryContents,
                     systemInstruction,
                     safetySettings,
-                    tools
+                    tools: this.#toolDispatcher.withoutFunctionDeclarations(tools)
                 });
                 const retryExtracted = this.#extractCandidateContent(retryResult);
                 const retryTextPart = retryExtracted.winningTextPart;
