@@ -10,6 +10,7 @@ import ErrorHandler from './utils/error_handler.js';
 import { PollinationsClient } from './media/media_providers.js';
 import { Storage } from './utils/storage.js';
 import { TwitchTransport } from './twitch/twitch_transport.js';
+import { ChatRouter } from './twitch/chat_router.js';
 
 job.start();
 
@@ -63,72 +64,7 @@ const videoCommandNames = VIDEO_COMMAND_NAME.split(',').map(cmd => cmd.trim().to
 const ttsCommandNames = TTS_COMMAND_NAME.split(',').map(cmd => cmd.trim().toLowerCase());
 const musicCommandNames = MUSIC_COMMAND_NAME.split(',').map(cmd => cmd.trim().toLowerCase());
 const channels = JOIN_CHANNELS.split(',').map(channel => channel.trim()).filter(Boolean);
-const maxLength = 499;
 let fileContext = 'You are a helpful Twitch Chatbot.';
-let lastResponseTime = 0;
-
-function checkAndConsumeCooldown() {
-    if (COOLDOWN_DURATION <= 0) return { onCooldown: false };
-    const now = Date.now();
-    const elapsed = (now - lastResponseTime) / 1000;
-    if (elapsed < COOLDOWN_DURATION) {
-        return { onCooldown: true, remaining: (COOLDOWN_DURATION - elapsed).toFixed(1) };
-    }
-    lastResponseTime = now;
-    return { onCooldown: false };
-}
-
-function loadCustomCommands() {
-    const commands = new Map();
-    try {
-        const data = fs.readFileSync('./custom_commands.txt', 'utf8');
-        const lines = data.split('\n');
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            const eqIndex = trimmed.indexOf('=');
-            if (eqIndex === -1) continue;
-            const left = trimmed.substring(0, eqIndex).trim();
-            const response = trimmed.substring(eqIndex + 1).trim();
-
-            let cmd;
-            let role;
-            const pipeIndex = left.indexOf('|');
-            if (pipeIndex !== -1) {
-                cmd = left.substring(0, pipeIndex).trim().toLowerCase();
-                role = left.substring(pipeIndex + 1).trim().toLowerCase();
-            } else {
-                cmd = left.toLowerCase();
-                role = 'all';
-            }
-
-            if (!['broadcaster', 'moderator', 'all'].includes(role)) {
-                console.warn(`[Custom Commands] Invalid role "${role}" for command "${cmd}", defaulting to "all"`);
-                role = 'all';
-            }
-
-            if (cmd && response) {
-                commands.set(cmd, { response, role });
-            }
-        }
-        console.log(`[Custom Commands] Loaded ${commands.size} command(s) from custom_commands.txt`);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.log('[Custom Commands] No custom_commands.txt found, skipping.');
-        } else {
-            console.error('[Custom Commands] Error loading custom_commands.txt:', error);
-        }
-    }
-    return commands;
-}
-
-function userHasRole({ isBroadcaster, isMod }, requiredRole) {
-    if (!requiredRole || requiredRole === 'all') return true;
-    if (requiredRole === 'broadcaster') return !!isBroadcaster;
-    return !!isBroadcaster || !!isMod; // 'moderator'
-}
-
-const customCommands = loadCustomCommands();
 
 const emotes = new EmotePool();
 
@@ -154,10 +90,6 @@ const aiEngine = new AIEngine({
 });
 
 const CHAT_CONTEXT_LENGTH = parseInt(process.env.CHAT_CONTEXT_LENGTH, 10) || 10;
-const allCommandNames = [
-    ...commandNames, ...imageCommandNames, ...videoCommandNames,
-    ...ttsCommandNames, ...musicCommandNames
-];
 
 const transport = new TwitchTransport({
     clientId: process.env.TWITCH_CLIENT_ID || '',
@@ -179,6 +111,25 @@ const mediaPipeline = new MediaPipeline({
     onMediaSaved: entry => broadcastWs({ type: 'media', entry })
 });
 
+const chatRouter = new ChatRouter({
+    aiEngine,
+    mediaPipeline,
+    emotePool: emotes,
+    errorHandler,
+    cooldownDuration: COOLDOWN_DURATION,
+    chatContextLength: CHAT_CONTEXT_LENGTH,
+    maxMessageLength: 499,
+    prefixes: {
+        ai: commandNames,
+        image: imageCommandNames,
+        video: videoCommandNames,
+        tts: ttsCommandNames,
+        music: musicCommandNames
+    }
+});
+
+chatRouter.attach(transport);
+
 transport.onLogEntry((channel, entry) => {
     broadcastWs({ type: 'chat', channel, entry });
     storage.addChatMessage(channel, entry).catch(err => {
@@ -199,88 +150,6 @@ transport.onStatus(({ type, address, port, reason }) => {
         console.log('[Twitch] Authorization required. Bot runtime is waiting.');
     }
 });
-
-transport.onMessage(handleChatMessage);
-
-async function handleChatMessage({ channel, username, loginName, tags, text, isMod, isBroadcaster }) {
-    const lower = text.toLowerCase();
-    const imageCommand = imageCommandNames.find(cmd => lower.startsWith(cmd));
-    const videoCommand = videoCommandNames.find(cmd => lower.startsWith(cmd));
-    const ttsCommand = ttsCommandNames.find(cmd => lower.startsWith(cmd));
-    const musicCommand = musicCommandNames.find(cmd => lower.startsWith(cmd));
-    const command = commandNames.find(cmd => lower.startsWith(cmd));
-
-    // One pass: log text, AI text, web emote metadata, emote-only verdict.
-    const { textForAi, textForLogs, emoteIdMap, isEmoteOnly } =
-        emotes.ingestMessage({ channel, text, tags, prefix: command || '' });
-
-    transport.logMessage(channel, username, textForLogs, { twitchEmotesByName: emoteIdMap });
-
-    // ── custom_commands.txt (unchanged policy; roles read normalized flags) ──
-    const messageLower = text.trim().toLowerCase();
-    const customCommandKey = [...customCommands.keys()].find(cmd =>
-        messageLower === cmd || messageLower.startsWith(cmd + ' ')
-    );
-    if (customCommandKey) {
-        const customCmd = customCommands.get(customCommandKey);
-        if (!userHasRole({ isBroadcaster, isMod }, customCmd.role)) return;
-        const cooldown = checkAndConsumeCooldown();
-        if (cooldown.onCooldown) return;
-        await transport.send(channel, customCmd.response);
-        return;
-    }
-
-    const mediaRequest =
-        musicCommand ? { command: musicCommand, mediaType: 'music' } :
-        ttsCommand ? { command: ttsCommand, mediaType: 'tts' } :
-        videoCommand ? { command: videoCommand, mediaType: 'video' } :
-        imageCommand ? { command: imageCommand, mediaType: 'image' } :
-        null;
-
-    if (mediaRequest) {
-        await dispatchMediaCommand({ channel, user: tags, text, ...mediaRequest });
-        return;
-    }
-
-    if (command) {
-        if (isEmoteOnly) {
-            console.log(`Command ${command} ignored: emote-only message`);
-            return;
-        }
-        const cooldown = checkAndConsumeCooldown();
-        if (cooldown.onCooldown) {
-            await transport.send(channel, errorHandler.getMessage('COOLDOWN_ACTIVE', {
-                remainingTime: cooldown.remaining
-            }));
-            return;
-        }
-
-        const prompt = `Message from user ${loginName}: ${textForAi}`;
-        const { channelContext, recentLogs } = await transport.getContext(channel, {
-            logCount: CHAT_CONTEXT_LENGTH,
-            commandPrefixes: allCommandNames
-        });
-        const rawResponse = await aiEngine.generate(prompt, { channel, channelContext, recentLogs });
-        await transport.send(channel, emotes.decorateReply(channel, rawResponse, { maxLength }));
-    }
-}
-
-async function dispatchMediaCommand({ channel, user, text, command, mediaType }) {
-    const prompt = text.slice(command.length).replace(/^,\s*/, '').trim();
-
-    if (prompt) { // empty prompts never consume cooldown (unchanged)
-        const cooldown = checkAndConsumeCooldown();
-        if (cooldown.onCooldown) {
-            await transport.send(channel, errorHandler.getMessage('COOLDOWN_ACTIVE', {
-                remainingTime: cooldown.remaining
-            }));
-            return;
-        }
-    }
-
-    const result = await mediaPipeline.synthesize({ channel, user, prompt, mediaType, command });
-    await transport.send(channel, result.replyText); // send() chunks + paces internally
-}
 
 function getRequestOrigin(req) {
     return `${req.protocol}://${req.get('host')}`;
