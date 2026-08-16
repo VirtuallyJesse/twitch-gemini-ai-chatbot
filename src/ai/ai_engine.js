@@ -272,7 +272,19 @@ export class AIEngine {
         const textParts = rawParts.filter(
             p => !p.thought && typeof p.text === 'string' && p.text.trim().length > 0
         );
-        return { candidate, thoughtParts, textParts };
+        const winningTextPart = textParts[textParts.length - 1] || null;
+        return { candidate, thoughtParts, textParts, winningTextPart, rawParts };
+    }
+
+    /**
+     * Builds candidate parts array for conversational memory or retry payloads.
+     * Preserves thought parts (with thoughtSignature) unmodified in original order,
+     * plus the winning conversational text part (via reference equality).
+     * Strips inline data, file data, and non-winning text parts.
+     */
+    #buildCandidatePartsForMemory(rawParts, winningTextPart) {
+        if (!winningTextPart) return [];
+        return rawParts.filter(p => p.thought === true || p === winningTextPart);
     }
 
     #getKeyErrorReason(error) {
@@ -395,7 +407,7 @@ export class AIEngine {
         }
 
         // Extract thoughts and text parts
-        const { candidate, thoughtParts, textParts } = this.#extractCandidateContent(result);
+        const { candidate, thoughtParts, textParts, winningTextPart, rawParts } = this.#extractCandidateContent(result);
 
         if (thoughtParts.length > 0) {
             this.#logSubsection('Thinking', COLORS.magenta);
@@ -415,7 +427,8 @@ export class AIEngine {
             return errMsg;
         }
 
-        let agentResponse = textParts[textParts.length - 1].text;
+        let agentResponse = winningTextPart.text;
+        let latestSuccessfulParts = this.#buildCandidatePartsForMemory(rawParts, winningTextPart);
 
         // Length retry loop
         let retries = 0;
@@ -428,7 +441,7 @@ export class AIEngine {
             const retryContents = [
                 ...history,
                 { role: 'user', parts: userParts },
-                { role: 'model', parts: [{ text: agentResponse }] },
+                { role: 'model', parts: latestSuccessfulParts },
                 { role: 'user', parts: [{ text: this.errorHandler.getMessage('SYSTEM_RESPONSE_TOO_LONG', { maxLength: currentMax }) }] }
             ];
 
@@ -440,9 +453,10 @@ export class AIEngine {
                     tools
                 });
                 const retryExtracted = this.#extractCandidateContent(retryResult);
-                const retryText = retryExtracted.textParts[retryExtracted.textParts.length - 1]?.text || '';
-                if (retryText.trim()) {
-                    agentResponse = retryText;
+                const retryTextPart = retryExtracted.winningTextPart;
+                if (retryTextPart && retryTextPart.text.trim()) {
+                    agentResponse = retryTextPart.text;
+                    latestSuccessfulParts = this.#buildCandidatePartsForMemory(retryExtracted.rawParts, retryTextPart);
                 }
             } catch (retryError) {
                 console.log(`   ${COLORS.yellow}⚠${COLORS.reset} Length retry #${retries} failed (${this.#getKeyErrorReason(retryError)}), using existing response`);
@@ -526,10 +540,8 @@ export class AIEngine {
         console.log(`\n   ${COLORS.green}✓ Complete${COLORS.reset} │ ${agentResponse.length} chars │ ${elapsed}s`);
         this.#logFooter();
 
-        if (!ephemeralContext) {
-            history.push({ role: "user", parts: userParts });
-            history.push({ role: "model", parts: [{ text: agentResponse }] });
-        }
+        history.push({ role: 'user', parts: userParts });
+        history.push({ role: 'model', parts: latestSuccessfulParts });
 
         return agentResponse;
     }
