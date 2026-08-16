@@ -47,7 +47,23 @@
     </div>
 <% } %>
 
-    <script>
+    <script type="module">
+        import {
+            getTwitchEmoteUrlById,
+            getBttvEmoteUrlById,
+            pick7tvFile,
+            extract7tvMapFromEmoteSetPayload,
+            pickFfzUrl,
+            extractFfzMapFromPayload,
+            extractBttvMapFromPayload,
+            ensureHttps,
+            escapeHtml,
+            isUrlToken,
+            getEmoteMatch,
+            renderTokenHtml,
+            renderMessageHtml
+        } from '/public/web_emotes.js';
+
         // --- STATE ---
         const state = {
             channels: [],
@@ -168,7 +184,7 @@
                 const date = new Date(msg.timestamp);
                 const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
 
-                const rendered = renderMessageHtml(msg.message, state.activeChannel, msg.meta);
+                const rendered = renderMessageHtml(msg.message, state.activeChannel, msg.meta, state.emoteMapsByChannel);
 
                 return `
                     <div class="chat-msg">
@@ -195,7 +211,7 @@
                 const date = new Date(msg.timestamp);
                 const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
 
-                const rendered = renderMessageHtml(msg.message, channel, msg.meta);
+                const rendered = renderMessageHtml(msg.message, channel, msg.meta, state.emoteMapsByChannel);
 
                 const html = `
                     <div class="chat-msg">
@@ -229,7 +245,7 @@
                 ? state.mediaData 
                 : state.mediaData.filter(m => {
                     if (state.mediaFilter === 'audio') {
-                        return['audio', 'music', 'tts'].includes(m.mediaType);
+                        return ['audio', 'music', 'tts'].includes(m.mediaType);
                     }
                     return m.mediaType === state.mediaFilter;
                 });
@@ -251,7 +267,7 @@
             state.mediaData.unshift(item);
             if (state.mediaFilter === 'all' || 
                 state.mediaFilter === item.mediaType || 
-                (state.mediaFilter === 'audio' &&['audio', 'music', 'tts'].includes(item.mediaType))) {
+                (state.mediaFilter === 'audio' && ['audio', 'music', 'tts'].includes(item.mediaType))) {
                 renderGallery();
             }
         }
@@ -364,77 +380,6 @@
         }
 
         // --- HELPERS ---
-        function escapeHtml(s) {
-            return String(s)
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#039;");
-        }
-
-        function isUrlToken(token) {
-            return /^https?:\/\/\S+$/i.test(token);
-        }
-
-        function getTwitchEmoteUrlById(id) {
-            // Twitch CDN template: https://static-cdn.jtvnw.net/emoticons/v2/{{id}}/{{format}}/{{theme_mode}}/{{scale}}
-            // Use "default" format so Twitch serves the right asset for static vs animated where applicable.
-            return `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/default/dark/2.0`;
-        }
-
-        function getEmoteMatch(token, channel, msgMeta) {
-            const raw = String(token || '');
-            const name = raw.startsWith('emote:') ? raw.slice('emote:'.length) : raw;
-
-            // 1) Twitch-native emotes (per-message; includes real IDs)
-            const twitchMap = msgMeta && msgMeta.twitchEmotesByName ? msgMeta.twitchEmotesByName : null;
-            if (twitchMap && twitchMap[name]) {
-                return { provider: 'twitch', url: getTwitchEmoteUrlById(twitchMap[name]), alt: name };
-            }
-
-            // 2) Third-party emotes (cached per channel)
-            const map = state.emoteMapsByChannel[channel];
-            if (map && map[name]) {
-                return { provider: map[name].provider, url: map[name].url, alt: name };
-            }
-
-            return null;
-        }
-
-        function renderTokenHtml(token, channel, msgMeta) {
-            if (!token) return '';
-
-            // URLs
-            if (isUrlToken(token)) {
-                const safeUrl = escapeHtml(token);
-                return `<a href="${safeUrl}" target="_blank" rel="noreferrer noopener">${safeUrl}</a>`;
-            }
-
-            // Emotes (either flagged as emote:NAME or raw NAME)
-            const match = getEmoteMatch(token, channel, msgMeta);
-            if (match && match.url) {
-                const safeUrl = escapeHtml(match.url);
-                const safeAlt = escapeHtml(match.alt || '');
-                const safeTitle = escapeHtml(`${match.alt} (${match.provider})`);
-                return `<img class="emote-img" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${safeUrl}" alt="${safeAlt}" title="${safeTitle}">`;
-            }
-
-            // If token was flagged but we don't have a URL, strip the prefix for readability
-            const cleaned = String(token).startsWith('emote:') ? String(token).slice('emote:'.length) : String(token);
-            return escapeHtml(cleaned);
-        }
-
-        function renderMessageHtml(text, channel, msgMeta) {
-            // Split into tokens while preserving whitespace
-            const parts = String(text || '').split(/(\s+)/);
-
-            return parts.map(part => {
-                if (/^\s+$/.test(part)) return part; // keep whitespace as-is
-                return renderTokenHtml(part, channel, msgMeta);
-            }).join('');
-        }
-
         function getUsernameColor(username) {
             // Simple hash for consistent colors
             let hash = 0;
@@ -458,23 +403,12 @@
             }
         }
 
-        function ensureHttps(u) {
-            if (!u) return u;
-            if (u.startsWith('//')) return 'https:' + u;
-            return u;
-        }
-
         // BTTV
         async function loadBttvGlobals() {
             if (state.emoteGlobals.bttv) return state.emoteGlobals.bttv;
 
             const data = await fetchJson('https://api.betterttv.net/3/cached/emotes/global');
-            const map = {};
-            for (const e of data || []) {
-                if (!e || !e.code || !e.id) continue;
-                // common CDN format (webp is widely used by clients)
-                map[e.code] = { url: `https://cdn.betterttv.net/emote/${e.id}/3x.webp`, provider: 'bttv' };
-            }
+            const map = extractBttvMapFromPayload(data);
             state.emoteGlobals.bttv = map;
             return map;
         }
@@ -482,48 +416,15 @@
         async function loadBttvChannel(twitchId) {
             if (!twitchId) return {};
             const data = await fetchJson(`https://api.betterttv.net/3/cached/users/twitch/${encodeURIComponent(twitchId)}`);
-
-            const map = {};
-            const channelEmotes = Array.isArray(data?.channelEmotes) ? data.channelEmotes : [];
-            const sharedEmotes = Array.isArray(data?.sharedEmotes) ? data.sharedEmotes : [];
-
-            for (const e of [...channelEmotes, ...sharedEmotes]) {
-                if (!e || !e.code || !e.id) continue;
-                map[e.code] = { url: `https://cdn.betterttv.net/emote/${e.id}/3x.webp`, provider: 'bttv' };
-            }
-            return map;
+            return extractBttvMapFromPayload(data);
         }
 
         // FFZ
-        function pickFfzUrl(urlsObj) {
-            if (!urlsObj || typeof urlsObj !== 'object') return null;
-            // Prefer highest scale available (4 -> 2 -> 1)
-            const keys = Object.keys(urlsObj).map(k => Number(k)).filter(n => Number.isFinite(n)).sort((a,b) => b-a);
-            for (const k of keys) {
-                const u = urlsObj[String(k)];
-                if (u) return ensureHttps(u);
-            }
-            return null;
-        }
-
         async function loadFfzGlobals() {
             if (state.emoteGlobals.ffz) return state.emoteGlobals.ffz;
 
             const data = await fetchJson('https://api.frankerfacez.com/v1/set/global');
-            const map = {};
-
-            const defaultSets = Array.isArray(data?.default_sets) ? data.default_sets : [];
-            const sets = data?.sets && typeof data.sets === 'object' ? data.sets : {};
-
-            for (const setId of defaultSets) {
-                const set = sets[String(setId)];
-                const emoticons = Array.isArray(set?.emoticons) ? set.emoticons : [];
-                for (const e of emoticons) {
-                    const url = pickFfzUrl(e?.urls);
-                    if (e?.name && url) map[e.name] = { url, provider: 'ffz' };
-                }
-            }
-
+            const map = extractFfzMapFromPayload(data);
             state.emoteGlobals.ffz = map;
             return map;
         }
@@ -531,77 +432,15 @@
         async function loadFfzChannel(twitchId) {
             if (!twitchId) return {};
             const data = await fetchJson(`https://api.frankerfacez.com/v1/room/id/${encodeURIComponent(twitchId)}`);
-
-            const map = {};
-            const sets = data?.sets && typeof data.sets === 'object' ? data.sets : {};
-            for (const set of Object.values(sets)) {
-                const emoticons = Array.isArray(set?.emoticons) ? set.emoticons : [];
-                for (const e of emoticons) {
-                    const url = pickFfzUrl(e?.urls);
-                    if (e?.name && url) map[e.name] = { url, provider: 'ffz' };
-                }
-            }
-            return map;
+            return extractFfzMapFromPayload(data);
         }
 
         // 7TV
-        function pick7tvFile(files) {
-            if (!Array.isArray(files) || files.length === 0) return null;
-
-            // Prefer webp, then avif, then anything; and prefer largest scale token in filename.
-            const score = (f) => {
-                const name = String(f?.name || '');
-                const lower = name.toLowerCase();
-
-                const extScore =
-                    lower.endsWith('.webp') ? 30 :
-                    lower.endsWith('.avif') ? 20 :
-                    lower.endsWith('.gif')  ? 10 :
-                    lower.endsWith('.png')  ? 5  : 0;
-
-                const scaleScore =
-                    lower.includes('4x') ? 4 :
-                    lower.includes('3x') ? 3 :
-                    lower.includes('2x') ? 2 :
-                    lower.includes('1x') ? 1 : 0;
-
-                return extScore * 10 + scaleScore;
-            };
-
-            const sorted = [...files].sort((a,b) => score(b) - score(a));
-            return sorted[0] || null;
-        }
-
-        function extract7tvMapFromEmoteSetPayload(payload) {
-            const emotes = Array.isArray(payload?.emotes) ? payload.emotes
-                        : Array.isArray(payload?.data?.emotes) ? payload.data.emotes
-                        : [];
-
-            const map = {};
-            for (const e of emotes) {
-                const name = e?.name ?? e?.data?.name;
-                const host = e?.data?.host ?? e?.host ?? null;
-                const files = host?.files ?? e?.data?.host?.files ?? null;
-
-                if (!name || !host?.url) continue;
-
-                const file = pick7tvFile(files);
-                if (!file?.name) continue;
-
-                const base = host.url.startsWith('http') ? host.url : `https:${host.url}`;
-                const url = `${base}/${file.name}`;
-
-                map[name] = { url, provider: '7tv' };
-            }
-            return map;
-        }
-
         async function load7tvGlobals() {
             if (state.emoteGlobals.seventv) return state.emoteGlobals.seventv;
 
             const data = await fetchJson('https://7tv.io/v3/emote-sets/global');
             const map = extract7tvMapFromEmoteSetPayload(data);
-
             state.emoteGlobals.seventv = map;
             return map;
         }
@@ -665,6 +504,11 @@
 
             return state.emoteFetchByChannel[channel];
         }
+
+        // Expose global handlers for inline HTML onclick attributes
+        window.setFilter = setFilter;
+        window.switchChannel = switchChannel;
+        window.goToPage = goToPage;
 
         // Start
         init();
