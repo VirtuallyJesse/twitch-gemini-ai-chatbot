@@ -412,14 +412,18 @@ export class AIEngine {
             console.log(`   ${COLORS.dim}Tools:${COLORS.reset} ${names.join(', ')}`);
         }
 
-        const loop = await this.#toolDispatcher.executeTurnLoop({
+        let result = null;
+        let activeTools = tools;
+        let activeSystemInstruction = systemInstruction;
+
+        const runLoop = () => this.#toolDispatcher.executeTurnLoop({
             contents,
-            tools,
+            tools: activeTools,
             context: { channel, channelContext },
             invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
                 const turnResult = await this.#executeModelCall({
                     contents: turnContents,
-                    systemInstruction,
+                    systemInstruction: activeSystemInstruction,
                     safetySettings,
                     tools: turnTools
                 });
@@ -427,7 +431,29 @@ export class AIEngine {
                 return turnResult;
             }
         });
-        let result = loop.result;
+
+        try {
+            const loop = await runLoop();
+            result = loop.result;
+        } catch (turnError) {
+            const isRateLimit = this.#getKeyErrorReason(turnError) === 'Rate limit';
+            if (isRateLimit && this.#toolDispatcher.hasGoogleSearch(activeTools)) {
+                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Google Search grounding quota exceeded/unavailable on key #${this.currentKeyIndex}, falling back to ungrounded generation...`);
+                activeTools = this.#toolDispatcher.withoutGoogleSearch(activeTools);
+                activeSystemInstruction = await this.#compileSystemInstruction({
+                    prompt,
+                    channelContext,
+                    recentLogs,
+                    ephemeralContext,
+                    overrideFileContext,
+                    tools: activeTools
+                });
+                const fallbackLoop = await runLoop();
+                result = fallbackLoop.result;
+            } else {
+                throw turnError;
+            }
+        }
 
         this.#logSection('GEMINI RESPONSE');
 
@@ -483,9 +509,9 @@ export class AIEngine {
             try {
                 const retryResult = await this.#executeModelCall({
                     contents: retryContents,
-                    systemInstruction,
+                    systemInstruction: activeSystemInstruction,
                     safetySettings,
-                    tools: this.#toolDispatcher.withoutFunctionDeclarations(tools)
+                    tools: this.#toolDispatcher.withoutFunctionDeclarations(activeTools)
                 });
                 const retryExtracted = this.#extractCandidateContent(retryResult);
                 const retryTextPart = retryExtracted.winningTextPart;

@@ -97,9 +97,20 @@ export class ToolDispatcher {
         return compiled.length > 0 ? compiled : undefined;
     }
 
+    hasGoogleSearch(tools) {
+        if (!Array.isArray(tools)) return false;
+        return tools.some(t => Boolean(t && (t.googleSearch || t.google_search)));
+    }
+
     withoutFunctionDeclarations(tools) {
         if (!tools?.length) return tools;
         const filtered = tools.filter(t => !t.functionDeclarations);
+        return filtered.length > 0 ? filtered : undefined;
+    }
+
+    withoutGoogleSearch(tools) {
+        if (!tools?.length) return tools;
+        const filtered = tools.filter(t => !(t && (t.googleSearch || t.google_search)));
         return filtered.length > 0 ? filtered : undefined;
     }
 
