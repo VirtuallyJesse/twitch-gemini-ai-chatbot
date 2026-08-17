@@ -66,8 +66,9 @@ export class EmotePool {
     /* ── startup ─────────────────────────────────────────────── */
 
     /**
-     * Fetches every enabled provider concurrently (channel sets + optional globals),
-     * merges globals into each channel, and compiles the per-channel regexes.
+     * Fetches every enabled provider concurrently (channel sets + globals),
+     * compiles separate ingestion sets (for chat recognition) and append pools
+     * (gated by INCLUDE_*_GLOBAL_EMOTES for random sign-offs), and builds regexes.
      * Provider failures and hangs are isolated: a dead CDN yields an empty list.
      */
     async seed(channels = [], channelIdMap = {}) {
@@ -86,35 +87,42 @@ export class EmotePool {
             jobs.push(this.#guard(`${provider.name} channel`, () => provider.fetchChannel(ids, opts), new Map())
                 .then(map => { byId[p] = map instanceof Map ? map : new Map(); }));
 
-            if (this.#cfg.globals[p]) {
-                jobs.push(this.#guard(`${provider.name} global`, () => provider.fetchGlobal(opts), [])
-                    .then(list => { globals[p] = Array.isArray(list) ? list : []; }));
-            }
+            jobs.push(this.#guard(`${provider.name} global`, () => provider.fetchGlobal(opts), [])
+                .then(list => { globals[p] = Array.isArray(list) ? list : []; }));
         }
 
         await Promise.all(jobs);
 
         this.#channels.clear();
-        const union = new Set();
+        const unionIngest = new Set();
+        const unionPool = new Set();
 
         for (const ch of channels) {
             const key = channelKey(ch);
             if (!key) continue;
             const id = channelIdMap?.[key.slice(1)];
-            const tokens = new Set();
+            const ingest = new Set();
+            const pool = new Set();
 
             for (const p of PLATFORMS) {
                 const channelTokens = id ? byId[p].get(String(id)) || [] : [];
-                for (const t of channelTokens) this.#addToken(tokens, t);
-                for (const t of globals[p]) this.#addToken(tokens, t);
+                for (const t of channelTokens) {
+                    this.#addToken(ingest, t);
+                    this.#addToken(pool, t);
+                }
+                for (const t of globals[p]) {
+                    this.#addToken(ingest, t);
+                    if (this.#cfg.globals[p]) this.#addToken(pool, t);
+                }
             }
 
-            this.#channels.set(key, this.#compile(tokens));
-            for (const t of tokens) union.add(t);
-            console.log(`[Emotes] ${key}: ${tokens.size} emotes loaded`);
+            this.#channels.set(key, this.#compile(ingest, pool));
+            for (const t of ingest) unionIngest.add(t);
+            for (const t of pool) unionPool.add(t);
+            console.log(`[Emotes] ${key}: ${ingest.size} recognized, ${pool.size} appendable`);
         }
 
-        this.#any = this.#compile(union);
+        this.#any = this.#compile(unionIngest, unionPool);
         return this.stats();
     }
 
@@ -175,6 +183,29 @@ export class EmotePool {
         return out;
     }
 
+    /**
+     * Builds dynamic harness instructions for emote IR token syntax and auto-appending.
+     * @returns {string}
+     */
+    getHarnessInstructions() {
+        const parts = [
+            '<emotes>',
+            'Users can type emotes into chat, which you will see formatted as emote:NAME for easy identification.',
+            'Treat emote:NAME tokens as opaque unless contextually relevant to the user\'s prompt, for example if the user asks you to repeat an emote, or if an emote hints at the user\'s mood or intent.',
+            'If you decide you must repeat an emote a user has written, echo it exactly as displayed with case-sensitivity.',
+            'Do NOT invent new emotes or use emotes you haven\'t seen in the user\'s prompt or in your active Twitch chat logs.'
+        ];
+
+        if (this.#cfg.appendEnabled) {
+            parts.push(
+                'An emote is randomly appended to the end of every message you send. This function is automatic without your involvement and is performed by the system handler. You are not the system, do not attempt to perform this task.'
+            );
+        }
+
+        parts.push('</emotes>');
+        return parts.join('\n');
+    }
+
     /* ── internals ───────────────────────────────────────────── */
 
     #addToken(set, value) {
@@ -184,8 +215,8 @@ export class EmotePool {
         set.add(t); // case-sensitive: Twitch emotes are, and LUL !== lul
     }
 
-    #compile(tokenSet) {
-        const tokens = [...tokenSet].sort((a, b) => b.length - a.length || a.localeCompare(b));
+    #compile(ingestSet, poolSet = ingestSet) {
+        const tokens = [...ingestSet].sort((a, b) => b.length - a.length || a.localeCompare(b));
         if (tokens.length === 0) return EMPTY_VIEW;
         const alt = tokens.map(escapeRe).join('|');
         return {
@@ -194,7 +225,7 @@ export class EmotePool {
             match: new RegExp(`(?<!\\S)(${alt})(?!\\S)`, 'g'),
             // loose: catches "LUL!" / "wowLUL" boundaries so spacing can be repaired
             space: new RegExp(`(?<![${WORD}])(${alt})(?![${WORD}])`, 'gu'),
-            pool: [...tokens].sort((a, b) => a.localeCompare(b))
+            pool: [...poolSet].sort((a, b) => a.localeCompare(b))
         };
     }
 

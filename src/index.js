@@ -51,6 +51,7 @@ const IMAGE_COMMAND_NAME = process.env.IMAGE_COMMAND_NAME || '!image';
 const VIDEO_COMMAND_NAME = process.env.VIDEO_COMMAND_NAME || '!video';
 const TTS_COMMAND_NAME = process.env.TTS_COMMAND_NAME || '!tts';
 const MUSIC_COMMAND_NAME = process.env.MUSIC_COMMAND_NAME || '!song';
+const POLLINATIONS_API_KEY = process.env.POLLINATIONS_API_KEY || '';
 const TWITCH_USERNAME = process.env.TWITCH_USERNAME || '';
 const BOT_COMMAND_NAME = process.env.BOT_COMMAND_NAME || '!gemini';
 const JOIN_CHANNELS = process.env.JOIN_CHANNELS || '';
@@ -146,6 +147,7 @@ const chatRouter = new ChatRouter({
     cooldownDuration: COOLDOWN_DURATION,
     chatContextLength: CHAT_CONTEXT_LENGTH,
     maxMessageLength: 499,
+    pollinationsApiKey: POLLINATIONS_API_KEY,
     prefixes: {
         ai: commandNames,
         image: imageCommandNames,
@@ -299,7 +301,9 @@ app.get('/gemini/:text', async (req, res) => {
     const text = req.params.text;
 
     try {
-        const answer = await aiEngine.generate(text);
+        const answer = await aiEngine.generate(text, {
+            harnessInstructions: emotes.getHarnessInstructions()
+        });
         res.send(emotes.decorateReply(null, answer, { appendEmote: false }));
     } catch (error) {
         console.error('Error generating response:', error);
