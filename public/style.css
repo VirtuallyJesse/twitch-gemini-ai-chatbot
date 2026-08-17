@@ -107,6 +107,7 @@ body.dashboard-body {
     vertical-align: -0.35em; /* visually matches Twitch chat baseline */
     margin: 0 2px;
     image-rendering: auto;
+    display: inline-block;
 }
 
 /* MEDIA GALLERY STYLES */

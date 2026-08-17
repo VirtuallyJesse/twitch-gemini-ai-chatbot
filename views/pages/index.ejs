@@ -50,7 +50,8 @@
     <script type="module">
         import {
             escapeHtml,
-            renderMessageHtml
+            renderMessageHtml,
+            handleEmoteError
         } from '/public/web_emotes.js';
 
         // --- STATE ---
@@ -79,6 +80,16 @@
         // --- INITIALIZATION ---
         async function init() {
             try {
+                // Non-destructive error retry listener for emote images in chat
+                if (els.chatLog) {
+                    els.chatLog.addEventListener('error', (event) => {
+                        const target = event.target;
+                        if (target && target.tagName === 'IMG' && target.classList.contains('emote-img')) {
+                            handleEmoteError(target);
+                        }
+                    }, true);
+                }
+
                 // 1. Fetch Channels
                 const channelsRes = await fetch('/api/channels');
                 state.channels = await channelsRes.json();
@@ -88,13 +99,13 @@
                     renderTabs();
                 }
 
-                // 2. Fetch Initial Chat for active channel
-                if (state.activeChannel) {
+                // 2. Pre-warm emote maps for all connected channels & fetch active chat
+                if (state.channels.length > 0) {
                     await Promise.all([
-                        fetchChat(state.activeChannel),
-                        ensureEmotesLoaded(state.activeChannel)
+                        state.activeChannel ? fetchChat(state.activeChannel) : Promise.resolve(),
+                        ...state.channels.map(ch => ensureEmotesLoaded(ch))
                     ]);
-                    renderChat(); // rerender with emotes if loaded
+                    renderChat(); // rerender with loaded emotes
                 }
 
                 // 3. Fetch Initial Media

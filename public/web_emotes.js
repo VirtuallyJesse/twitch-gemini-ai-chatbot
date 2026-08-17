@@ -34,7 +34,7 @@ export function isUrlToken(token) {
  * Constructs a Twitch native emote URL targeting dark theme and 1.0 scale (~28x28px).
  */
 export function getTwitchEmoteUrlById(id) {
-    if (!id || typeof id !== 'string' && typeof id !== 'number') return null;
+    if (!id || (typeof id !== 'string' && typeof id !== 'number')) return null;
     const cleanId = String(id).trim();
     if (!cleanId) return null;
     return `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(cleanId)}/default/dark/1.0`;
@@ -71,7 +71,38 @@ export function getEmoteMatch(token, channel, msgMeta, emoteMapsByChannel = {}) 
 }
 
 /**
- * Renders a single token into safe HTML (hyperlink, optimized 1x emote img, or escaped text).
+ * Handles error events on emote <img> elements by non-destructively scheduling a retry with backoff.
+ * Leaves the <img> in the DOM intact without degrading to text so subsequent renders or retries can succeed.
+ */
+export function handleEmoteError(img, options = {}) {
+    if (!img || typeof img !== 'object') return false;
+
+    if (!img.dataset) img.dataset = {};
+    const dataset = img.dataset;
+    const originalSrc = dataset.srcOriginal || dataset.src || img.src || '';
+    if (!dataset.srcOriginal && originalSrc) {
+        dataset.srcOriginal = originalSrc;
+    }
+
+    const maxRetries = options.maxRetries ?? 2;
+    const currentRetry = parseInt(dataset.retryCount || '0', 10);
+    if (currentRetry < maxRetries && dataset.srcOriginal) {
+        dataset.retryCount = String(currentRetry + 1);
+        const scheduleTimer = options.scheduleTimer || ((fn, ms) => setTimeout(fn, ms));
+        const delayMs = options.delayMs ?? (currentRetry === 0 ? 1500 : 3500);
+
+        scheduleTimer(() => {
+            const sep = dataset.srcOriginal.includes('?') ? '&' : '?';
+            img.src = `${dataset.srcOriginal}${sep}retry=${currentRetry + 1}`;
+        }, delayMs);
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Renders a single token into safe HTML (hyperlink, lazy-loaded emote img, or escaped text).
  */
 export function renderTokenHtml(token, channel, msgMeta, emoteMapsByChannel = {}) {
     if (!token) return '';
@@ -88,7 +119,7 @@ export function renderTokenHtml(token, channel, msgMeta, emoteMapsByChannel = {}
         const safeUrl = escapeHtml(match.url);
         const safeAlt = escapeHtml(match.alt || '');
         const safeTitle = escapeHtml(`${match.alt} (${match.provider})`);
-        return `<img class="emote-img" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${safeUrl}" alt="${safeAlt}" title="${safeTitle}">`;
+        return `<img class="emote-img" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${safeUrl}" data-src-original="${safeUrl}" alt="${safeAlt}" title="${safeTitle}">`;
     }
 
     // If token was flagged but we don't have a URL, strip the prefix for readability
