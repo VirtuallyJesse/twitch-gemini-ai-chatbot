@@ -1,5 +1,6 @@
 import express from 'express';
 import expressWs from 'express-ws';
+import WebSocket from 'ws';
 import fs from 'fs';
 import { job } from './utils/keep_alive.js';
 import { AIEngine } from './ai/ai_engine.js';
@@ -92,7 +93,27 @@ const musicCommandNames = MUSIC_COMMAND_NAME.split(',').map(cmd => cmd.trim().to
 const channels = JOIN_CHANNELS.split(',').map(channel => channel.trim()).filter(Boolean);
 let fileContext = 'You are a helpful Twitch Chatbot.';
 
-const emotes = new EmotePool();
+const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
+const csv = (v) => String(v || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+const emotes = new EmotePool({
+    storage,
+    fetchImpl: fetch,
+    wsImpl: WebSocket,
+    enable7tv: bool(process.env.ENABLE_7TV_EMOTES, true),
+    enableBttv: bool(process.env.ENABLE_BTTV_EMOTES, true),
+    enableFfz: bool(process.env.ENABLE_FFZ_EMOTES, false),
+    include7tvGlobals: bool(process.env.INCLUDE_7TV_GLOBAL_EMOTES, false),
+    includeBttvGlobals: bool(process.env.INCLUDE_BTTV_GLOBAL_EMOTES, false),
+    includeFfzGlobals: bool(process.env.INCLUDE_FFZ_GLOBAL_EMOTES, false),
+    timeoutMs: Number(process.env.EMOTE_FETCH_TIMEOUT_MS ?? 10_000),
+    appendEnabled: bool(process.env.ENABLE_EMOTE_APPENDING, true),
+    excludePrefixes: csv(process.env.EMOTE_APPEND_EXCLUDE_PREFIXES)
+});
+
+emotes.on('update', ({ channel, emotes: map }) => {
+    broadcastWs({ type: 'emotes:update', channel, emotes: map });
+});
 
 try {
     fileContext = fs.readFileSync('./system_instructions.txt', 'utf8');
@@ -169,7 +190,7 @@ transport.onLogEntry((channel, entry) => {
 transport.onStatus(({ type, address, port, reason }) => {
     if (type === 'connected') {
         console.log(`* Connected to ${address}:${port}`);
-        emotes.seed(transport.channels, transport.channelIdMap).then(
+        emotes.sync(transport.channels, transport.channelIdMap).then(
             () => console.log('Emote initialization completed'),
             error => console.error('Failed to initialize emotes:', error)
         );
@@ -238,7 +259,10 @@ app.get('/auth/callback', async (req, res) => {
 
 app.get('/auth/status', (_req, res) => res.json(transport.auth.getStatus()));
 app.get('/api/channels', (_req, res) => res.json(transport.channels));
-app.get('/api/channel-ids', (_req, res) => res.json(transport.channelIds));
+app.get('/api/emotes/:channel', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(emotes.getEmoteMap(req.params.channel));
+});
 
 app.get('/api/chat/:channel', async (req, res) => {
     let channel = req.params.channel;

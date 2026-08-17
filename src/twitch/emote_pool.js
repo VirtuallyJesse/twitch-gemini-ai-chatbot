@@ -1,313 +1,747 @@
 // src/twitch/emote_pool.js
 //
-// The emote pool owns the whole emote lifecycle: startup seeding from 7TV/BTTV/FFZ,
-// incoming chat parsing (3rd-party tokens + Twitch native ranges), and outgoing
-// reply decoration. Callers only ever need seed / ingestMessage / decorateReply.
+// Deep EmotePool module: single source of truth for channel emote state across chat
+// routing, AI prompt generation, reply decoration, and web gallery rendering.
+// Hydrates from Redis cache on boot, synchronizes real-time via 7TV EventAPI and
+// BTTV WebSockets with conditional ETag polling for FFZ, and emits live updates.
 
 import {
-    fetchSevenTvChannelEmotesForTwitchIds,
-    fetchSevenTvGlobalEmotes,
-    fetchBttvChannelEmotesForTwitchIds,
-    fetchBttvGlobalEmotes,
-    fetchFfzChannelEmotesForTwitchIds,
-    fetchFfzGlobalEmotes
+  fetchSevenTvChannelEmotesForTwitchIds,
+  fetchSevenTvGlobalEmotes,
+  fetchBttvChannelEmotesForTwitchIds,
+  fetchBttvGlobalEmotes,
+  fetchFfzChannelEmotesForTwitchIds,
+  fetchFfzGlobalEmotes,
+  fetchFfzRoomConditional,
+  assetFrom7tvEmote,
+  assetFromBttvEmote
 } from './emote_providers.js';
+import { SevenTvEventListener, BttvEventListener } from './emote_sync.js';
 
 const PLATFORMS = ['7tv', 'bttv', 'ffz'];
+const CACHE_GLOBALS = 'emotes:cache:__globals__';
+const EMPTY_VIEW = { tokens: [], match: null, space: null, pool: [] };
 const EMOTE_ONLY = /^(?:\s*emote:\S+\s*)+$/;
 const WORD = '\\p{L}\\p{N}_';
 const URL_SPLIT = /(https?:\/\/\S+)/g;
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
-const csv = (v) => String(v || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const channelKey = (channel) => (channel ? `#${String(channel).replace('#', '').toLowerCase()}` : null);
 
-const DEFAULT_PROVIDERS = {
-    '7tv': { name: '7TV', fetchChannel: fetchSevenTvChannelEmotesForTwitchIds, fetchGlobal: fetchSevenTvGlobalEmotes },
-    bttv: { name: 'BTTV', fetchChannel: fetchBttvChannelEmotesForTwitchIds, fetchGlobal: fetchBttvGlobalEmotes },
-    ffz: { name: 'FFZ', fetchChannel: fetchFfzChannelEmotesForTwitchIds, fetchGlobal: fetchFfzGlobalEmotes }
+const defaultTimers = {
+  setTimeout: (...a) => globalThis.setTimeout(...a),
+  clearTimeout: (id) => globalThis.clearTimeout(id),
+  setInterval: (...a) => globalThis.setInterval(...a),
+  clearInterval: (id) => globalThis.clearInterval(id)
 };
 
-const EMPTY_VIEW = { tokens: [], match: null, space: null, pool: [] };
+function createDefaultProviders(fetchImpl) {
+  return {
+    '7tv': {
+      name: '7TV',
+      fetchChannel: (ids, o) => fetchSevenTvChannelEmotesForTwitchIds(ids, { fetchImpl, ...o }),
+      fetchGlobal: (o) => fetchSevenTvGlobalEmotes({ fetchImpl, ...o })
+    },
+    bttv: {
+      name: 'BTTV',
+      fetchChannel: (ids, o) => fetchBttvChannelEmotesForTwitchIds(ids, { fetchImpl, ...o }),
+      fetchGlobal: (o) => fetchBttvGlobalEmotes({ fetchImpl, ...o })
+    },
+    ffz: {
+      name: 'FFZ',
+      fetchChannel: (ids, o) => fetchFfzChannelEmotesForTwitchIds(ids, { fetchImpl, ...o }),
+      fetchGlobal: (o) => fetchFfzGlobalEmotes({ fetchImpl, ...o })
+    }
+  };
+}
 
 export class EmotePool {
-    #providers;
-    #cfg;
-    #channels = new Map();
-    #any = EMPTY_VIEW; // union view used for channel-less callers (web endpoint, tests)
+  #storage;
+  #fetch;
+  #timer;
+  #wsImpl;
+  #providers;
+  #cfg;
+  #channels = new Map();
+  #globals = { '7tv': new Map(), bttv: new Map(), ffz: new Map() };
+  #setIdToChannel = new Map();
+  #twitchIdToChannel = new Map();
+  #unionView = EMPTY_VIEW;
+  #unionAssets = {};
+  #listeners = new Set();
+  #sevenTv = null;
+  #bttv = null;
+  #pollTimer = null;
+  #disposed = false;
 
-    /**
-     * Reads env by default; every knob is overridable for tests.
-     * `providers` is the injection seam — supply fixtures to avoid network.
-     */
-    constructor(options = {}) {
-        const env = options.env || process.env;
-        this.#providers = options.providers || DEFAULT_PROVIDERS;
-        this.#cfg = {
-            enabled: {
-                '7tv': options.enable7tv ?? bool(env.ENABLE_7TV_EMOTES, true),
-                bttv: options.enableBttv ?? bool(env.ENABLE_BTTV_EMOTES, true),
-                ffz: options.enableFfz ?? bool(env.ENABLE_FFZ_EMOTES, false)
-            },
-            globals: {
-                '7tv': options.include7tvGlobals ?? bool(env.INCLUDE_7TV_GLOBAL_EMOTES, false),
-                bttv: options.includeBttvGlobals ?? bool(env.INCLUDE_BTTV_GLOBAL_EMOTES, false),
-                ffz: options.includeFfzGlobals ?? bool(env.INCLUDE_FFZ_GLOBAL_EMOTES, false)
-            },
-            timeoutMs: Number(options.timeoutMs ?? env.EMOTE_FETCH_TIMEOUT_MS ?? 10_000),
-            appendEnabled: options.appendEnabled ?? bool(env.ENABLE_EMOTE_APPENDING, true),
-            excludePrefixes: options.excludePrefixes ?? csv(env.EMOTE_APPEND_EXCLUDE_PREFIXES),
-            spacing: options.spacing ?? true,
-            random: options.random || Math.random
-        };
+  constructor(options = {}) {
+    this.#storage = options.storage || null;
+    this.#fetch = options.fetchImpl || globalThis.fetch?.bind(globalThis);
+    this.#timer = options.timerImpl || defaultTimers;
+    this.#wsImpl = options.wsImpl || null;
+    this.#providers = options.providers || createDefaultProviders(this.#fetch);
+    this.#cfg = {
+      enabled: {
+        '7tv': options.enable7tv ?? true,
+        bttv: options.enableBttv ?? true,
+        ffz: options.enableFfz ?? false
+      },
+      globals: {
+        '7tv': options.include7tvGlobals ?? false,
+        bttv: options.includeBttvGlobals ?? false,
+        ffz: options.includeFfzGlobals ?? false
+      },
+      timeoutMs: Number(options.timeoutMs ?? 10_000),
+      appendEnabled: options.appendEnabled ?? true,
+      excludePrefixes: Array.isArray(options.excludePrefixes) ? options.excludePrefixes : [],
+      spacing: options.spacing ?? true,
+      random: options.random || Math.random,
+      pollMs: Number(options.pollMs ?? 10 * 60 * 1000),
+      restFallbackMs: Number(options.restFallbackMs ?? 30 * 60 * 1000),
+      cachePrefix: options.cachePrefix || 'emotes:cache:'
+    };
+  }
+
+  /* ── Lifecycle & Storage Hydration ───────────────────────── */
+
+  async sync(channels = [], channelIdMap = {}) {
+    if (this.#disposed) return this.stats();
+
+    const wanted = new Map();
+    for (const ch of channels) {
+      const key = channelKey(ch);
+      if (!key) continue;
+      wanted.set(key, ch);
+    }
+    for (const key of [...this.#channels.keys()]) {
+      if (!wanted.has(key)) this.#dropChannel(key);
+    }
+    for (const [key, label] of wanted) {
+      if (!this.#channels.has(key)) this.#channels.set(key, this.#emptyState(label));
+      else this.#channels.get(key).label = label;
+      const login = key.slice(1);
+      const id = channelIdMap?.[login] ?? channelIdMap?.[key] ?? null;
+      if (id) {
+        this.#channels.get(key).twitchId = String(id);
+        this.#twitchIdToChannel.set(String(id), key);
+      }
     }
 
-    /* ── startup ─────────────────────────────────────────────── */
+    await this.#hydrateFromCache();
+    for (const key of this.#channels.keys()) this.#rebuild(key, { persist: false, emit: false });
 
-    /**
-     * Fetches every enabled provider concurrently (channel sets + globals),
-     * compiles separate ingestion sets (for chat recognition) and append pools
-     * (gated by INCLUDE_*_GLOBAL_EMOTES for random sign-offs), and builds regexes.
-     * Provider failures and hangs are isolated: a dead CDN yields an empty list.
-     */
-    async seed(channels = [], channelIdMap = {}) {
-        const ids = [...new Set(Object.values(channelIdMap || {}).filter(Boolean).map(String))];
-        const globals = Object.fromEntries(PLATFORMS.map(p => [p, []]));
-        const byId = Object.fromEntries(PLATFORMS.map(p => [p, new Map()]));
-        const opts = { timeoutMs: this.#cfg.timeoutMs };
-        const jobs = [];
+    this.#ensureListeners();
+    this.#resubscribe();
+    this.#ensurePoller();
 
+    const rest = this.#refreshRest({ reason: 'sync' });
+    if (this.#isCold()) await rest;
+    else rest.catch(e => console.error(`[Emotes] background refresh failed: ${e.message || e}`));
+
+    return this.stats();
+  }
+
+  dispose() {
+    this.#disposed = true;
+    if (this.#pollTimer) {
+      this.#timer.clearInterval(this.#pollTimer);
+      this.#pollTimer = null;
+    }
+    this.#sevenTv?.dispose();
+    this.#bttv?.dispose();
+    this.#sevenTv = this.#bttv = null;
+    this.#listeners.clear();
+  }
+
+  on(event, listener) {
+    if (event !== 'update' || typeof listener !== 'function') return () => {};
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  stats() {
+    return {
+      channels: Object.fromEntries([...this.#channels].map(([k, v]) => [k, v.view.tokens.length])),
+      total: this.#unionView.tokens.length
+    };
+  }
+
+  getEmoteMap(channel) {
+    if (!channel) return { ...this.#unionAssets };
+    const state = this.#channels.get(channelKey(channel));
+    return state ? { ...state.assets } : {};
+  }
+
+  /* ── In-Memory Chat Operations ───────────────────────────── */
+
+  ingestMessage({ channel, text, tags = null, prefix = '' } = {}) {
+    const raw = typeof text === 'string' ? text : '';
+    const view = this.#view(channel);
+    const emoteIdMap = this.#twitchEmoteIds(raw, tags);
+    const twitchNames = new Set(Object.keys(emoteIdMap));
+
+    const textForLogs = this.#flag(view, raw, twitchNames);
+    const body = prefix ? raw.slice(prefix.length).replace(/^,\s*/, '').trim() : raw;
+    const textForAi = prefix ? this.#flag(view, body, twitchNames) : textForLogs;
+
+    const trimmed = textForAi.trim();
+    return {
+      textForAi,
+      textForLogs,
+      emoteIdMap,
+      isEmoteOnly: trimmed.length > 0 && EMOTE_ONLY.test(trimmed)
+    };
+  }
+
+  decorateReply(channel, rawReply, { appendEmote = true, maxLength = null } = {}) {
+    let out = String(rawReply ?? '').replace(/(?<!\S)emote:/g, '').replace(/\s+/g, ' ').trim();
+    if (!out) return out;
+
+    const view = this.#view(channel);
+    out = this.#spaceEmotes(view, out);
+
+    if (appendEmote && this.#cfg.appendEnabled && !this.#isExcluded(out)) {
+      const emote = this.#randomEmote(view);
+      if (emote && (!maxLength || out.length + emote.length + 1 <= maxLength)) {
+        out = `${out} ${emote}`;
+      }
+    }
+    return out;
+  }
+
+  getHarnessInstructions() {
+    const parts = [
+      '<emotes>',
+      'Users can type emotes into chat, which you will see formatted as emote:NAME for easy identification.',
+      'Treat emote:NAME tokens as opaque unless contextually relevant to the user\'s prompt, for example if the user asks you to repeat an emote, or if an emote hints at the user\'s mood or intent.',
+      'If you decide you must repeat an emote a user has written, echo it exactly as displayed with case-sensitivity.',
+      'Do NOT invent new emotes or use emotes you haven\'t seen in the user\'s prompt or in your active Twitch chat logs.'
+    ];
+
+    if (this.#cfg.appendEnabled) {
+      parts.push(
+        'An emote is randomly appended to the end of every message you send. This function is automatic without your involvement and is performed by the system handler. You are not the system, do not attempt to perform this task.'
+      );
+    }
+
+    parts.push('</emotes>');
+    return parts.join('\n');
+  }
+
+
+
+  /* ── Internal State & Helpers ────────────────────────────── */
+
+  #emptyState(label) {
+    return {
+      label,
+      twitchId: null,
+      sevenTvSetId: null,
+      ffzEtag: null,
+      lastDeltaAt: { '7tv': 0, bttv: 0, ffz: 0 },
+      channelAssets: { '7tv': new Map(), bttv: new Map(), ffz: new Map() },
+      idIndex: { '7tv': new Map(), bttv: new Map() },
+      assets: {},
+      view: EMPTY_VIEW
+    };
+  }
+
+  #coerceAssets(list, _provider) {
+    const out = [];
+    for (const item of list || []) {
+      if (item?.name) {
+        out.push(item);
+      }
+    }
+    return out;
+  }
+
+  #readChannelFetch(raw, provider) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.emotes)) {
+      return {
+        emoteSetId: raw.emoteSetId || null,
+        etag: raw.etag || null,
+        emotes: this.#coerceAssets(raw.emotes, provider)
+      };
+    }
+    return { emoteSetId: null, etag: null, emotes: this.#coerceAssets(raw, provider) };
+  }
+
+  #merge(state) {
+    const assets = {};
+    const ingest = new Set();
+    const pool = new Set();
+    const write = (map, intoPool) => {
+      for (const [name, asset] of map) {
+        ingest.add(name);
+        assets[name] = { url: asset.url || '', provider: asset.provider };
+        if (intoPool) pool.add(name);
+      }
+    };
+    // Collision precedence: FFZ global < BTTV global < 7TV global < FFZ channel < BTTV channel < 7TV channel
+    if (this.#cfg.enabled.ffz) write(this.#globals.ffz, this.#cfg.globals.ffz);
+    if (this.#cfg.enabled.bttv) write(this.#globals.bttv, this.#cfg.globals.bttv);
+    if (this.#cfg.enabled['7tv']) write(this.#globals['7tv'], this.#cfg.globals['7tv']);
+    if (this.#cfg.enabled.ffz) write(state.channelAssets.ffz, true);
+    if (this.#cfg.enabled.bttv) write(state.channelAssets.bttv, true);
+    if (this.#cfg.enabled['7tv']) write(state.channelAssets['7tv'], true);
+    return { assets, ingest, pool };
+  }
+
+  #rebuild(key, { persist = true, emit = true } = {}) {
+    const state = this.#channels.get(key);
+    if (!state) return;
+    const merged = this.#merge(state);
+    state.assets = merged.assets;
+    state.view = this.#compile(merged.ingest, merged.pool);
+    this.#rebuildUnion();
+    if (persist) this.#persist(key).catch(e => console.error(`[Emotes] cache write failed: ${e.message || e}`));
+    if (emit) this.#emitUpdate(key);
+  }
+
+  #rebuildUnion() {
+    const unionIngest = new Set();
+    const unionPool = new Set();
+    const unionAssets = {};
+    for (const state of this.#channels.values()) {
+      for (const token of state.view.tokens) unionIngest.add(token);
+      for (const token of state.view.pool) unionPool.add(token);
+      Object.assign(unionAssets, state.assets);
+    }
+    for (const p of PLATFORMS) {
+      if (this.#cfg.enabled[p]) {
+        for (const [name, asset] of this.#globals[p]) {
+          unionIngest.add(name);
+          if (this.#cfg.globals[p]) unionPool.add(name);
+          if (!unionAssets[name]) unionAssets[name] = { url: asset.url || '', provider: asset.provider };
+        }
+      }
+    }
+    this.#unionView = this.#compile(unionIngest, unionPool);
+    this.#unionAssets = unionAssets;
+  }
+
+  #view(channel) {
+    const key = channelKey(channel);
+    return (key && this.#channels.get(key)?.view) || this.#unionView;
+  }
+
+  #isCold() {
+    if (this.#channels.size === 0) return false;
+    for (const state of this.#channels.values()) {
+      if (state.view.tokens.length === 0) return true;
+    }
+    return false;
+  }
+
+  #dropChannel(key) {
+    const state = this.#channels.get(key);
+    if (!state) return;
+    if (state.sevenTvSetId) this.#setIdToChannel.delete(state.sevenTvSetId);
+    if (state.twitchId) this.#twitchIdToChannel.delete(state.twitchId);
+    this.#channels.delete(key);
+  }
+
+  #emitUpdate(key) {
+    const state = this.#channels.get(key);
+    if (!state) return;
+    const payload = { channel: state.label || key, emotes: { ...state.assets } };
+    for (const fn of this.#listeners) {
+      try { fn(payload); } catch (e) { console.error(`[Emotes] update listener failed: ${e.message || e}`); }
+    }
+  }
+
+  /* ── Redis Hydration & Persistence ───────────────────────── */
+
+  async #hydrateFromCache() {
+    if (!this.#storage) return;
+    try {
+      const globalSnap = await this.#storage.getJson(CACHE_GLOBALS);
+      if (globalSnap && typeof globalSnap === 'object') {
         for (const p of PLATFORMS) {
-            const provider = this.#providers[p];
-            if (!provider || !this.#cfg.enabled[p]) {
-                console.log(`[Emotes] ${provider?.name || p} disabled.`);
-                continue;
+          if (globalSnap[p] && typeof globalSnap[p] === 'object') {
+            this.#globals[p] = new Map(Object.entries(globalSnap[p]));
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[Emotes] globals hydration failed: ${e.message || e}`);
+    }
+
+    await Promise.all([...this.#channels.keys()].map(async (key) => {
+      try {
+        const snap = await this.#storage.getJson(this.#cfg.cachePrefix + key.slice(1));
+        if (!snap || typeof snap !== 'object') return;
+        const state = this.#channels.get(key);
+        if (!state) return;
+        if (snap.twitchId) {
+          state.twitchId = String(snap.twitchId);
+          this.#twitchIdToChannel.set(state.twitchId, key);
+        }
+        if (snap.sevenTvSetId) {
+          state.sevenTvSetId = String(snap.sevenTvSetId);
+          this.#setIdToChannel.set(state.sevenTvSetId, key);
+        }
+        if (snap.ffzEtag) state.ffzEtag = snap.ffzEtag;
+        if (snap.channelAssets && typeof snap.channelAssets === 'object') {
+          for (const p of PLATFORMS) {
+            if (snap.channelAssets[p]) {
+              state.channelAssets[p] = new Map(Object.entries(snap.channelAssets[p]));
             }
-            jobs.push(this.#guard(`${provider.name} channel`, () => provider.fetchChannel(ids, opts), new Map())
-                .then(map => { byId[p] = map instanceof Map ? map : new Map(); }));
-
-            jobs.push(this.#guard(`${provider.name} global`, () => provider.fetchGlobal(opts), [])
-                .then(list => { globals[p] = Array.isArray(list) ? list : []; }));
-        }
-
-        await Promise.all(jobs);
-
-        this.#channels.clear();
-        const unionIngest = new Set();
-        const unionPool = new Set();
-
-        for (const ch of channels) {
-            const key = channelKey(ch);
-            if (!key) continue;
-            const id = channelIdMap?.[key.slice(1)];
-            const ingest = new Set();
-            const pool = new Set();
-
-            for (const p of PLATFORMS) {
-                const channelTokens = id ? byId[p].get(String(id)) || [] : [];
-                for (const t of channelTokens) {
-                    this.#addToken(ingest, t);
-                    this.#addToken(pool, t);
-                }
-                for (const t of globals[p]) {
-                    this.#addToken(ingest, t);
-                    if (this.#cfg.globals[p]) this.#addToken(pool, t);
-                }
+          }
+        } else if (snap.assets && typeof snap.assets === 'object') {
+          for (const [name, asset] of Object.entries(snap.assets)) {
+            const p = asset?.provider;
+            if (p && state.channelAssets[p]) {
+              state.channelAssets[p].set(name, { name, url: asset.url || '', provider: p, id: asset.id || null });
             }
-
-            this.#channels.set(key, this.#compile(ingest, pool));
-            for (const t of ingest) unionIngest.add(t);
-            for (const t of pool) unionPool.add(t);
-            console.log(`[Emotes] ${key}: ${ingest.size} recognized, ${pool.size} appendable`);
+          }
         }
+        this.#reindex(state);
+      } catch (e) {
+        console.error(`[Emotes] channel hydration ${key} failed: ${e.message || e}`);
+      }
+    }));
+  }
 
-        this.#any = this.#compile(unionIngest, unionPool);
-        return this.stats();
+  async #persist(key) {
+    if (!this.#storage) return;
+    const state = this.#channels.get(key);
+    if (!state) return;
+    await this.#storage.setJson(this.#cfg.cachePrefix + key.slice(1), {
+      updatedAt: Date.now(),
+      tokens: state.view.tokens,
+      pool: state.view.pool,
+      assets: state.assets,
+      twitchId: state.twitchId,
+      sevenTvSetId: state.sevenTvSetId,
+      ffzEtag: state.ffzEtag,
+      channelAssets: {
+        '7tv': Object.fromEntries(state.channelAssets['7tv']),
+        bttv: Object.fromEntries(state.channelAssets.bttv),
+        ffz: Object.fromEntries(state.channelAssets.ffz)
+      }
+    });
+  }
+
+  async #persistGlobals() {
+    if (!this.#storage) return;
+    await this.#storage.setJson(CACHE_GLOBALS, {
+      updatedAt: Date.now(),
+      '7tv': Object.fromEntries(this.#globals['7tv']),
+      bttv: Object.fromEntries(this.#globals.bttv),
+      ffz: Object.fromEntries(this.#globals.ffz)
+    });
+  }
+
+  #reindex(state) {
+    state.idIndex['7tv'] = new Map();
+    state.idIndex.bttv = new Map();
+    for (const [name, asset] of state.channelAssets['7tv']) {
+      if (asset.id) state.idIndex['7tv'].set(String(asset.id), name);
     }
-
-    stats() {
-        return {
-            channels: Object.fromEntries([...this.#channels].map(([k, v]) => [k, v.tokens.length])),
-            total: this.#any.tokens.length
-        };
+    for (const [name, asset] of state.channelAssets.bttv) {
+      if (asset.id) state.idIndex.bttv.set(String(asset.id), name);
     }
+  }
 
-    /* ── incoming ────────────────────────────────────────────── */
+  /* ── REST Refresh ────────────────────────────────────────── */
 
-    /**
-     * Single-pass ingestion for a chat message.
-     * `prefix` (optional) is the matched command token; when present, `textForAi`
-     * is the prompt body with the command stripped. Twitch native emote ranges are
-     * always resolved against the untouched IRC text so positions stay valid.
-     */
-    ingestMessage({ channel, text, tags = null, prefix = '' } = {}) {
-        const raw = typeof text === 'string' ? text : '';
-        const view = this.#view(channel);
-        const emoteIdMap = this.#twitchEmoteIds(raw, tags);
-        const twitchNames = new Set(Object.keys(emoteIdMap));
+  async #refreshRest({ providers = PLATFORMS, reason = 'sync' } = {}) {
+    const ids = [...new Set([...this.#channels.values()].map(s => s.twitchId).filter(Boolean))];
+    const opts = { timeoutMs: this.#cfg.timeoutMs };
+    const startedAt = Date.now();
+    const jobs = [];
 
-        const textForLogs = this.#flag(view, raw, twitchNames);
-        const body = prefix ? raw.slice(prefix.length).replace(/^,\s*/, '').trim() : raw;
-        const textForAi = prefix ? this.#flag(view, body, twitchNames) : textForLogs;
+    for (const p of providers) {
+      const provider = this.#providers[p];
+      if (!provider || !this.#cfg.enabled[p]) continue;
 
-        const trimmed = textForAi.trim();
-        return {
-            textForAi,
-            textForLogs,
-            emoteIdMap,
-            isEmoteOnly: trimmed.length > 0 && EMOTE_ONLY.test(trimmed)
-        };
-    }
+      jobs.push(this.#guard(`${provider.name} global`, () => provider.fetchGlobal(opts), [])
+        .then(list => {
+          this.#globals[p] = new Map(
+            this.#coerceAssets(list, p).map(a => [a.name, a])
+          );
+        }));
 
-    /* ── outgoing ────────────────────────────────────────────── */
-
-    /**
-     * Strips internal `emote:` markers, flattens whitespace/newlines, spaces emotes
-     * away from adjacent words and punctuation, and appends a random channel emote
-     * unless disabled or the reply starts with an excluded prefix.
-     */
-    decorateReply(channel, rawReply, { appendEmote = true, maxLength = null } = {}) {
-        let out = String(rawReply ?? '').replace(/(?<!\S)emote:/g, '').replace(/\s+/g, ' ').trim();
-        if (!out) return out;
-
-        const view = this.#view(channel);
-        out = this.#spaceEmotes(view, out);
-
-        if (appendEmote && this.#cfg.appendEnabled && !this.#isExcluded(out)) {
-            const emote = this.#randomEmote(view);
-            if (emote && (!maxLength || out.length + emote.length + 1 <= maxLength)) {
-                out = `${out} ${emote}`;
+      jobs.push(this.#guard(`${provider.name} channel`, () => provider.fetchChannel(ids, opts), new Map())
+        .then(map => {
+          const byId = map instanceof Map ? map : new Map();
+          for (const [key, state] of this.#channels) {
+            if (!state.twitchId) continue;
+            if (state.lastDeltaAt[p] > startedAt) continue; // Live update was newer
+            const parsed = this.#readChannelFetch(byId.get(String(state.twitchId)), p);
+            if (p === '7tv' && parsed.emoteSetId) {
+              if (state.sevenTvSetId) this.#setIdToChannel.delete(state.sevenTvSetId);
+              state.sevenTvSetId = parsed.emoteSetId;
+              this.#setIdToChannel.set(parsed.emoteSetId, key);
             }
-        }
-        return out;
+            if (p === 'ffz' && parsed.etag) {
+              state.ffzEtag = parsed.etag;
+            }
+            this.#replaceProviderSet(state, p, parsed.emotes);
+          }
+        }));
     }
 
-    /**
-     * Builds dynamic harness instructions for emote IR token syntax and auto-appending.
-     * @returns {string}
-     */
-    getHarnessInstructions() {
-        const parts = [
-            '<emotes>',
-            'Users can type emotes into chat, which you will see formatted as emote:NAME for easy identification.',
-            'Treat emote:NAME tokens as opaque unless contextually relevant to the user\'s prompt, for example if the user asks you to repeat an emote, or if an emote hints at the user\'s mood or intent.',
-            'If you decide you must repeat an emote a user has written, echo it exactly as displayed with case-sensitivity.',
-            'Do NOT invent new emotes or use emotes you haven\'t seen in the user\'s prompt or in your active Twitch chat logs.'
-        ];
-
-        if (this.#cfg.appendEnabled) {
-            parts.push(
-                'An emote is randomly appended to the end of every message you send. This function is automatic without your involvement and is performed by the system handler. You are not the system, do not attempt to perform this task.'
-            );
-        }
-
-        parts.push('</emotes>');
-        return parts.join('\n');
+    await Promise.all(jobs);
+    await this.#persistGlobals().catch(() => {});
+    for (const key of this.#channels.keys()) {
+      this.#rebuild(key, { persist: true, emit: true });
+      const n = this.#channels.get(key).view.tokens.length;
+      console.log(`[Emotes] ${key}: ${n} recognized (${reason})`);
     }
+    this.#resubscribe();
+  }
 
-    /* ── internals ───────────────────────────────────────────── */
+  #replaceProviderSet(state, provider, emotes) {
+    state.channelAssets[provider] = new Map();
+    for (const asset of emotes) state.channelAssets[provider].set(asset.name, asset);
+    this.#reindex(state);
+  }
 
-    #addToken(set, value) {
-        if (typeof value !== 'string') return;
-        const t = value.trim();
-        if (!t || /\s/.test(t)) return;
-        set.add(t); // case-sensitive: Twitch emotes are, and LUL !== lul
+  /* ── Live Deltas ─────────────────────────────────────────── */
+
+  #applySevenTvDispatch(d) {
+    if (d?.type !== 'emote_set.update') return;
+    const setId = d.body?.id ? String(d.body.id) : null;
+    const key = setId && this.#setIdToChannel.get(setId);
+    const state = key && this.#channels.get(key);
+    if (!state) return;
+
+    let changed = false;
+    for (const row of d.body.pulled || []) {
+      if (row?.key && row.key !== 'emotes') continue;
+      const rawId = row?.old_value?.id ?? row?.value?.id;
+      const id = rawId != null ? String(rawId) : null;
+      const name = (row?.old_value?.name ?? row?.old_value?.data?.name)
+        || (id ? state.idIndex['7tv'].get(id) : null);
+      if (!name) continue;
+      const prev = state.channelAssets['7tv'].get(name);
+      state.channelAssets['7tv'].delete(name);
+      const prevId = prev?.id != null ? String(prev.id) : id;
+      if (prevId) state.idIndex['7tv'].delete(prevId);
+      changed = true;
     }
-
-    #compile(ingestSet, poolSet = ingestSet) {
-        const tokens = [...ingestSet].sort((a, b) => b.length - a.length || a.localeCompare(b));
-        if (tokens.length === 0) return EMPTY_VIEW;
-        const alt = tokens.map(escapeRe).join('|');
-        return {
-            tokens,
-            // strict: only whole whitespace-delimited tokens get flagged as emotes
-            match: new RegExp(`(?<!\\S)(${alt})(?!\\S)`, 'g'),
-            // loose: catches "LUL!" / "wowLUL" boundaries so spacing can be repaired
-            space: new RegExp(`(?<![${WORD}])(${alt})(?![${WORD}])`, 'gu'),
-            pool: [...poolSet].sort((a, b) => a.localeCompare(b))
-        };
+    for (const row of d.body.updated || []) {
+      if (row?.key && row.key !== 'emotes') continue;
+      const rawOldId = row?.old_value?.id ?? row?.value?.id;
+      const oldId = rawOldId != null ? String(rawOldId) : null;
+      const oldName = (row?.old_value?.name ?? row?.old_value?.data?.name)
+        || (oldId ? state.idIndex['7tv'].get(oldId) : null);
+      const next = assetFrom7tvEmote(row?.value || {});
+      if (oldName) {
+        const prev = state.channelAssets['7tv'].get(oldName);
+        state.channelAssets['7tv'].delete(oldName);
+        const prevId = prev?.id != null ? String(prev.id) : oldId;
+        if (prevId) state.idIndex['7tv'].delete(prevId);
+      }
+      if (next) {
+        state.channelAssets['7tv'].set(next.name, next);
+        if (next.id) state.idIndex['7tv'].set(String(next.id), next.name);
+      }
+      changed = true;
     }
-
-    #view(channel) {
-        const key = channelKey(channel);
-        return (key && this.#channels.get(key)) || this.#any;
+    for (const row of d.body.pushed || []) {
+      if (row?.key && row.key !== 'emotes') continue;
+      const next = assetFrom7tvEmote(row?.value || {});
+      if (!next) continue;
+      state.channelAssets['7tv'].set(next.name, next);
+      if (next.id) state.idIndex['7tv'].set(String(next.id), next.name);
+      changed = true;
     }
+    if (!changed) return;
+    state.lastDeltaAt['7tv'] = Date.now();
+    this.#rebuild(key);
+  }
 
-    async #guard(label, fn, fallback) {
-        const { timeoutMs } = this.#cfg;
-        let timer;
-        try {
-            return await Promise.race([
-                Promise.resolve().then(fn),
-                new Promise((_, reject) => {
-                    timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-                    timer.unref?.();
-                })
-            ]);
-        } catch (e) {
-            console.error(`[Emotes] ${label} failed: ${e.message || e}`);
-            return fallback;
-        } finally {
-            clearTimeout(timer);
-        }
+  #applyBttvEvent(name, data) {
+    const twitchId = String(data?.channel || '').replace(/^twitch:/, '');
+    const key = this.#twitchIdToChannel.get(twitchId);
+    const state = key && this.#channels.get(key);
+    if (!state) return;
+
+    if (name === 'emote_create' || name === 'emote_update') {
+      const asset = assetFromBttvEmote(data.emote || {});
+      if (!asset) return;
+      const oldName = state.idIndex.bttv.get(String(asset.id));
+      if (oldName && oldName !== asset.name) state.channelAssets.bttv.delete(oldName);
+      state.channelAssets.bttv.set(asset.name, asset);
+      state.idIndex.bttv.set(String(asset.id), asset.name);
+    } else if (name === 'emote_delete') {
+      const id = data.emoteId != null ? String(data.emoteId) : null;
+      const oldName = id ? state.idIndex.bttv.get(id) : null;
+      if (!oldName) return;
+      state.channelAssets.bttv.delete(oldName);
+      state.idIndex.bttv.delete(id);
+    } else {
+      return;
     }
+    state.lastDeltaAt.bttv = Date.now();
+    this.#rebuild(key);
+  }
 
-    #twitchEmoteIds(message, tags) {
-        const out = {};
-        const emotes = tags && typeof tags === 'object' ? tags.emotes : null;
-        if (!message || !emotes || typeof emotes !== 'object') return out;
-
-        for (const [emoteId, ranges] of Object.entries(emotes)) {
-            if (!Array.isArray(ranges) || ranges.length === 0 || typeof ranges[0] !== 'string') continue;
-            const [s, e] = ranges[0].split('-').map(n => Number.parseInt(n, 10));
-            if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || e < s || e >= message.length) continue;
-            const name = message.substring(s, e + 1).trim();
-            if (name) out[name] = String(emoteId);
-        }
-        return out;
+  async #pollFfz() {
+    if (!this.#cfg.enabled.ffz) return;
+    for (const [key, state] of this.#channels) {
+      if (!state.twitchId) continue;
+      try {
+        const result = await fetchFfzRoomConditional(state.twitchId, {
+          etag: state.ffzEtag,
+          timeoutMs: this.#cfg.timeoutMs,
+          fetchImpl: this.#fetch
+        });
+        if (result.status === 304) continue;
+        state.ffzEtag = result.etag || state.ffzEtag;
+        state.lastDeltaAt.ffz = Date.now();
+        this.#replaceProviderSet(state, 'ffz', result.emotes || []);
+        this.#rebuild(key);
+      } catch (e) {
+        console.error(`[Emotes] FFZ poll ${key} failed: ${e.message || e}`);
+      }
     }
+  }
 
-    #flag(view, text, twitchNames) {
-        if (!text) return text || '';
-        let out = text;
+  /* ── Listeners & Maintenance ─────────────────────────────── */
 
-        if (twitchNames.size > 0) {
-            const alt = [...twitchNames].sort((a, b) => b.length - a.length).map(escapeRe).join('|');
-            out = out.replace(new RegExp(`(?<!\\S)(${alt})(?!\\S)`, 'g'), m => `emote:${m}`);
-        }
-        if (view.match) {
-            view.match.lastIndex = 0;
-            out = out.replace(view.match, m => `emote:${m}`);
-        }
-        return out;
+  #ensureListeners() {
+    if (!this.#wsImpl) return;
+    if (this.#cfg.enabled['7tv'] && !this.#sevenTv) {
+      this.#sevenTv = new SevenTvEventListener({
+        wsImpl: this.#wsImpl,
+        timerImpl: this.#timer,
+        random: this.#cfg.random,
+        onDispatch: (d) => this.#applySevenTvDispatch(d)
+      });
     }
-
-    #spaceEmotes(view, text) {
-        if (!this.#cfg.spacing || !view.space) return text;
-        // Never touch URLs — an emote name can legitimately appear inside a media link.
-        const spaced = text.split(URL_SPLIT).map(segment => {
-            if (/^https?:\/\//.test(segment)) return segment;
-            view.space.lastIndex = 0;
-            return segment.replace(view.space, (m, _g, offset, whole) => {
-                const before = offset > 0 ? whole[offset - 1] : '';
-                const after = whole[offset + m.length] || '';
-                return `${before && !/\s/.test(before) ? ' ' : ''}${m}${after && !/\s/.test(after) ? ' ' : ''}`;
-            });
-        }).join('');
-        return spaced.replace(/ {2,}/g, ' ').trim();
+    if (this.#cfg.enabled.bttv && !this.#bttv) {
+      this.#bttv = new BttvEventListener({
+        wsImpl: this.#wsImpl,
+        timerImpl: this.#timer,
+        random: this.#cfg.random,
+        onEvent: (n, d) => this.#applyBttvEvent(n, d)
+      });
     }
+  }
 
-    #isExcluded(reply) {
-        if (this.#cfg.excludePrefixes.length === 0) return false;
-        const lower = reply.toLowerCase();
-        return this.#cfg.excludePrefixes.some(p => lower.startsWith(p));
-    }
+  #resubscribe() {
+    const setIds = [...this.#channels.values()].map(s => s.sevenTvSetId).filter(Boolean);
+    const twitchIds = [...this.#channels.values()].map(s => s.twitchId).filter(Boolean);
+    this.#sevenTv?.setSubscriptions(setIds);
+    this.#bttv?.setChannels(twitchIds);
+  }
 
-    #randomEmote(view) {
-        if (view.pool.length === 0) return '';
-        return view.pool[Math.floor(this.#cfg.random() * view.pool.length)] || '';
+  #ensurePoller() {
+    if (this.#pollTimer) return;
+    this.#pollTimer = this.#timer.setInterval(() => {
+      return this.#onMaintenance().catch(e => console.error(`[Emotes] maintenance failed: ${e.message || e}`));
+    }, this.#cfg.pollMs);
+    this.#pollTimer?.unref?.();
+  }
+
+  async #onMaintenance() {
+    await this.#pollFfz();
+    const stale = [];
+    const now = Date.now();
+    const isStale = (listener) => {
+      if (!listener) return false;
+      if (listener.connected) return false;
+      const last = listener.lastMessageAt || listener.openedAt || 0;
+      return last ? (now - last >= this.#cfg.restFallbackMs) : true;
+    };
+    if (this.#cfg.enabled['7tv'] && isStale(this.#sevenTv)) stale.push('7tv');
+    if (this.#cfg.enabled.bttv && isStale(this.#bttv)) stale.push('bttv');
+    if (stale.length) await this.#refreshRest({ providers: stale, reason: 'rest-fallback' });
+  }
+
+  /* ── Text & Regex Internals ──────────────────────────────── */
+
+  #compile(ingestSet, poolSet = ingestSet) {
+    const tokens = [...ingestSet].sort((a, b) => b.length - a.length || a.localeCompare(b));
+    if (tokens.length === 0) return EMPTY_VIEW;
+    const alt = tokens.map(escapeRe).join('|');
+    return {
+      tokens,
+      match: new RegExp(`(?<!\\S)(${alt})(?!\\S)`, 'g'),
+      space: new RegExp(`(?<![${WORD}])(${alt})(?![${WORD}])`, 'gu'),
+      pool: [...poolSet].sort((a, b) => a.localeCompare(b))
+    };
+  }
+
+  async #guard(label, fn, fallback) {
+    const { timeoutMs } = this.#cfg;
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(fn),
+        new Promise((_, reject) => {
+          timer = this.#timer.setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+          timer.unref?.();
+        })
+      ]);
+    } catch (e) {
+      console.error(`[Emotes] ${label} failed: ${e.message || e}`);
+      return fallback;
+    } finally {
+      this.#timer.clearTimeout(timer);
     }
+  }
+
+  #twitchEmoteIds(message, tags) {
+    const out = {};
+    const emotes = tags && typeof tags === 'object' ? tags.emotes : null;
+    if (!message || !emotes || typeof emotes !== 'object') return out;
+
+    for (const [emoteId, ranges] of Object.entries(emotes)) {
+      if (!Array.isArray(ranges) || ranges.length === 0 || typeof ranges[0] !== 'string') continue;
+      const [s, e] = ranges[0].split('-').map(n => Number.parseInt(n, 10));
+      if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || e < s || e >= message.length) continue;
+      const name = message.substring(s, e + 1).trim();
+      if (name) out[name] = String(emoteId);
+    }
+    return out;
+  }
+
+  #flag(view, text, twitchNames) {
+    if (!text) return text || '';
+    let out = text;
+
+    if (twitchNames.size > 0) {
+      const alt = [...twitchNames].sort((a, b) => b.length - a.length).map(escapeRe).join('|');
+      out = out.replace(new RegExp(`(?<!\\S)(${alt})(?!\\S)`, 'g'), m => `emote:${m}`);
+    }
+    if (view.match) {
+      view.match.lastIndex = 0;
+      out = out.replace(view.match, m => `emote:${m}`);
+    }
+    return out;
+  }
+
+  #spaceEmotes(view, text) {
+    if (!this.#cfg.spacing || !view.space) return text;
+    // Never touch URLs — an emote name can legitimately appear inside a media link.
+    const spaced = text.split(URL_SPLIT).map(segment => {
+      if (/^https?:\/\//.test(segment)) return segment;
+      view.space.lastIndex = 0;
+      return segment.replace(view.space, (m, _g, offset, whole) => {
+        const before = offset > 0 ? whole[offset - 1] : '';
+        const after = whole[offset + m.length] || '';
+        return `${before && !/\s/.test(before) ? ' ' : ''}${m}${after && !/\s/.test(after) ? ' ' : ''}`;
+      });
+    }).join('');
+    return spaced.replace(/ {2,}/g, ' ').trim();
+  }
+
+  #isExcluded(reply) {
+    if (this.#cfg.excludePrefixes.length === 0) return false;
+    const lower = reply.toLowerCase();
+    return this.#cfg.excludePrefixes.some(p => lower.startsWith(p));
+  }
+
+  #randomEmote(view) {
+    if (view.pool.length === 0) return '';
+    return view.pool[Math.floor(this.#cfg.random() * view.pool.length)] || '';
+  }
 }
 
 export default EmotePool;

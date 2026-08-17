@@ -49,18 +49,7 @@
 
     <script type="module">
         import {
-            getTwitchEmoteUrlById,
-            getBttvEmoteUrlById,
-            pick7tvFile,
-            extract7tvMapFromEmoteSetPayload,
-            pickFfzUrl,
-            extractFfzMapFromPayload,
-            extractBttvMapFromPayload,
-            ensureHttps,
             escapeHtml,
-            isUrlToken,
-            getEmoteMatch,
-            renderTokenHtml,
             renderMessageHtml
         } from '/public/web_emotes.js';
 
@@ -75,20 +64,8 @@
             mediaPerPage: 12,
             socket: null,
 
-            // channel -> twitch userId (from server, so client can call BTTV/FFZ/7TV APIs directly)
-            channelIds: {},
-
-            // Provider caches (loaded in the browser; no images stored server-side)
-            emoteGlobals: {
-                bttv: null,
-                ffz: null,
-                seventv: null,
-                _loading: null
-            },
             // channel -> combined emote map { code: { url, provider } }
-            emoteMapsByChannel: {},
-            // channel -> in-flight Promise
-            emoteFetchByChannel: {}
+            emoteMapsByChannel: {}
         };
 
         // --- DOM ELEMENTS ---
@@ -105,10 +82,6 @@
                 // 1. Fetch Channels
                 const channelsRes = await fetch('/api/channels');
                 state.channels = await channelsRes.json();
-
-                // 1b. Fetch channel -> Twitch ID mapping (enables direct 3P emote fetches from the browser)
-                const idsRes = await fetch('/api/channel-ids');
-                state.channelIds = await idsRes.json();
 
                 if (state.channels.length > 0) {
                     state.activeChannel = state.channels[0];
@@ -375,6 +348,9 @@
                     appendMessage(data.channel, data.entry);
                 } else if (data.type === 'media') {
                     prependMedia(data.entry);
+                } else if (data.type === 'emotes:update' && data.channel) {
+                    state.emoteMapsByChannel[data.channel] = data.emotes || {};
+                    if (state.activeChannel === data.channel) renderChat();
                 }
             };
         }
@@ -390,119 +366,14 @@
             return '#' + '00000'.substring(0, 6 - c.length) + c;
         }
 
-        // --- 3P EMOTE FETCHING (Browser) ---
-        async function fetchJson(url, timeoutMs = 10000) {
-            const controller = new AbortController();
-            const t = setTimeout(() => controller.abort(), timeoutMs);
-            try {
-                const res = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
-                if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-                return await res.json();
-            } finally {
-                clearTimeout(t);
-            }
-        }
-
-        // BTTV
-        async function loadBttvGlobals() {
-            if (state.emoteGlobals.bttv) return state.emoteGlobals.bttv;
-
-            const data = await fetchJson('https://api.betterttv.net/3/cached/emotes/global');
-            const map = extractBttvMapFromPayload(data);
-            state.emoteGlobals.bttv = map;
-            return map;
-        }
-
-        async function loadBttvChannel(twitchId) {
-            if (!twitchId) return {};
-            const data = await fetchJson(`https://api.betterttv.net/3/cached/users/twitch/${encodeURIComponent(twitchId)}`);
-            return extractBttvMapFromPayload(data);
-        }
-
-        // FFZ
-        async function loadFfzGlobals() {
-            if (state.emoteGlobals.ffz) return state.emoteGlobals.ffz;
-
-            const data = await fetchJson('https://api.frankerfacez.com/v1/set/global');
-            const map = extractFfzMapFromPayload(data);
-            state.emoteGlobals.ffz = map;
-            return map;
-        }
-
-        async function loadFfzChannel(twitchId) {
-            if (!twitchId) return {};
-            const data = await fetchJson(`https://api.frankerfacez.com/v1/room/id/${encodeURIComponent(twitchId)}`);
-            return extractFfzMapFromPayload(data);
-        }
-
-        // 7TV
-        async function load7tvGlobals() {
-            if (state.emoteGlobals.seventv) return state.emoteGlobals.seventv;
-
-            const data = await fetchJson('https://7tv.io/v3/emote-sets/global');
-            const map = extract7tvMapFromEmoteSetPayload(data);
-            state.emoteGlobals.seventv = map;
-            return map;
-        }
-
-        async function load7tvChannel(twitchId) {
-            if (!twitchId) return {};
-
-            const userData = await fetchJson(`https://7tv.io/v3/users/twitch/${encodeURIComponent(twitchId)}`);
-
-            // Sometimes emote_set is embedded; if not, fetch by id
-            const setLike =
-                userData?.emote_set ??
-                userData?.connections?.find(c => c?.platform === 'TWITCH')?.emote_set ??
-                null;
-
-            if (setLike?.emotes) {
-                return extract7tvMapFromEmoteSetPayload(setLike);
-            }
-
-            const setId = setLike?.id ?? userData?.emote_set_id ?? userData?.emote_set?.id ?? null;
-            if (!setId) return {};
-
-            const setPayload = await fetchJson(`https://7tv.io/v3/emote-sets/${encodeURIComponent(setId)}`);
-            return extract7tvMapFromEmoteSetPayload(setPayload);
-        }
-
         async function ensureEmotesLoaded(channel) {
             if (state.emoteMapsByChannel[channel]) return state.emoteMapsByChannel[channel];
-            if (state.emoteFetchByChannel[channel]) return state.emoteFetchByChannel[channel];
-
-            state.emoteFetchByChannel[channel] = (async () => {
-                const twitchId = state.channelIds[channel];
-
-                // Load globals once (shared across channels)
-                const [bttvG, ffzG, s7G] = await Promise.all([
-                    loadBttvGlobals().catch(() => ({})),
-                    loadFfzGlobals().catch(() => ({})),
-                    load7tvGlobals().catch(() => ({}))
-                ]);
-
-                // Load channel emotes
-                const [bttvC, ffzC, s7C] = await Promise.all([
-                    loadBttvChannel(twitchId).catch(() => ({})),
-                    loadFfzChannel(twitchId).catch(() => ({})),
-                    load7tvChannel(twitchId).catch(() => ({}))
-                ]);
-
-                // Merge within provider: global then channel (channel wins)
-                const ffz = { ...ffzG, ...ffzC };
-                const bttv = { ...bttvG, ...bttvC };
-                const seventv = { ...s7G, ...s7C };
-
-                // Final precedence across providers: 7TV > BTTV > FFZ
-                const combined = { ...ffz, ...bttv, ...seventv };
-
-                state.emoteMapsByChannel[channel] = combined;
-                return combined;
-            })().finally(() => {
-                delete state.emoteFetchByChannel[channel];
-            });
-
-            return state.emoteFetchByChannel[channel];
+            const safe = String(channel || '').replace(/^#/, '');
+            const res = await fetch(`/api/emotes/${encodeURIComponent(safe)}`);
+            if (!res.ok) return {};
+            const map = await res.json();
+            state.emoteMapsByChannel[channel] = map;
+            return map;
         }
 
         // Expose global handlers for inline HTML onclick attributes
