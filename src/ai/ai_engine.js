@@ -23,6 +23,19 @@ const COLORS = {
     blue: '\x1b[34m',
 };
 
+const HARNESS_IMAGE_LOAD_FAILED =
+    '[SYSTEM: Image processing failed - {message}]';
+const HARNESS_RESPONSE_TOO_LONG =
+    '[SYSTEM: Your previous response was too long. Please regenerate it to be concise and under {maxLength} characters, while preserving the original intent and information.]';
+
+function fillHarness(template, params) {
+    let out = template;
+    for (const [key, value] of Object.entries(params)) {
+        out = out.split(`{${key}}`).join(String(value ?? ''));
+    }
+    return out;
+}
+
 export class AIEngine {
     #imageDownloader;
     #clientFor;
@@ -239,7 +252,7 @@ export class AIEngine {
                     : [{ text }];
                 return { userParts, allUrls, youtubeMatch: null, imageUrl };
             } catch (e) {
-                const msg = this.errorHandler.getMessage('IMAGE_LOAD_ERROR_INLINE', { message: e.message });
+                const msg = fillHarness(HARNESS_IMAGE_LOAD_FAILED, { message: e.message });
                 return { userParts: [{ text: `${text}\n\n${msg}` }], allUrls, youtubeMatch: null, imageUrl };
             }
         }
@@ -318,16 +331,11 @@ export class AIEngine {
     }
 
     #getKeyErrorReason(error) {
-        if (error?.status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate limit/i.test(error?.message || '')) {
-            return 'Rate limit';
-        }
-        if (error?.status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(error?.message || '')) {
-            return 'High demand (503)';
-        }
-        if (error?.status) {
-            return `HTTP ${error.status}`;
-        }
-        return error?.message ? error.message.slice(0, 40) : 'Error';
+        const info = this.errorHandler.classify(error);
+        if (info.category === 'quota' || info.key === 'RATE_LIMIT_EXHAUSTED') return 'Rate limit';
+        if (info.status === 503) return 'High demand (503)';
+        if (info.status) return `HTTP ${info.status}`;
+        return info.message ? info.message.slice(0, 40) : 'Error';
     }
 
     #logHeader(title) {
@@ -436,7 +444,7 @@ export class AIEngine {
             const loop = await runLoop();
             result = loop.result;
         } catch (turnError) {
-            const isRateLimit = this.#getKeyErrorReason(turnError) === 'Rate limit';
+            const isRateLimit = this.errorHandler.classify(turnError).category === 'quota';
             if (isRateLimit && this.#toolDispatcher.hasGoogleSearch(activeTools)) {
                 console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Google Search grounding quota exceeded/unavailable on key #${this.currentKeyIndex}, falling back to ungrounded generation...`);
                 activeTools = this.#toolDispatcher.withoutGoogleSearch(activeTools);
@@ -459,7 +467,10 @@ export class AIEngine {
 
         // Check for prompt blocks
         if (result.promptFeedback?.blockReason) {
-            const errMsg = this.errorHandler.createErrorResponse({ message: "Content blocked" }, result.promptFeedback.blockReason);
+            const errMsg = this.errorHandler.format({
+                blockReason: result.promptFeedback.blockReason,
+                promptFeedback: result.promptFeedback
+            });
             console.log(`   ${COLORS.red}✗ Blocked:${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -469,7 +480,10 @@ export class AIEngine {
         const finishReason = result.candidates?.[0]?.finishReason;
         const safetyRatings = result.candidates?.[0]?.safetyRatings;
         if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
-            const errMsg = this.errorHandler.createErrorResponse({ message: "Safety block" }, null, safetyRatings);
+            const errMsg = this.errorHandler.format({
+                finishReason,
+                safetyRatings
+            });
             console.log(`   ${COLORS.red}✗ Safety:${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -482,7 +496,7 @@ export class AIEngine {
             if (thoughtParts.length > 0) {
                 console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Model returned thoughts but no final response`);
             }
-            const errMsg = this.errorHandler.getMessage('GEMINI_EMPTY_RESPONSE');
+            const errMsg = this.errorHandler.format('GEMINI_EMPTY_RESPONSE');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -503,7 +517,7 @@ export class AIEngine {
                 ...history,
                 { role: 'user', parts: userParts },
                 { role: 'model', parts: latestSuccessfulParts },
-                { role: 'user', parts: [{ text: this.errorHandler.getMessage('SYSTEM_RESPONSE_TOO_LONG', { maxLength: currentMax }) }] }
+                { role: 'user', parts: [{ text: fillHarness(HARNESS_RESPONSE_TOO_LONG, { maxLength: currentMax }) }] }
             ];
 
             try {
@@ -530,7 +544,7 @@ export class AIEngine {
         }
 
         if (!agentResponse || !agentResponse.trim()) {
-            const errMsg = this.errorHandler.getMessage('GEMINI_EMPTY_RESPONSE');
+            const errMsg = this.errorHandler.format('GEMINI_EMPTY_RESPONSE');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -648,12 +662,11 @@ export class AIEngine {
             }
         }
 
-        const isRateLimit = !lastError || lastError?.status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate limit/i.test(lastError?.message || '');
-        const finalError = isRateLimit
-            ? new Error('All API keys exhausted due to rate limits')
-            : lastError;
-
-        return this.errorHandler.createErrorResponse(finalError);
+        const info = this.errorHandler.classify(lastError);
+        if (info.category === 'quota') {
+            return this.errorHandler.format('RATE_LIMIT_EXHAUSTED');
+        }
+        return this.errorHandler.format(lastError);
     }
 }
 

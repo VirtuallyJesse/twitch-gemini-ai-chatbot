@@ -63,35 +63,15 @@ function extractText(result) {
 }
 
 function isPresentationFailure(result, errorHandler) {
+    if (errorHandler && typeof errorHandler.isFailure === 'function') {
+        return errorHandler.isFailure(result);
+    }
     if (!result) return true;
     if (typeof result === 'object') {
         if (result.blocked === true || result.safetyBlocked === true) return true;
         if (!result.text || !String(result.text).trim()) return true;
     }
-
-    const text = extractText(result).trim();
-    if (!text) return true;
-
-    if (errorHandler && typeof errorHandler.getMessage === 'function') {
-        const knownFailureKeys = [
-            'GEMINI_EMPTY_RESPONSE',
-            'CONTENT_BLOCKED',
-            'UNKNOWN_ERROR',
-            'POLLINATIONS_CONTENT_BLOCKED'
-        ];
-
-        for (const key of knownFailureKeys) {
-            const msg = errorHandler.getMessage(key);
-            if (msg && text === msg.trim()) return true;
-        }
-
-        const safetyFilterPrefix = errorHandler.getMessage('SAFETY_FILTER')?.split('{')?.[0]?.trim();
-        if (safetyFilterPrefix && text.startsWith(safetyFilterPrefix)) {
-            return true;
-        }
-    }
-
-    return false;
+    return !extractText(result).trim();
 }
 
 function ensureExactUrl(text, url) {
@@ -198,7 +178,7 @@ export class MediaPipeline {
     }
 
     async #presentMedia({ channel, username, prompt, mediaType, command, mediaUrl }) {
-        const fallback = this.errorHandler.getMessage('MEDIA_FALLBACK_RESPONSE', {
+        const fallback = this.errorHandler.format('MEDIA_FALLBACK_RESPONSE', {
             mediaType,
             username,
             url: mediaUrl
@@ -264,7 +244,7 @@ export class MediaPipeline {
         if (!cleanPrompt) {
             return {
                 success: false,
-                replyText: this.errorHandler.getMessage('MEDIA_PROMPT_REQUIRED', {
+                replyText: this.errorHandler.format('MEDIA_PROMPT_REQUIRED', {
                     username,
                     mediaType
                 }),
@@ -283,7 +263,7 @@ export class MediaPipeline {
             if (!generated?.buffer || byteLength(generated.buffer) === 0) {
                 return {
                     success: false,
-                    replyText: this.errorHandler.getMessage('MEDIA_NO_DATA', {
+                    replyText: this.errorHandler.format('MEDIA_NO_DATA', {
                         service: this.providerName,
                         mediaType
                     }),
@@ -329,7 +309,7 @@ export class MediaPipeline {
 
             return {
                 success: false,
-                replyText: this.errorHandler.createErrorResponse(error),
+                replyText: this.errorHandler.format(error),
                 mediaEntry: null
             };
         }

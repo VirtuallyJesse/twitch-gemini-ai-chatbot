@@ -392,7 +392,7 @@ export class ChatRouter {
     }
 
     async #sendCooldown(transport, channel, cooldown, extra = {}) {
-        const reply = this.errorHandler?.getMessage?.('COOLDOWN_ACTIVE', {
+        const reply = this.errorHandler?.format?.('COOLDOWN_ACTIVE', {
             remainingTime: cooldown.remaining
         });
 
@@ -432,11 +432,8 @@ export class ChatRouter {
     }
 
     #safeErrorReply(error) {
-        if (typeof this.errorHandler?.createErrorResponse === 'function') {
-            return this.errorHandler.createErrorResponse(error);
-        }
-        if (typeof this.errorHandler?.getMessage === 'function') {
-            return this.errorHandler.getMessage('UNKNOWN_ERROR');
+        if (typeof this.errorHandler?.format === 'function') {
+            return this.errorHandler.format(error);
         }
         return null;
     }

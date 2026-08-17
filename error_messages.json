@@ -40,8 +40,6 @@
     "IMAGE_UPLOAD_FAILED":  "❌ Upload Failed. Could not upload image. Try again in 30 seconds.",
     "IMAGE_TOO_LARGE":  "🖼️ Image Too Large. Try a smaller image.",
     "IMAGE_LOAD_ERROR":  "🖼️ Image Error. Could not load that image. Try a different URL.",
-    "IMAGE_LOAD_ERROR_INLINE":  "[SYSTEM: Image processing failed - {message}]",
-    "SYSTEM_RESPONSE_TOO_LONG":  "[SYSTEM: Your previous response was too long. Please regenerate it to be concise and under {maxLength} characters, while preserving the original intent and information.]",
     "CONTENT_BLOCKED":  "🚫 Content Blocked. The request was deemed inappropriate. Try being more specific or use different words.",
     "SAFETY_FILTER":  "⚠️ Safety Filter Triggered. Flagged as {categories}. Try rephrasing your message.",
     "HTTP_429":  "⏰ Quota Exceeded. API rate limit reached. Try again in 30 seconds.",
