@@ -24,8 +24,6 @@ services:
       # ═══════════════════════════════════════════════════════════════════
       - key: GEMINI_API_KEY
         value: "your-gemini-api-key(s)"
-      - key: POLLINATIONS_API_KEY
-        value: "your-pollinations-api-key"
       - key: UPSTASH_REDIS_URL
         value: "your-upstash-redis-url"
 
@@ -62,12 +60,12 @@ services:
       # ═══════════════════════════════════════════════════════════════════
       - key: COOLDOWN_DURATION
         value: "1"
-      - key: ENABLE_SEARCH_GROUNDING
-        value: "false"
+      - key: SEARCH_GROUNDING
+        value: "off"   # tavily | google | off
       - key: MODEL_NAME
         value: "gemini-3.7-flash"
       - key: THINKING_LEVEL
-        value: "medium"
+        value: "medium" # low | medium | high
       - key: POLLINATIONS_IMAGE_MODEL
         value: "gptimage"
       - key: POLLINATIONS_VIDEO_MODEL
@@ -90,5 +88,11 @@ services:
       # ═══════════════════════════════════════════════════════════════════
       # OPTIONAL: Additional API Keys
       # ═══════════════════════════════════════════════════════════════════
+      - key: POLLINATIONS_API_KEY
+        value: "your-pollinations-api-key"
+      - key: TAVILY_API_KEY
+        value: "your-tavily-api-key"
+      - key: TAVILY_SEARCH_DEPTH
+        value: "basic"   # basic (1 credit) | advanced (2 credits)
       - key: YOUTUBE_API_KEY
         value: "your-youtube-api-key"

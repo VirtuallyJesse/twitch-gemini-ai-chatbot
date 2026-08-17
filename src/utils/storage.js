@@ -82,8 +82,27 @@ export class MemoryStorageAdapter {
         this.chat = new Map();
         this.media = [];
         this.tokens = null;
+        this.kv = new Map();
         this.configured = false;
         this.isPersistent = false;
+    }
+
+    async setJson(key, value) {
+        try {
+            this.kv.set(String(key), JSON.stringify(value));
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+        }
+    }
+
+    async getJson(key) {
+        try {
+            if (!this.kv.has(String(key))) return null;
+            return safeJsonParse(this.kv.get(String(key)));
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return null;
+        }
     }
 
     async addChatMessage(channel, entry) {
@@ -249,6 +268,25 @@ export class UpstashRedisAdapter {
             return null;
         }
     }
+
+    async setJson(key, value) {
+        try {
+            await this.request('/', ['SET', String(key), JSON.stringify(value)]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
+    async getJson(key) {
+        try {
+            const data = await this.request('/', ['GET', String(key)]);
+            if (!data?.result) return null;
+            return safeJsonParse(data.result);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return null;
+        }
+    }
 }
 
 export class Storage {
@@ -299,5 +337,13 @@ export class Storage {
 
     getTokens() {
         return this.adapter.getTokens();
+    }
+
+    setJson(key, value) {
+        return this.adapter.setJson(key, value);
+    }
+
+    getJson(key) {
+        return this.adapter.getJson(key);
     }
 }

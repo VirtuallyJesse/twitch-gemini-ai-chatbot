@@ -3,7 +3,8 @@ export const DEFAULT_TOOL_TIMEOUT_MS = 3500;
 
 const SEARCH_TOOL_NAMES = new Set(['search_web', 'web_search']);
 const DEFAULT_SEARCH_NAME = 'search_web';
-const DEFAULT_SEARCH_DESCRIPTION = 'Search the web for current, factual information.';
+const DEFAULT_SEARCH_DESCRIPTION =
+    'Search the web for real-time facts, current events, live stats, and breaking news.';
 const DEFAULT_SEARCH_PARAMETERS = {
     type: 'object',
     properties: {
@@ -30,7 +31,8 @@ export class ToolDispatcher {
     } = {}) {
         this.#tools = Array.isArray(tools) ? tools.filter(Boolean) : [];
         this.#searchProvider = searchProvider || null;
-        this.#searchMode = searchMode === 'google' || searchMode === 'custom' ? searchMode : 'off';
+        const normalized = searchMode === 'tavily' ? 'custom' : searchMode;
+        this.#searchMode = normalized === 'google' || normalized === 'custom' ? normalized : 'off';
         this.#fetchImpl = fetchImpl;
         this.#defaultTimeoutMs = Number(defaultTimeoutMs) > 0
             ? Number(defaultTimeoutMs)
@@ -74,6 +76,9 @@ export class ToolDispatcher {
         searchProvider = null
     } = {}) {
         const explicit = String(searchGrounding || '').toLowerCase();
+        if (explicit === 'tavily') {
+            return searchProvider ? 'custom' : 'off';
+        }
         if (explicit === 'google' || explicit === 'custom' || explicit === 'off') {
             if (explicit === 'custom' && !searchProvider) return 'off';
             return explicit;
@@ -131,6 +136,9 @@ export class ToolDispatcher {
     #customSearchTool() {
         if (this.#searchMode !== 'custom' || !this.#searchProvider) return null;
         const provider = this.#searchProvider;
+        if (typeof provider.isAvailable === 'function' && !provider.isAvailable()) {
+            return null;
+        }
         return {
             name: provider.name || DEFAULT_SEARCH_NAME,
             description: provider.description || DEFAULT_SEARCH_DESCRIPTION,

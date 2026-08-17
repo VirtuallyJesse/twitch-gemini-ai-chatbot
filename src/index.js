@@ -8,6 +8,7 @@ import { MediaUploader } from './media/media_uploader.js';
 import { MediaPipeline } from './media/media_pipeline.js';
 import ErrorHandler from './utils/error_handler.js';
 import { PollinationsClient } from './media/media_providers.js';
+import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
 import { TwitchTransport } from './twitch/twitch_transport.js';
 import { ChatRouter } from './twitch/chat_router.js';
@@ -54,13 +55,32 @@ const TWITCH_USERNAME = process.env.TWITCH_USERNAME || '';
 const BOT_COMMAND_NAME = process.env.BOT_COMMAND_NAME || '!gemini';
 const JOIN_CHANNELS = process.env.JOIN_CHANNELS || '';
 const COOLDOWN_DURATION = process.env.COOLDOWN_DURATION !== undefined ? parseInt(process.env.COOLDOWN_DURATION, 10) : 1;
-const ENABLE_SEARCH_GROUNDING = process.env.ENABLE_SEARCH_GROUNDING || 'false';
+const SEARCH_GROUNDING = process.env.SEARCH_GROUNDING || '';
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
+const TAVILY_SEARCH_DEPTH = process.env.TAVILY_SEARCH_DEPTH || 'basic';
 const THINKING_LEVEL = process.env.THINKING_LEVEL || 'medium';
 const IGNORED_USERNAMES = process.env.IGNORED_USERNAMES || '';
 const ignoredUsernames = IGNORED_USERNAMES.split(',').map(user => user.trim().toLowerCase()).filter(Boolean);
 
 if (!GEMINI_API_KEY) {
     console.error('No GEMINI_API_KEY found. Please set it as an environment variable.');
+}
+
+const searchSlot = String(SEARCH_GROUNDING).toLowerCase();
+const wantsTavily = searchSlot === 'tavily' || searchSlot === 'custom';
+
+let searchProvider = null;
+if (wantsTavily && TAVILY_API_KEY) {
+    searchProvider = new TavilySearchProvider({
+        apiKey: TAVILY_API_KEY,
+        searchDepth: TAVILY_SEARCH_DEPTH,
+        storage
+    });
+    searchProvider.startBackgroundProbe().catch(err => {
+        console.warn('[Tavily] Startup probe failed:', err?.message || err);
+    });
+} else if (wantsTavily) {
+    console.warn('[Search] SEARCH_GROUNDING is tavily/custom but TAVILY_API_KEY is empty. Web search disabled.');
 }
 
 const commandNames = BOT_COMMAND_NAME.split(',').map(cmd => cmd.trim().toLowerCase());
@@ -87,7 +107,8 @@ const aiEngine = new AIEngine({
     modelName: MODEL_NAME,
     fileContext,
     historyLength: AI_HISTORY_LENGTH,
-    enableSearchGrounding: ENABLE_SEARCH_GROUNDING,
+    searchGrounding: SEARCH_GROUNDING,
+    searchProvider,
     thinkingLevel: THINKING_LEVEL,
     youtubeApiKey: YOUTUBE_API_KEY,
     maxResponseLength: parseInt(process.env.GEMINI_MAX_RESPONSE_LENGTH, 10) || 450,
