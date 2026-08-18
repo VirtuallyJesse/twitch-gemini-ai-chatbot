@@ -8,7 +8,7 @@ services:
     startCommand: npm start
     envVars:
       # ═══════════════════════════════════════════════════════════════════
-      # REQUIRED: Twitch Bot Configuration
+      # REQUIRED: Twitch Bot Identity & App Credentials
       # ═══════════════════════════════════════════════════════════════════
       - key: TWITCH_USERNAME
         value: "your-bot-username"
@@ -20,18 +20,48 @@ services:
         value: "your-twitch-client-secret"
 
       # ═══════════════════════════════════════════════════════════════════
-      # REQUIRED: AI & API Keys
+      # REQUIRED: Core AI & Persistence
       # ═══════════════════════════════════════════════════════════════════
       - key: GEMINI_API_KEY
-        value: "your-gemini-api-key(s)"
+        value: "your-gemini-api-key(s)" # Comma-separated keys rotate automatically
       - key: UPSTASH_REDIS_URL
         value: "your-upstash-redis-url"
 
       # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Command Names (customizable triggers)
+      # OPTIONAL: AI Chat & Web Search
       # ═══════════════════════════════════════════════════════════════════
       - key: BOT_COMMAND_NAME
-        value: "!ask,@yourbotusername"
+        value: "!ask,@yourbotusername" # Trigger prefixes for AI chat
+      - key: MODEL_NAME
+        value: "gemini-3.7-flash"
+      - key: THINKING_LEVEL
+        value: "medium" # low | medium | high
+      - key: GEMINI_MAX_RESPONSE_LENGTH
+        value: "450"
+      - key: AI_HISTORY_LENGTH
+        value: "10"     # Number of recent dialogue turns to remember per channel
+      - key: CHAT_CONTEXT_LENGTH
+        value: "10"     # Number of ambient incoming chat messages injected into prompt
+      - key: SEARCH_GROUNDING
+        value: "off"    # off | tavily | google
+      - key: TAVILY_API_KEY
+        value: "your-tavily-api-key"
+      - key: TAVILY_SEARCH_DEPTH
+        value: "basic"  # basic (1 credit) | advanced (2 credits)
+
+      # ═══════════════════════════════════════════════════════════════════
+      # OPTIONAL: Twitch Helix Action Tools (Stream & Mod Actions)
+      # ═══════════════════════════════════════════════════════════════════
+      - key: ENABLE_HELIX_ACTIONS
+        value: "true"   # Enable stream metadata, timeouts, announcements, shoutouts, clips
+      - key: HELIX_CLIP_COOLDOWN_SECONDS
+        value: "30"     # Clip request cooldown & deduplication window in seconds
+      - key: HELIX_DEFAULT_TIMEOUT_SECONDS
+        value: "600"    # Default timeout duration in seconds (10 minutes)
+
+      # ═══════════════════════════════════════════════════════════════════
+      # OPTIONAL: Media Generation (Pollinations & YouTube)
+      # ═══════════════════════════════════════════════════════════════════
       - key: IMAGE_COMMAND_NAME
         value: "!image"
       - key: VIDEO_COMMAND_NAME
@@ -40,9 +70,23 @@ services:
         value: "!tts"
       - key: MUSIC_COMMAND_NAME
         value: "!song"
+      - key: POLLINATIONS_API_KEY
+        value: "your-pollinations-api-key"
+      - key: POLLINATIONS_IMAGE_MODEL
+        value: "gptimage"
+      - key: POLLINATIONS_VIDEO_MODEL
+        value: "seedance"
+      - key: POLLINATIONS_TTS_MODEL
+        value: "elevenlabs"
+      - key: POLLINATIONS_TTS_VOICE
+        value: "charlotte"
+      - key: POLLINATIONS_MUSIC_MODEL
+        value: "elevenmusic"
+      - key: YOUTUBE_API_KEY
+        value: "your-youtube-api-key"
 
       # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Emote Providers
+      # OPTIONAL: Emote Integration (7TV, BTTV, FFZ)
       # ═══════════════════════════════════════════════════════════════════
       - key: ENABLE_7TV_EMOTES
         value: "true"
@@ -56,43 +100,9 @@ services:
         value: "!settitle"
 
       # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Behavior Tuning
+      # OPTIONAL: Chat Moderation & Bot Filtering
       # ═══════════════════════════════════════════════════════════════════
       - key: COOLDOWN_DURATION
-        value: "1"
-      - key: SEARCH_GROUNDING
-        value: "off"   # tavily | google | off
-      - key: MODEL_NAME
-        value: "gemini-3.7-flash"
-      - key: THINKING_LEVEL
-        value: "medium" # low | medium | high
-      - key: POLLINATIONS_IMAGE_MODEL
-        value: "gptimage"
-      - key: POLLINATIONS_VIDEO_MODEL
-        value: "seedance"
-      - key: POLLINATIONS_TTS_MODEL
-        value: "elevenlabs"
-      - key: POLLINATIONS_TTS_VOICE
-        value: "charlotte"
-      - key: POLLINATIONS_MUSIC_MODEL
-        value: "elevenmusic"
-      - key: GEMINI_MAX_RESPONSE_LENGTH
-        value: "450"
-      - key: AI_HISTORY_LENGTH
-        value: "10"
-      - key: CHAT_CONTEXT_LENGTH
-        value: "10"
+        value: "1"      # Per-chatter cooldown in seconds
       - key: IGNORED_USERNAMES
         value: "StreamElements,Nightbot"
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Additional API Keys
-      # ═══════════════════════════════════════════════════════════════════
-      - key: POLLINATIONS_API_KEY
-        value: "your-pollinations-api-key"
-      - key: TAVILY_API_KEY
-        value: "your-tavily-api-key"
-      - key: TAVILY_SEARCH_DEPTH
-        value: "basic"   # basic (1 credit) | advanced (2 credits)
-      - key: YOUTUBE_API_KEY
-        value: "your-youtube-api-key"

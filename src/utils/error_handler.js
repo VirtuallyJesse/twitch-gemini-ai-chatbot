@@ -52,6 +52,10 @@ const KEY_CATEGORY = {
     HTTP_403: 'auth',
     YOUTUBE_RESTRICTED: 'auth',
     POLLINATIONS_NOT_CONFIGURED: 'auth',
+    BOT_NOT_MODERATOR: 'auth',
+    BROADCASTER_AUTH_REQUIRED: 'auth',
+    HELIX_ACTION_TIMEOUT: 'network',
+    HELIX_ACTION_FAILED: 'server',
 
     HTTP_400: 'client',
     HTTP_404: 'client',
@@ -311,8 +315,11 @@ export class ErrorHandler {
             return this.#classifyUnsafe(input.cause, params);
         }
 
-        if (typeof input.key === 'string' && (this.messages[input.key] || KEY_CATEGORY[input.key])) {
-            return this.#descriptor(input.key, { ...input.params, ...params }, {
+        const explicitKey = (typeof input.errorKey === 'string' && input.errorKey)
+            || (typeof input.key === 'string' && input.key)
+            || null;
+        if (explicitKey && (this.messages[explicitKey] || KEY_CATEGORY[explicitKey])) {
+            return this.#descriptor(explicitKey, { ...input.params, ...params }, {
                 category: input.category,
                 retryable: input.retryable,
                 status: input.status

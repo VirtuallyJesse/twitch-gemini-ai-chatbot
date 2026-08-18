@@ -11,8 +11,9 @@ import ErrorHandler from './utils/error_handler.js';
 import { PollinationsClient } from './media/media_providers.js';
 import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
-import { TwitchTransport } from './twitch/twitch_transport.js';
+import { TwitchTransport, renderAuthMismatchHtml } from './twitch/twitch_transport.js';
 import { ChatRouter } from './twitch/chat_router.js';
+import { createHelixTools } from './twitch/helix_actions.js';
 
 job.start();
 
@@ -63,6 +64,9 @@ const TAVILY_SEARCH_DEPTH = process.env.TAVILY_SEARCH_DEPTH || 'basic';
 const THINKING_LEVEL = process.env.THINKING_LEVEL || 'medium';
 const IGNORED_USERNAMES = process.env.IGNORED_USERNAMES || '';
 const ignoredUsernames = IGNORED_USERNAMES.split(',').map(user => user.trim().toLowerCase()).filter(Boolean);
+const ENABLE_HELIX_ACTIONS = process.env.ENABLE_HELIX_ACTIONS !== 'false';
+const HELIX_CLIP_COOLDOWN_SECONDS = Number(process.env.HELIX_CLIP_COOLDOWN_SECONDS) || 30;
+const HELIX_DEFAULT_TIMEOUT_SECONDS = Number(process.env.HELIX_DEFAULT_TIMEOUT_SECONDS) || 600;
 
 if (!GEMINI_API_KEY) {
     console.error('No GEMINI_API_KEY found. Please set it as an environment variable.');
@@ -124,6 +128,28 @@ try {
 const mediaUploader = new MediaUploader();
 const errorHandler = new ErrorHandler();
 const pollinationsClient = new PollinationsClient();
+const CHAT_CONTEXT_LENGTH = parseInt(process.env.CHAT_CONTEXT_LENGTH, 10) || 10;
+
+const transport = new TwitchTransport({
+    clientId: process.env.TWITCH_CLIENT_ID || '',
+    clientSecret: process.env.TWITCH_CLIENT_SECRET || '',
+    botUsername: TWITCH_USERNAME,
+    channels,
+    initialRefreshToken: process.env.TWITCH_REFRESH_TOKEN || '',
+    storage,
+    ignoredUsernames
+});
+
+let helixTools = [];
+if (ENABLE_HELIX_ACTIONS) {
+    const helixActionSuite = createHelixTools({
+        transport,
+        clipCooldownSeconds: HELIX_CLIP_COOLDOWN_SECONDS,
+        defaultTimeoutSeconds: HELIX_DEFAULT_TIMEOUT_SECONDS
+    });
+    helixTools = helixActionSuite.tools;
+}
+
 const aiEngine = new AIEngine({
     apiKeys: GEMINI_API_KEY,
     modelName: MODEL_NAME,
@@ -135,19 +161,8 @@ const aiEngine = new AIEngine({
     youtubeApiKey: YOUTUBE_API_KEY,
     maxResponseLength: parseInt(process.env.GEMINI_MAX_RESPONSE_LENGTH, 10) || 450,
     errorHandler,
+    tools: helixTools,
     verbose: process.env.AI_VERBOSE === 'true'
-});
-
-const CHAT_CONTEXT_LENGTH = parseInt(process.env.CHAT_CONTEXT_LENGTH, 10) || 10;
-
-const transport = new TwitchTransport({
-    clientId: process.env.TWITCH_CLIENT_ID || '',
-    clientSecret: process.env.TWITCH_CLIENT_SECRET || '',
-    botUsername: TWITCH_USERNAME,
-    channels,
-    initialRefreshToken: process.env.TWITCH_REFRESH_TOKEN || '',
-    storage,
-    ignoredUsernames
 });
 
 const mediaPipeline = new MediaPipeline({
@@ -227,12 +242,81 @@ app.get('/auth/login', (req, res) => {
     }
 });
 
+app.get('/auth/broadcaster', (req, res) => {
+    try {
+        const channel = req.query.channel || (transport.channels[0] || '').replace('#', '');
+        if (!channel) {
+            return res.status(400).send('Channel parameter is required (e.g. /auth/broadcaster?channel=mychannel)');
+        }
+        const redirectUri = getTwitchRedirectUri(req);
+        const url = transport.auth.getBroadcasterLoginUrl(redirectUri, channel);
+        res.redirect(url);
+    } catch (error) {
+        console.error('[Auth] Failed to build Broadcaster auth URL:', error);
+        res.status(500).send('Failed to start Broadcaster authorization.');
+    }
+});
+
 app.get('/auth/callback', async (req, res) => {
-    const { code, error, error_description: errorDescription } = req.query;
+    const { code, state, error, error_description: errorDescription } = req.query;
     if (error) { res.status(400).send(`Twitch authorization failed: ${errorDescription || error}`); return; }
     if (!code) { res.status(400).send('Missing authorization code.'); return; }
+    const redirectUri = getTwitchRedirectUri(req);
+
+    if (state && String(state).startsWith('broadcaster:')) {
+        const channel = String(state).slice('broadcaster:'.length);
+        try {
+            await transport.auth.handleBroadcasterCallback(channel, String(code), redirectUri);
+            broadcastWs({ type: 'auth:broadcaster', channel, authorized: true });
+            res.type('html').send(`
+                <!doctype html>
+                <html>
+                <head>
+                    <meta charset="utf-8" />
+                    <title>Broadcaster Authorized</title>
+                    <style>
+                        body { font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; line-height: 1.5; text-align: center; }
+                        .badge { display: inline-flex; align-items: center; justify-content: center; background: #22c55e; color: white; border-radius: 50%; width: 48px; height: 48px; font-size: 24px; font-weight: bold; margin: 0 auto 16px; }
+                        a { color: #9147ff; }
+                    </style>
+                </head>
+                <body>
+                    <div class="badge">✓</div>
+                    <h1>Broadcaster authorization complete</h1>
+                    <p>Channel <strong>${channel}</strong> has authorized stream management actions.</p>
+                    <p id="closing-note" style="color: #666; font-size: 14px;">This window will close automatically...</p>
+                    <p><a href="/">Return to the dashboard</a></p>
+                    <script>
+                        try {
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'twitch:broadcaster_authorized', channel: '${channel}' }, '*');
+                                setTimeout(() => window.close(), 1200);
+                            }
+                        } catch (e) {}
+                    </script>
+                </body>
+                </html>
+            `);
+            return;
+        } catch (authError) {
+            console.error('[Auth] Broadcaster callback failed:', authError);
+            if (authError.name === 'AuthMismatchError') {
+                const retryUrl = `/auth/broadcaster?channel=${encodeURIComponent(authError.expected)}`;
+                res.status(400).type('html').send(renderAuthMismatchHtml({
+                    expected: authError.expected,
+                    actual: authError.actual,
+                    retryUrl,
+                    isBroadcaster: true
+                }));
+                return;
+            }
+            res.status(500).send(`Broadcaster authorization failed: ${authError.message}`);
+            return;
+        }
+    }
+
     try {
-        await transport.auth.handleCallback(String(code), getTwitchRedirectUri(req));
+        await transport.auth.handleCallback(String(code), redirectUri);
         res.type('html').send(`
             <!doctype html>
             <html>
@@ -240,25 +324,41 @@ app.get('/auth/callback', async (req, res) => {
                 <meta charset="utf-8" />
                 <title>Twitch Authorized</title>
                 <style>
-                    body { font-family: sans-serif; max-width: 720px; margin: 60px auto; padding: 0 20px; line-height: 1.5; }
+                    body { font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; line-height: 1.5; text-align: center; }
+                    .badge { display: inline-flex; align-items: center; justify-content: center; background: #9147ff; color: white; border-radius: 50%; width: 48px; height: 48px; font-size: 24px; font-weight: bold; margin: 0 auto 16px; }
                     a { color: #9147ff; }
                 </style>
             </head>
             <body>
+                <div class="badge">✓</div>
                 <h1>Twitch authorization complete</h1>
-                <p>The bot account is now connected to this app.</p>
+                <p>The bot account (<strong>@${TWITCH_USERNAME}</strong>) is now connected.</p>
                 <p><a href="/">Return to the dashboard</a></p>
             </body>
             </html>
         `);
     } catch (authError) {
         console.error('[Auth] Callback failed:', authError);
+        if (authError.name === 'AuthMismatchError') {
+            res.status(400).type('html').send(renderAuthMismatchHtml({
+                expected: authError.expected,
+                actual: authError.actual,
+                retryUrl: '/auth/login',
+                isBroadcaster: false
+            }));
+            return;
+        }
         res.status(500).send(`Authorization failed: ${authError.message}`);
     }
 });
 
-app.get('/auth/status', (_req, res) => res.json(transport.auth.getStatus()));
+app.get('/auth/status', async (_req, res) => {
+    const status = transport.auth.getStatus();
+    const channelStatuses = await transport.getChannelAuthStatuses();
+    res.json({ ...status, channelStatuses });
+});
 app.get('/api/channels', (_req, res) => res.json(transport.channels));
+app.get('/api/channel-status', async (_req, res) => res.json(await transport.getChannelAuthStatuses()));
 app.get('/api/emotes/:channel', (req, res) => {
     res.set('Cache-Control', 'public, max-age=300');
     res.json(emotes.getEmoteMap(req.params.channel));
@@ -297,16 +397,20 @@ app.all('/', (req, res) => {
                         border-radius: 8px;
                         font-weight: 600;
                     }
+                    a.button:hover { background: #772ce8; }
+                    .info-box { background: #f3e8ff; border: 1px solid #d8b4fe; border-radius: 8px; padding: 14px 18px; margin: 20px 0; color: #581c87; }
                     code { background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }
                 </style>
             </head>
             <body>
                 <h1>Twitch authorization required</h1>
-                <p>This bot is deployed, but the Twitch bot account has not been connected yet.</p>
+                <p>This bot is configured for Twitch account: <strong>@${TWITCH_USERNAME}</strong></p>
+                <div class="info-box">
+                    💡 <strong>Important:</strong> Make sure you are logged into Twitch as <strong>@${TWITCH_USERNAME}</strong> in this browser (or open this page in an <strong>Incognito / Private window</strong>) before clicking authorize.
+                </div>
                 <p>Make sure your Twitch application redirect URL is set to:</p>
                 <p><code>${getRequestOrigin(req)}/auth/callback</code></p>
-                <p>Then log into the Twitch bot account and authorize this app:</p>
-                <p><a class="button" href="${authUrl}">Authorize Twitch Bot Account</a></p>
+                <p style="margin-top: 24px;"><a class="button" href="${authUrl}">Authorize @${TWITCH_USERNAME}</a></p>
             </body>
             </html>
         `);

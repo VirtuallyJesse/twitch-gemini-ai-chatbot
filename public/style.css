@@ -61,6 +61,42 @@ body.dashboard-body {
     height: 100%;
 }
 
+.channel-auth-pill {
+    display: inline-flex;
+    align-items: center;
+    margin-left: auto;
+    padding-right: 4px;
+}
+
+.unlinked-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    background-color: rgba(234, 179, 8, 0.15);
+    border: 1px solid rgba(234, 179, 8, 0.35);
+    color: #fde047;
+    padding: 3px 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+}
+
+.btn-link-broadcaster {
+    background-color: #9147ff;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.btn-link-broadcaster:hover {
+    background-color: #772ce8;
+}
+
 .tab {
     padding: 0 15px;
     display: flex;
@@ -77,6 +113,12 @@ body.dashboard-body {
     color: var(--text-primary);
     border-bottom-color: var(--accent);
     background-color: #2d2d2d;
+}
+
+.tab-warn {
+    font-size: 0.85em;
+    margin-left: 6px;
+    vertical-align: middle;
 }
 
 .chat-log {

@@ -12,15 +12,72 @@ const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
-export const TWITCH_AUTH_SCOPES = ['chat:read', 'chat:edit', 'user:bot', 'user:read:chat', 'user:write:chat'];
+export const TWITCH_AUTH_SCOPES = [
+    'chat:read', 'chat:edit', 'user:bot', 'user:read:chat', 'user:write:chat',
+    'clips:edit',
+    'moderator:manage:banned_users',
+    'moderator:manage:announcements',
+    'moderator:manage:shoutouts',
+    'channel:manage:broadcast'
+];
+
+export const TWITCH_BROADCASTER_SCOPES = ['channel:manage:broadcast'];
+
+export class HelixApiError extends Error {
+    constructor(method, path, status, data) {
+        const body = typeof data === 'string' ? data : JSON.stringify(data);
+        super(`Twitch API ${method} ${path} failed (${status}): ${body}`);
+        this.name = 'HelixApiError';
+        this.status = status;
+        this.path = path;
+        this.data = data;
+    }
+}
 
 export class AuthMismatchError extends Error {
     constructor(expected, actual) {
-        super(`Authorization rejected: expected bot account "${expected}" but got "${actual}". Log into the correct Twitch account and try again.`);
+        super(`Authorization rejected: expected account "${expected}" but got "${actual}". Log into the correct Twitch account and try again.`);
         this.name = 'AuthMismatchError';
         this.expected = expected;
         this.actual = actual;
     }
+}
+
+export function renderAuthMismatchHtml({ expected, actual, retryUrl, isBroadcaster = false }) {
+    const title = isBroadcaster ? 'Broadcaster Authorization Mismatch' : 'Account Authorization Mismatch';
+    const explanation = isBroadcaster
+        ? `You attempted to link stream management for channel <strong>#${expected}</strong>, but you authorized with Twitch account <strong>@${actual}</strong>.`
+        : `This bot is configured to run as <strong>@${expected}</strong>, but you authorized with Twitch account <strong>@${actual}</strong>.`;
+    const actionText = isBroadcaster
+        ? `To fix this, log into Twitch as <strong>@${expected}</strong> in your browser (or switch accounts) and try again.`
+        : `To fix this, log into Twitch as <strong>@${expected}</strong> (or open the authorization link in an <strong>Incognito / Private window</strong>) and try again.`;
+    const buttonText = isBroadcaster
+        ? `Retry Authorization for #${expected}`
+        : `Retry Authorization with @${expected}`;
+
+    return `<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>${title}</title>
+    <style>
+        body { font-family: sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; line-height: 1.6; }
+        .error-card { border: 1px solid #f87171; background: #fef2f2; border-radius: 8px; padding: 24px; color: #991b1b; }
+        h1 { color: #b91c1c; margin-top: 0; font-size: 20px; display: flex; align-items: center; gap: 8px; }
+        .button { display: inline-block; background: #9147ff; color: white; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; margin-top: 14px; }
+        .button:hover { background: #772ce8; }
+        code { background: #fee2e2; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="error-card">
+        <h1>⚠️ ${title}</h1>
+        <p>${explanation}</p>
+        <p>${actionText}</p>
+        <a class="button" href="${retryUrl}">${buttonText}</a>
+    </div>
+</body>
+</html>`;
 }
 
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
@@ -85,6 +142,8 @@ class TokenVault {
     #appToken = null;
     #appExpiresAt = 0;
     #refreshInFlight = null;
+    #broadcasterTokens = new Map();
+    #broadcasterRefreshInFlight = new Map();
 
     constructor({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now }) {
         this.#clientId = clientId;
@@ -242,20 +301,140 @@ class TokenVault {
             console.error('[TwitchTransport] Failed to persist tokens:', err.message);
         }
     }
+
+    async exchangeBroadcasterCode(channel, code, redirectUri) {
+        const expected = cleanName(channel);
+        const data = await this.#tokenGrant({
+            grant_type: 'authorization_code',
+            code: String(code),
+            redirect_uri: redirectUri
+        });
+        const validation = await this.#validateToken(data.access_token);
+        const authorizedLogin = cleanName(validation.login || '');
+        if (authorizedLogin !== expected) {
+            await this.#revokeToken(data.access_token).catch(() => {});
+            throw new AuthMismatchError(expected, authorizedLogin);
+        }
+        await this.#setBroadcasterTokens(expected, data);
+        return data;
+    }
+
+    async hasBroadcasterToken(channel, botUsername) {
+        const key = cleanName(channel);
+        if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
+            return true;
+        }
+        const entry = await this.#loadBroadcasterEntry(key);
+        return Boolean(entry?.refreshToken);
+    }
+
+    /**
+     * Valid broadcaster access token for `channel`, or null.
+     * Single-streamer fallback: if the bot login IS the channel, reuse the bot user token.
+     */
+    async getBroadcasterAccessToken(channel, botUsername) {
+        const key = cleanName(channel);
+        const entry = await this.#loadBroadcasterEntry(key);
+        if (entry?.refreshToken) {
+            if (entry.accessToken && this.#now() < (entry.expiresAt || 0) - TOKEN_EXPIRY_BUFFER_MS) {
+                return entry.accessToken;
+            }
+            return this.refreshBroadcasterToken(key, botUsername);
+        }
+        if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
+            return this.getUserToken();
+        }
+        return null;
+    }
+
+    refreshBroadcasterToken(channel, botUsername = null) {
+        const key = cleanName(channel);
+        if (this.#broadcasterRefreshInFlight.has(key)) {
+            return this.#broadcasterRefreshInFlight.get(key);
+        }
+        const pending = (async () => {
+            try {
+                const entry = await this.#loadBroadcasterEntry(key);
+                if (!entry?.refreshToken) {
+                    if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
+                        await this.forceRefresh();
+                        return this.getUserToken();
+                    }
+                    throw new Error(`No broadcaster refresh token for ${key}`);
+                }
+                const data = await this.#tokenGrant({
+                    grant_type: 'refresh_token',
+                    refresh_token: entry.refreshToken
+                });
+                await this.#setBroadcasterTokens(key, data);
+                return this.#broadcasterTokens.get(key).accessToken;
+            } catch (err) {
+                if (err.grantRejected) {
+                    this.#broadcasterTokens.delete(key);
+                    await this.#storage?.deleteBroadcasterToken?.(key);
+                }
+                throw err;
+            } finally {
+                this.#broadcasterRefreshInFlight.delete(key);
+            }
+        })();
+        this.#broadcasterRefreshInFlight.set(key, pending);
+        return pending;
+    }
+
+    async #setBroadcasterTokens(channel, data) {
+        const entry = {
+            accessToken: data.access_token,
+            refreshToken: data.refresh_token || this.#broadcasterTokens.get(channel)?.refreshToken,
+            expiresAt: this.#now() + Number(data.expires_in || 3600) * 1000
+        };
+        this.#broadcasterTokens.set(channel, entry);
+        if (this.#storage) {
+            try {
+                await this.#storage.setBroadcasterToken(channel, entry);
+            } catch (err) {
+                console.error('[TwitchTransport] Failed to persist broadcaster token:', err.message);
+            }
+        }
+    }
+
+    async #loadBroadcasterEntry(key) {
+        let entry = this.#broadcasterTokens.get(key);
+        if (!entry?.refreshToken && this.#storage) {
+            try { entry = await this.#storage.getBroadcasterToken(key); } catch { entry = null; }
+            if (entry?.refreshToken) this.#broadcasterTokens.set(key, entry);
+        }
+        return entry;
+    }
 }
 
 class HelixClient {
-    #clientId; #vault; #fetchImpl;
+    #clientId;
+    #vault;
+    #fetchImpl;
+    #botUsername;
 
-    constructor({ clientId, tokenVault, fetchImpl }) {
+    constructor({ clientId = '', tokenVault, fetchImpl = globalThis.fetch.bind(globalThis), botUsername = '' } = {}) {
         this.#clientId = clientId;
         this.#vault = tokenVault;
         this.#fetchImpl = fetchImpl;
+        this.#botUsername = cleanName(botUsername);
     }
 
     /** Bearer + Client-Id headers; exactly one 401 retry after refreshing the used token kind. */
-    async request(path, { method = 'GET', query = {}, body = null, useAppToken = false, retry401 = true } = {}) {
-        const token = useAppToken ? await this.#vault.getAppToken() : await this.#vault.getUserToken();
+    async request(path, {
+        method = 'GET',
+        query = {},
+        body = null,
+        useAppToken = false,
+        accessToken = null,
+        broadcasterChannel = null,
+        retry401 = true,
+        signal
+    } = {}) {
+        const token = accessToken
+            || (useAppToken ? await this.#vault.getAppToken() : await this.#vault.getUserToken());
+
         const response = await this.#fetchImpl(buildHelixUrl(path, query), {
             method,
             headers: {
@@ -263,19 +442,35 @@ class HelixClient {
                 'Client-Id': this.#clientId,
                 ...(body ? { 'Content-Type': 'application/json' } : {})
             },
+            signal,
             ...(body ? { body: JSON.stringify(body) } : {})
         });
         const data = await readBody(response);
 
         if (response.status === 401 && retry401) {
             console.warn(`[TwitchTransport] 401 on ${method} ${path}; refreshing token and retrying once.`);
-            if (useAppToken) this.#vault.invalidateAppToken();
-            else await this.#vault.forceRefresh();
-            return this.request(path, { method, query, body, useAppToken, retry401: false });
+            let nextAccess = null;
+            if (broadcasterChannel) {
+                nextAccess = await this.#vault.refreshBroadcasterToken(broadcasterChannel, this.#botUsername);
+            } else if (useAppToken) {
+                this.#vault.invalidateAppToken();
+            } else {
+                await this.#vault.forceRefresh();
+            }
+            return this.request(path, {
+                method,
+                query,
+                body,
+                useAppToken,
+                accessToken: nextAccess,
+                broadcasterChannel,
+                retry401: false,
+                signal
+            });
         }
 
         if (!response.ok) {
-            throw new Error(`Twitch API ${method} ${path} failed (${response.status}): ${typeof data === 'string' ? data : JSON.stringify(data)}`);
+            throw new HelixApiError(method, path, response.status, data);
         }
         return data;
     }
@@ -290,7 +485,7 @@ class HelixClient {
         return idMap;
     }
 
-    /** Channel title + live status for AI context. */
+    /** Channel title, game category + live status for AI context. */
     async getChannelInfo(broadcasterId) {
         const channelData = await this.request('/channels', { query: { broadcaster_id: broadcasterId } });
         const channelInfo = channelData?.data?.[0];
@@ -299,6 +494,7 @@ class HelixClient {
         return {
             channelName: channelInfo.broadcaster_login,
             title: channelInfo.title,
+            gameName: channelInfo.game_name || '',
             isLive: Array.isArray(streamData?.data) && streamData.data.length > 0
         };
     }
@@ -314,6 +510,88 @@ class HelixClient {
         if (!result) throw new Error('Twitch chat API returned no result.');
         if (!result.is_sent) throw new Error(`Twitch rejected chat message: ${JSON.stringify(result.drop_reason || {})}`);
         return result;
+    }
+
+    async searchCategories(query, { signal } = {}) {
+        const data = await this.request('/search/categories', {
+            query: { query: String(query || ''), first: 5 },
+            useAppToken: true,
+            signal
+        });
+        return (data?.data || []).map((c) => ({
+            id: c.id,
+            name: c.name,
+            box_art_url: c.box_art_url
+        }));
+    }
+
+    async createClip(broadcasterId, { signal } = {}) {
+        const data = await this.request('/clips', {
+            method: 'POST',
+            query: { broadcaster_id: broadcasterId },
+            signal
+        });
+        const clip = data?.data?.[0];
+        if (!clip?.id) throw new Error('Twitch clip API returned no clip id.');
+        return { id: clip.id, url: `https://clips.twitch.tv/${clip.id}` };
+    }
+
+    async updateChannelInfo(broadcasterId, info, { accessToken, signal, channel } = {}) {
+        const body = {};
+        if (info.gameId !== undefined) body.game_id = info.gameId;
+        if (info.title !== undefined) body.title = info.title;
+        if (info.tags !== undefined) body.tags = info.tags;
+        if (info.language !== undefined) body.broadcaster_language = info.language;
+
+        await this.request('/channels', {
+            method: 'PATCH',
+            query: { broadcaster_id: broadcasterId },
+            body,
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return { success: true, updated: info };
+    }
+
+    async timeoutUser(broadcasterId, moderatorId, { targetUserId, duration, reason }, { signal } = {}) {
+        return this.request('/moderation/bans', {
+            method: 'POST',
+            query: { broadcaster_id: broadcasterId, moderator_id: moderatorId },
+            body: {
+                data: {
+                    user_id: targetUserId,
+                    duration,
+                    reason: reason || ''
+                }
+            },
+            signal
+        });
+    }
+
+    async sendAnnouncement(broadcasterId, moderatorId, { message, color }, { signal } = {}) {
+        const allowed = new Set(['primary', 'blue', 'green', 'orange', 'purple']);
+        return this.request('/chat/announcements', {
+            method: 'POST',
+            query: { broadcaster_id: broadcasterId, moderator_id: moderatorId },
+            body: {
+                message: String(message || '').slice(0, 500),
+                color: allowed.has(color) ? color : 'primary'
+            },
+            signal
+        });
+    }
+
+    async sendShoutout(broadcasterId, moderatorId, targetBroadcasterId, { signal } = {}) {
+        return this.request('/chat/shoutouts', {
+            method: 'POST',
+            query: {
+                from_broadcaster_id: broadcasterId,
+                to_broadcaster_id: targetBroadcasterId,
+                moderator_id: moderatorId
+            },
+            signal
+        });
     }
 }
 
@@ -437,7 +715,7 @@ export class TwitchTransport {
         this.#chunkDelayMs = chunkDelayMs;
 
         this.#vault = new TokenVault({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now: nowFn });
-        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl });
+        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl, botUsername: this.#botUsername });
         this.#buffers = new MessageBufferStore({ maxBufferSize, now: nowFn });
         this.#irc = new IrcBridge({
             botUsername: this.#botUsername,
@@ -451,7 +729,11 @@ export class TwitchTransport {
         this.auth = {
             getLoginUrl: (redirectUri, state) => this.#buildLoginUrl(redirectUri, state),
             handleCallback: (code, redirectUri) => this.#handleCallback(code, redirectUri),
+            getBroadcasterLoginUrl: (redirectUri, channel) => this.#buildBroadcasterLoginUrl(redirectUri, channel),
+            handleBroadcasterCallback: (channel, code, redirectUri) =>
+                this.#handleBroadcasterCallback(channel, code, redirectUri),
             getStatus: () => this.#getStatus(),
+            getChannelAuthStatuses: () => this.getChannelAuthStatuses(),
             isAuthorized: () => this.#vault.isAuthorized()
         };
     }
@@ -550,6 +832,27 @@ export class TwitchTransport {
     get connected() { return this.#irc.connected; }
     get botId() { return this.#botId; }
     get channelIdMap() { return { ...this.#channelIdMap }; }
+    get helix() { return this.#helix; }
+
+    async getBroadcasterToken(channel) {
+        return this.#vault.getBroadcasterAccessToken(channel, this.#botUsername);
+    }
+
+    async getChannelAuthStatuses() {
+        const statuses = {};
+        for (const channel of this.#channels) {
+            const key = cleanName(channel);
+            const isBot = Boolean(this.#botUsername && key === cleanName(this.#botUsername));
+            const authorized = await this.#vault.hasBroadcasterToken(key, this.#botUsername);
+            statuses[channel] = {
+                channel,
+                authorized,
+                isBot
+            };
+        }
+        return statuses;
+    }
+
     /** Config-shaped map (channel -> resolved ID or null) for the dashboard. */
     get channelIds() {
         const out = {};
@@ -570,6 +873,19 @@ export class TwitchTransport {
         return url.toString();
     }
 
+    #buildBroadcasterLoginUrl(redirectUri, channel) {
+        if (!this.#clientId) throw new Error('Twitch client ID is required to build the authorization URL.');
+        const name = cleanName(channel);
+        if (!name) throw new Error('channel is required for broadcaster authorization.');
+        const url = new URL(`${ID_BASE}/authorize`);
+        url.searchParams.set('response_type', 'code');
+        url.searchParams.set('client_id', this.#clientId);
+        url.searchParams.set('redirect_uri', redirectUri);
+        url.searchParams.set('scope', TWITCH_BROADCASTER_SCOPES.join(' '));
+        url.searchParams.set('state', `broadcaster:${name}`);
+        return url.toString();
+    }
+
     async #handleCallback(code, redirectUri) {
         if (!code) throw new Error('Missing authorization code.');
         await this.#vault.exchangeCode(String(code), redirectUri, this.#botUsername);
@@ -580,6 +896,13 @@ export class TwitchTransport {
             console.error('[TwitchTransport] Runtime failed to start after authorization:', err.message);
         }
         return this.#getStatus();
+    }
+
+    async #handleBroadcasterCallback(channel, code, redirectUri) {
+        if (!code) throw new Error('Missing authorization code.');
+        if (!channel) throw new Error('Missing channel.');
+        await this.#vault.exchangeBroadcasterCode(cleanName(channel), String(code), redirectUri);
+        return { authorized: true, channel: cleanName(channel) };
     }
 
     #getStatus() {
@@ -663,4 +986,5 @@ export class TwitchTransport {
     }
 }
 
+export { TokenVault, HelixClient };
 export default TwitchTransport;

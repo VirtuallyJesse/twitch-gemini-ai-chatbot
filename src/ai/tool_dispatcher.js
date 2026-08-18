@@ -88,14 +88,22 @@ export class ToolDispatcher {
         return 'off';
     }
 
-    compileTools({ hasWebpageUrls = false, disableMultimedia = false } = {}) {
+    #allowedForCaller(tool, caller) {
+        const tier = tool?.tokenTier;
+        if (tier === 'broadcaster' || tier === 'moderator') {
+            return !!(caller?.isBroadcaster || caller?.isMod);
+        }
+        return true;
+    }
+
+    compileTools({ hasWebpageUrls = false, disableMultimedia = false, caller } = {}) {
         if (disableMultimedia) return undefined;
 
         const compiled = [];
         if (hasWebpageUrls) compiled.push({ urlContext: {} });
         if (this.#searchMode === 'google') compiled.push({ googleSearch: {} });
 
-        const declarations = this.#compileFunctionDeclarations();
+        const declarations = this.#compileFunctionDeclarations(caller);
         if (declarations.length > 0) {
             compiled.push({ functionDeclarations: declarations });
         }
@@ -119,7 +127,7 @@ export class ToolDispatcher {
         return filtered.length > 0 ? filtered : undefined;
     }
 
-    #compileFunctionDeclarations() {
+    #compileFunctionDeclarations(caller) {
         const decls = [];
         const searchTool = this.#customSearchTool();
         if (searchTool) decls.push(this.#toDeclaration(searchTool));
@@ -128,6 +136,7 @@ export class ToolDispatcher {
             if (!tool?.name) continue;
             if (this.#searchMode === 'google' && SEARCH_TOOL_NAMES.has(tool.name)) continue;
             if (searchTool && tool.name === searchTool.name) continue;
+            if (!this.#allowedForCaller(tool, caller)) continue;
             decls.push(this.#toDeclaration(tool));
         }
         return decls;
@@ -236,12 +245,25 @@ export class ToolDispatcher {
                 return { result, turnCount, workingContents, stopped: 'ceiling' };
             }
 
+            const responseParts = await this.#dispatchFunctionCalls(functionCalls, context);
+            const fatalPart = responseParts.find((p) => p?.functionResponse?.response?.fatal);
+            if (fatalPart) {
+                const response = fatalPart.functionResponse.response;
+                return {
+                    result,
+                    turnCount,
+                    workingContents,
+                    stopped: 'error',
+                    errorKey: response.errorKey || response.error
+                };
+            }
+
             // CRITICAL: push unmodified candidate parts so thought + thoughtSignature
             // + functionCall survive the next generateContent call.
             workingContents.push({ role: 'model', parts: this.#rawParts(result) });
             workingContents.push({
                 role: 'user',
-                parts: await this.#dispatchFunctionCalls(functionCalls, context)
+                parts: responseParts
             });
         }
 
@@ -256,6 +278,9 @@ export class ToolDispatcher {
         const tool = this.#lookupTool(fc.name);
         if (!tool) {
             return this.#functionResponse(fc, { error: `Unknown tool: ${fc.name}` });
+        }
+        if (!this.#allowedForCaller(tool, context?.caller)) {
+            return this.#functionResponse(fc, { error: 'You do not have permission to use this tool.' });
         }
 
         const timeoutMs = Number(tool.timeoutMs) > 0 ? Number(tool.timeoutMs) : this.#defaultTimeoutMs;
@@ -273,7 +298,15 @@ export class ToolDispatcher {
             ]);
             return this.#safeFunctionResponse(fc, payload);
         } catch (err) {
-            const message = controller.signal.aborted
+            const timedOut = controller.signal.aborted;
+            if (timedOut && tool.tokenTier) {
+                return this.#functionResponse(fc, {
+                    error: 'HELIX_ACTION_TIMEOUT',
+                    errorKey: 'HELIX_ACTION_TIMEOUT',
+                    fatal: true
+                });
+            }
+            const message = timedOut
                 ? `Tool ${tool.name} timed out after ${timeoutMs}ms`
                 : (err?.message || String(err));
             return this.#functionResponse(fc, { error: message });
@@ -292,7 +325,10 @@ export class ToolDispatcher {
 
     #safeFunctionResponse(fc, payload) {
         if (payload && typeof payload === 'object' && payload.error != null && !('output' in payload)) {
-            return this.#functionResponse(fc, { error: String(payload.error) });
+            const response = { error: String(payload.error) };
+            if (payload.errorKey) response.errorKey = String(payload.errorKey);
+            if (payload.fatal) response.fatal = true;
+            return this.#functionResponse(fc, response);
         }
         const response = { output: payload ?? null };
         try {

@@ -207,8 +207,10 @@ export class AIEngine {
 
         if (channelContext) {
             const liveStatus = channelContext.isLive ? 'LIVE' : 'OFFLINE';
+            const category = channelContext.gameName || channelContext.game;
+            const categoryPart = category ? ` | Category: "${category}"` : '';
             sections.push(
-                `Twitch Channel Context — Channel: ${channelContext.channelName} | Stream Title: "${channelContext.title}" | Status: ${liveStatus}`
+                `Twitch Channel Context — Channel: ${channelContext.channelName} | Stream Title: "${channelContext.title}"${categoryPart} | Status: ${liveStatus}`
             );
         }
 
@@ -238,6 +240,10 @@ export class AIEngine {
                 'Do not attempt to browse URLs, search the web, or invoke external tools. Answer directly from internal knowledge and the context already provided.'
             );
         }
+
+        sections.push(
+            'Your available tools are dynamically provided based on the user\'s permissions. If an administrative action tool (such as changing the stream title/category, timeouts, announcements, or shoutouts) is available in your tools, the user is authorized—execute the tool to fulfill their request. If a requested action tool is not declared in your tools, politely explain that only the broadcaster or moderators can request that action. Never claim or pretend you performed an action in text unless you successfully executed the corresponding tool call.\nDo not mention user roles (such as viewer, moderator, or role tags) in casual conversation unless specifically relevant to explaining action permissions.'
+        );
 
         sections.push('Think step-by-step, then answer the user\'s prompt now:');
         return sections.join('\n\n');
@@ -299,9 +305,9 @@ export class AIEngine {
     /**
      * Picks SDK grounding tools and custom tool declarations for this turn.
      */
-    #selectTools({ allUrls, imageUrl, disableMultimedia }) {
+    #selectTools({ allUrls, imageUrl, disableMultimedia, caller }) {
         const hasWebpageUrls = allUrls.some(url => url !== imageUrl && !YT_URL_RE.test(url));
-        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia });
+        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia, caller });
     }
 
     /**
@@ -407,6 +413,7 @@ export class AIEngine {
         ephemeralContext,
         disableMultimedia,
         overrideFileContext,
+        caller,
         started
     }) {
         this.#logHeader('GEMINI REQUEST');
@@ -429,7 +436,7 @@ export class AIEngine {
         }
 
         const { userParts, allUrls, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
-        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia });
+        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia, caller });
 
         const systemInstruction = await this.#compileSystemInstruction({
             prompt,
@@ -462,25 +469,33 @@ export class AIEngine {
         let activeTools = tools;
         let activeSystemInstruction = systemInstruction;
 
-        const runLoop = () => this.#toolDispatcher.executeTurnLoop({
-            contents,
-            tools: activeTools,
-            context: { channel, channelContext },
-            invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
-                const turnResult = await this.#executeModelCall({
-                    contents: turnContents,
-                    systemInstruction: activeSystemInstruction,
-                    safetySettings,
-                    tools: turnTools
-                });
-                this.#logTurnParts(turnResult);
-                return turnResult;
+        const runLoop = async () => {
+            const loop = await this.#toolDispatcher.executeTurnLoop({
+                contents,
+                tools: activeTools,
+                context: { channel, channelContext, caller },
+                invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
+                    const turnResult = await this.#executeModelCall({
+                        contents: turnContents,
+                        systemInstruction: activeSystemInstruction,
+                        safetySettings,
+                        tools: turnTools
+                    });
+                    this.#logTurnParts(turnResult);
+                    return turnResult;
+                }
+            });
+            if (loop.stopped === 'error') {
+                return {
+                    toolError: true,
+                    errorKey: loop.errorKey || 'HELIX_ACTION_FAILED'
+                };
             }
-        });
+            return loop.result;
+        };
 
         try {
-            const loop = await runLoop();
-            result = loop.result;
+            result = await runLoop();
         } catch (turnError) {
             const isRateLimit = this.errorHandler.classify(turnError).category === 'quota';
             if (isRateLimit && this.#toolDispatcher.hasGoogleSearch(activeTools)) {
@@ -495,11 +510,18 @@ export class AIEngine {
                     overrideFileContext,
                     tools: activeTools
                 });
-                const fallbackLoop = await runLoop();
-                result = fallbackLoop.result;
+                result = await runLoop();
             } else {
                 throw turnError;
             }
+        }
+
+        if (result?.toolError) {
+            const key = result.errorKey || 'HELIX_ACTION_FAILED';
+            const errMsg = this.errorHandler.format(key);
+            console.log(`   ${COLORS.red}✗ Tool Error:${COLORS.reset} ${errMsg} (${key})`);
+            this.#logFooter();
+            return errMsg;
         }
 
         this.#logSection('GEMINI RESPONSE');
@@ -673,7 +695,8 @@ export class AIEngine {
         harnessInstructions = null,
         ephemeralContext = null,
         overrideFileContext = null,
-        disableMultimedia = false
+        disableMultimedia = false,
+        caller = null
     } = {}) {
         const started = Date.now();
         let attempt = 0;
@@ -691,6 +714,7 @@ export class AIEngine {
                     ephemeralContext,
                     disableMultimedia,
                     overrideFileContext,
+                    caller,
                     started
                 });
             } catch (error) {

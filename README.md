@@ -32,7 +32,7 @@ A high-level checklist — the [Tutorial](#tutorial) below covers every step in 
 5. *(Optional)* **Get a Tavily API key** from [`app.tavily.com`](https://app.tavily.com) to enable live web search
 6. *(Optional)* **Get a Pollinations API key** from [`enter.pollinations.ai`](https://enter.pollinations.ai) to enable `!image`, `!video`, `!tts`, and `!song`
 7. **Deploy your fork to Render** and fill in your environment variables
-8. **Authorize the bot** by visiting `https://YOUR-APP.onrender.com/auth/login` while logged into the bot's Twitch account
+8. **Authorize the bot** at `https://YOUR-APP.onrender.com/auth/login` and link your channel on the dashboard
 
 That's it. No local install. No terminal commands.
 
@@ -92,47 +92,53 @@ Once your files are ready, click the button below to deploy your fork:
 
 <br>
 
-You need a **Twitch account for the bot** (can be your own or a separate account) and a **Twitch Developer application**.
+To give your bot its own name and chat badge, you'll use two Twitch accounts:
+1. **Your Streamer Account** (where you go live)
+2. **Your Bot Account** (a separate Twitch account created for your bot)
 
-#### Create the Twitch application
+> 💡 **Tip:** Keep your main browser logged into your **Streamer account**, and open an **Incognito window** logged into your **Bot account**.
 
-1. Log into the bot's Twitch account and enable **Two-Factor Authentication** in Twitch settings if you haven't already
-2. Go to the [Twitch Developer Console](https://dev.twitch.tv/console)
-3. Click the **Applications** tab, then **Register Your Application**
-4. Fill in the form:
-   - **Name:** anything you like (e.g. `My Gemini Bot`)
-   - **OAuth Redirect URL:** `https://YOUR-APP.onrender.com/auth/callback`
-     - Replace `YOUR-APP` with your actual Render service name — you can find it in your Render dashboard
+#### 1. Create the Twitch application
+
+1. Go to the [Twitch Developer Console](https://dev.twitch.tv/console) and sign in with your **main Twitch account**
+2. Click **Register Your Application**
+3. Fill in the form:
+   - **Name:** anything you like (e.g. `My Stream Bot`)
+   - **OAuth Redirect URL:** `https://YOUR-APP.onrender.com/auth/callback`  
+     *(Replace `YOUR-APP` with your Render service name)*
    - **Category:** `Chat Bot`
-5. Click **Create**
+4. Click **Create**
 
-#### Get your credentials
+#### 2. Get your credentials
 
-1. Back on the **Applications** tab, click **Manage** on your new app
+1. Click **Manage** on your new application
 2. Copy the **Client ID**
-3. Click **New Secret**, then copy the **Client Secret**
-   - Store the secret somewhere safe — generating a new one invalidates the old one
+3. Click **New Secret** and copy the **Client Secret**
 
-#### Render environment variables
+#### 3. Render environment variables
 
-| Variable | Value |
+| Variable | What to enter |
 |---|---|
-| `TWITCH_USERNAME` | The bot account's Twitch username (lowercase) |
-| `JOIN_CHANNELS` | Comma-separated list of channels to join, e.g. `channel1,channel2` |
-| `TWITCH_CLIENT_ID` | Client ID from above |
-| `TWITCH_CLIENT_SECRET` | Client Secret from above |
+| `TWITCH_USERNAME` | Your **bot account's** username (lowercase) |
+| `JOIN_CHANNELS` | Your **streamer channel's** username (where the bot should chat) |
+| `TWITCH_CLIENT_ID` | The Client ID copied above |
+| `TWITCH_CLIENT_SECRET` | The Client Secret copied above |
 
-#### Authorize the bot (after deploy)
+#### 4. Connect your accounts (after Render deploys)
 
-Once Render finishes deploying, visit:
+1. In your **Bot's Incognito window**, visit:
+   ```
+   https://YOUR-APP.onrender.com/auth/login
+   ```
+   Click **Authorize** to connect the bot to chat.
 
-```
-https://YOUR-APP.onrender.com/auth/login
-```
+2. In your **Streamer browser**, open your dashboard:
+   ```
+   https://YOUR-APP.onrender.com/
+   ```
+   Click the **`[Link Broadcaster]`** button next to your channel name to allow the bot to change your title and game category.
 
-Make sure you're **logged into the bot's Twitch account** in your browser. The app will redirect you through Twitch's OAuth flow and store the tokens automatically.
-
-> ⚠️ If you authorize with the wrong Twitch account, the bot will reject the token. Log out of Twitch, sign into the correct bot account, and visit `/auth/login` again.
+3. **Mod the Bot:** In your Twitch stream chat, type `/mod mybot` so the bot can use it's full toolkit.
 
 </details>
 
@@ -281,6 +287,36 @@ On the free tier, each API key under a project at [`console.cloud.google.com`](h
 </details>
 
 <details>
+<summary><strong>Can I ask the bot to do things on Twitch, not just chat?</strong></summary>
+
+<br>
+
+Yes. Depending on who's asking, the bot can:
+
+- Change the stream category or title
+- Timeout disruptive chatters
+- Send a highlighted announcement
+- Shout out another streamer
+- Create a clip
+
+Just ask in chat, e.g. `@mybot change the category to Just Chatting` or `@mybot clip that!`
+
+Changing the title/category, timeouts, announcements, and shoutouts are limited to the broadcaster and moderators. Anyone in chat can ask for a clip.
+
+</details>
+
+<details>
+<summary><strong>Can I turn off the bot's Twitch actions?</strong></summary>
+
+<br>
+
+Yes. Set `ENABLE_HELIX_ACTIONS` to `false` and the bot goes back to pure conversational Q&A.
+
+You can also tune `HELIX_CLIP_COOLDOWN_SECONDS` (default `30`) and `HELIX_DEFAULT_TIMEOUT_SECONDS` (default `600`) if you want to adjust those defaults.
+
+</details>
+
+<details>
 <summary><strong>Does the bot search the web?</strong></summary>
 
 <br>
@@ -313,42 +349,6 @@ The free tier gives 1,000 credits/month (basic search = 1 credit). How long that
 </details>
 
 <details>
-<summary><strong>How do I see chat logs and the media gallery?</strong></summary>
-
-<br>
-
-Your Render service URL doubles as a public web dashboard that displays your channels' chat logs and generated media gallery. It's the same base link you used to authorize your bot (e.g. `https://YOUR-APP.onrender.com`).
-
-</details>
-
-<details>
-<summary><strong>The Pollinations command isn't working — what do I do?</strong></summary>
-
-<br>
-
-Pollinations is an actively evolving platform — available models change frequently. You can update the model names in your environment variables at any time. Current model names are listed on the same page as your API key at [enter.pollinations.ai](https://enter.pollinations.ai).
-
-</details>
-
-<details>
-<summary><strong>Will Render spin down after inactivity?</strong></summary>
-
-<br>
-
-The bot has a built-in keepalive mechanism to prevent Render's free-tier spin-downs. If the bot is still spinning down, please [open an issue](../../issues).
-
-</details>
-
-<details>
-<summary><strong>Does the bot work while my stream is offline?</strong></summary>
-
-<br>
-
-Yes. As long as the Render service is running, the bot stays connected to your Twitch chat 24/7 — live or offline.
-
-</details>
-
-<details>
 <summary><strong>Can Gemini see images or videos?</strong></summary>
 
 <br>
@@ -365,6 +365,42 @@ Yes. As long as the Render service is running, the bot stays connected to your T
 <br>
 
 Gemini can natively watch YouTube videos. When you supply a `YOUTUBE_API_KEY`, it provides Gemini with extra context such as the video title and description. You can obtain the key from the same [Google Cloud Console](https://console.cloud.google.com/apis/credentials) where you get your Gemini keys.
+
+</details>
+
+<details>
+<summary><strong>Does the bot work while my stream is offline?</strong></summary>
+
+<br>
+
+Yes. As long as the Render service is running, the bot stays connected to your Twitch chat 24/7 — live or offline.
+
+</details>
+
+<details>
+<summary><strong>Will Render spin down after inactivity?</strong></summary>
+
+<br>
+
+The bot has a built-in keepalive mechanism to prevent Render's free-tier spin-downs. If the bot is still spinning down, please [open an issue](../../issues).
+
+</details>
+
+<details>
+<summary><strong>How do I see chat logs and the media gallery?</strong></summary>
+
+<br>
+
+Your Render service URL doubles as a public web dashboard that displays your channels' chat logs and generated media gallery. It's the same base link you used to authorize your bot (e.g. `https://YOUR-APP.onrender.com`).
+
+</details>
+
+<details>
+<summary><strong>The Pollinations command isn't working — what do I do?</strong></summary>
+
+<br>
+
+Pollinations is an actively evolving platform — available models change frequently. You can update the model names in your environment variables at any time. Current model names are listed on the same page as your API key at [enter.pollinations.ai](https://enter.pollinations.ai).
 
 </details>
 

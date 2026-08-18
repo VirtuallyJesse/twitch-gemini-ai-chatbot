@@ -15,6 +15,7 @@
                     <!-- Tabs injected here -->
                     <div class="tab">Loading...</div>
                 </div>
+                <div class="channel-auth-pill" id="channel-auth-pill" style="display: none;"></div>
             </div>
             <div class="chat-log" id="chat-log">
                 <!-- Messages injected here -->
@@ -57,6 +58,7 @@
         // --- STATE ---
         const state = {
             channels: [],
+            channelStatuses: {}, // Map<channel, { channel, authorized, isBot }>
             activeChannel: null,
             chatData: {}, // Map<channel, Array<msg>>
             mediaData: [],
@@ -90,9 +92,15 @@
                     }, true);
                 }
 
-                // 1. Fetch Channels
-                const channelsRes = await fetch('/api/channels');
+                // 1. Fetch Channels and Channel Statuses
+                const [channelsRes, statusRes] = await Promise.all([
+                    fetch('/api/channels'),
+                    fetch('/api/channel-status').catch(() => null)
+                ]);
                 state.channels = await channelsRes.json();
+                if (statusRes && statusRes.ok) {
+                    state.channelStatuses = await statusRes.json();
+                }
 
                 if (state.channels.length > 0) {
                     state.activeChannel = state.channels[0];
@@ -151,12 +159,52 @@
         }
 
         function renderTabs() {
-            els.tabs.innerHTML = state.channels.map(ch => `
-                <div class="tab ${ch === state.activeChannel ? 'active' : ''}" 
-                     onclick="switchChannel('${ch}')">
-                    ${ch}
-                </div>
-            `).join('');
+            els.tabs.innerHTML = state.channels.map(ch => {
+                const status = state.channelStatuses[ch];
+                const isUnlinked = status && !status.authorized && !status.isBot;
+                const warnBadge = isUnlinked ? '<span class="tab-warn" title="Stream controls unlinked">⚠️</span>' : '';
+                return `
+                    <div class="tab ${ch === state.activeChannel ? 'active' : ''} ${isUnlinked ? 'tab-unlinked' : ''}" 
+                         onclick="switchChannel('${ch}')">
+                        ${ch}${warnBadge}
+                    </div>
+                `;
+            }).join('');
+            renderAuthPill();
+        }
+
+        function renderAuthPill() {
+            const pillEl = document.getElementById('channel-auth-pill');
+            if (!pillEl || !state.activeChannel) return;
+
+            const ch = state.activeChannel;
+            const status = state.channelStatuses[ch];
+            if (status && !status.authorized && !status.isBot) {
+                const safe = ch.replace('#', '');
+                pillEl.style.display = 'inline-flex';
+                pillEl.innerHTML = `
+                    <span class="unlinked-pill" title="Twitch broadcaster token required for stream category and title changes">
+                        ⚠️ Stream controls unlinked
+                        <button class="btn-link-broadcaster" onclick="linkBroadcaster('${safe}')">Link Broadcaster</button>
+                    </span>
+                `;
+            } else {
+                pillEl.style.display = 'none';
+                pillEl.innerHTML = '';
+            }
+        }
+
+        function linkBroadcaster(channel) {
+            const safe = String(channel || '').replace('#', '');
+            const w = 600;
+            const h = 700;
+            const left = window.screenX + (window.outerWidth - w) / 2;
+            const top = window.screenY + (window.outerHeight - h) / 2;
+            window.open(
+                `/auth/broadcaster?channel=${encodeURIComponent(safe)}`,
+                'twitch_broadcaster_auth',
+                `width=${w},height=${h},left=${left},top=${top},status=no,menubar=no,toolbar=no`
+            );
         }
 
         function renderChat() {
@@ -345,6 +393,17 @@
             els.gallery.scrollTop = 0;
         }
 
+        function updateChannelAuthStatus(channel, authorized) {
+            if (!channel) return;
+            const raw = String(channel);
+            const ch = raw.startsWith('#') ? raw : '#' + raw;
+            if (!state.channelStatuses[ch]) {
+                state.channelStatuses[ch] = { channel: ch, isBot: false };
+            }
+            state.channelStatuses[ch].authorized = Boolean(authorized);
+            renderTabs();
+        }
+
         // --- WEBSOCKET ---
         function connectWS() {
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -362,9 +421,18 @@
                 } else if (data.type === 'emotes:update' && data.channel) {
                     state.emoteMapsByChannel[data.channel] = data.emotes || {};
                     if (state.activeChannel === data.channel) renderChat();
+                } else if (data.type === 'auth:broadcaster' && data.channel) {
+                    updateChannelAuthStatus(data.channel, data.authorized);
                 }
             };
         }
+
+        // --- POPUP NOTIFICATION LISTENER ---
+        window.addEventListener('message', (event) => {
+            if (event.data?.type === 'twitch:broadcaster_authorized' && event.data.channel) {
+                updateChannelAuthStatus(event.data.channel, true);
+            }
+        });
 
         // --- HELPERS ---
         function getUsernameColor(username) {
@@ -391,6 +459,8 @@
         window.setFilter = setFilter;
         window.switchChannel = switchChannel;
         window.goToPage = goToPage;
+        window.linkBroadcaster = linkBroadcaster;
+        window.updateChannelAuthStatus = updateChannelAuthStatus;
 
         // Start
         init();

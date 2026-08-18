@@ -18,6 +18,10 @@ function chatKey(channel) {
     return `chat:${normalizeChannel(channel)}`;
 }
 
+function broadcasterKey(channel) {
+    return `tokens:broadcaster:${normalizeChannel(channel)}`;
+}
+
 function safeJsonParse(value) {
     if (value == null) return null;
     try {
@@ -161,6 +165,31 @@ export class MemoryStorageAdapter {
             return null;
         }
     }
+
+    async getBroadcasterToken(channel) {
+        try {
+            return await this.getJson(broadcasterKey(channel));
+        } catch (err) {
+            console.error('[Storage] getBroadcasterToken failed:', err.message);
+            return null;
+        }
+    }
+
+    async setBroadcasterToken(channel, payload) {
+        try {
+            await this.setJson(broadcasterKey(channel), payload);
+        } catch (err) {
+            console.error('[Storage] setBroadcasterToken failed:', err.message);
+        }
+    }
+
+    async deleteBroadcasterToken(channel) {
+        try {
+            this.kv.delete(broadcasterKey(channel));
+        } catch (err) {
+            console.error('[Storage] deleteBroadcasterToken failed:', err.message);
+        }
+    }
 }
 
 export class UpstashRedisAdapter {
@@ -287,6 +316,31 @@ export class UpstashRedisAdapter {
             return null;
         }
     }
+
+    async getBroadcasterToken(channel) {
+        try {
+            return await this.getJson(broadcasterKey(channel));
+        } catch (err) {
+            console.error('[Storage] getBroadcasterToken failed:', err.message);
+            return null;
+        }
+    }
+
+    async setBroadcasterToken(channel, payload) {
+        try {
+            await this.setJson(broadcasterKey(channel), payload);
+        } catch (err) {
+            console.error('[Storage] setBroadcasterToken failed:', err.message);
+        }
+    }
+
+    async deleteBroadcasterToken(channel) {
+        try {
+            await this.request('/', ['DEL', broadcasterKey(channel)]);
+        } catch (err) {
+            console.error('[Storage] deleteBroadcasterToken failed:', err.message);
+        }
+    }
 }
 
 export class Storage {
@@ -337,6 +391,18 @@ export class Storage {
 
     getTokens() {
         return this.adapter.getTokens();
+    }
+
+    getBroadcasterToken(channel) {
+        return this.adapter.getBroadcasterToken(channel);
+    }
+
+    setBroadcasterToken(channel, payload) {
+        return this.adapter.setBroadcasterToken(channel, payload);
+    }
+
+    deleteBroadcasterToken(channel) {
+        return this.adapter.deleteBroadcasterToken(channel);
     }
 
     setJson(key, value) {

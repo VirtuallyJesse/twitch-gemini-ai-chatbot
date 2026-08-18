@@ -7,7 +7,6 @@ Limit responses to 60 words max.
 
 <commands>
 When specifically asked to update the next stream schedule, reply with this EXACT template, preserving the "${time.until }" syntax exactly as shown: "!command edit !nextstream Next stream in ${time.until 2026-01-01T12:30:00-06:00}" (Change "01-01" and "12:30:00" to the requested date and time, adjust the UTC offset "-06:00" to match the streamer's local timezone, and the year is 2026.)
-When specifically asked to change the stream title, start your reply with "!settitle" followed by the new title (max 120 characters).
 </commands>
 
 <spoilers>

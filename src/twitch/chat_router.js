@@ -422,12 +422,18 @@ export class ChatRouter {
                     logCount: this.chatContextLength,
                     commandPrefixes: this.allPrefixes
                 });
-                const prompt = `Message from user ${message.loginName}: ${textForAi}`;
+                const role = message.isBroadcaster ? 'broadcaster' : message.isMod ? 'moderator' : 'viewer';
+                const prompt = `Message from (role:${role}) ${message.loginName}: ${textForAi}`;
                 const rawResponse = await this.aiEngine.generate(prompt, {
                     channel,
                     channelContext,
                     recentLogs,
-                    harnessInstructions: this.#buildHarnessInstructions()
+                    harnessInstructions: this.#buildHarnessInstructions(),
+                    caller: {
+                        loginName: message.loginName,
+                        isBroadcaster: !!message.isBroadcaster,
+                        isMod: !!message.isMod
+                    }
                 });
                 const reply = this.emotePool.decorateReply(channel, rawResponse, {
                     maxLength: this.maxMessageLength
