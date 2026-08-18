@@ -326,35 +326,27 @@ class TokenVault {
         return data;
     }
 
-    async hasBroadcasterToken(channel, botUsername) {
+    async hasBroadcasterToken(channel) {
         const key = cleanName(channel);
-        if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
-            return true;
-        }
         const entry = await this.#loadBroadcasterEntry(key);
         return Boolean(entry?.refreshToken);
     }
 
     /**
      * Valid broadcaster access token for `channel`, or null.
-     * Single-streamer fallback: if the bot login IS the channel, reuse the bot user token.
+     * Requires an explicit broadcaster OAuth grant. Never falls back to the bot user token.
      */
-    async getBroadcasterAccessToken(channel, botUsername) {
+    async getBroadcasterAccessToken(channel) {
         const key = cleanName(channel);
         const entry = await this.#loadBroadcasterEntry(key);
-        if (entry?.refreshToken) {
-            if (entry.accessToken && this.#now() < (entry.expiresAt || 0) - TOKEN_EXPIRY_BUFFER_MS) {
-                return entry.accessToken;
-            }
-            return this.refreshBroadcasterToken(key, botUsername);
+        if (!entry?.refreshToken) return null;
+        if (entry.accessToken && this.#now() < (entry.expiresAt || 0) - TOKEN_EXPIRY_BUFFER_MS) {
+            return entry.accessToken;
         }
-        if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
-            return this.getUserToken();
-        }
-        return null;
+        return this.refreshBroadcasterToken(key);
     }
 
-    refreshBroadcasterToken(channel, botUsername = null) {
+    refreshBroadcasterToken(channel) {
         const key = cleanName(channel);
         if (this.#broadcasterRefreshInFlight.has(key)) {
             return this.#broadcasterRefreshInFlight.get(key);
@@ -363,10 +355,6 @@ class TokenVault {
             try {
                 const entry = await this.#loadBroadcasterEntry(key);
                 if (!entry?.refreshToken) {
-                    if (botUsername && key === cleanName(botUsername) && this.#refreshToken) {
-                        await this.forceRefresh();
-                        return this.getUserToken();
-                    }
                     throw new Error(`No broadcaster refresh token for ${key}`);
                 }
                 const data = await this.#tokenGrant({
@@ -419,13 +407,11 @@ class HelixClient {
     #clientId;
     #vault;
     #fetchImpl;
-    #botUsername;
 
-    constructor({ clientId = '', tokenVault, fetchImpl = globalThis.fetch.bind(globalThis), botUsername = '' } = {}) {
+    constructor({ clientId = '', tokenVault, fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
         this.#clientId = clientId;
         this.#vault = tokenVault;
         this.#fetchImpl = fetchImpl;
-        this.#botUsername = cleanName(botUsername);
     }
 
     /** Bearer + Client-Id headers; exactly one 401 retry after refreshing the used token kind. */
@@ -439,11 +425,16 @@ class HelixClient {
         retry401 = true,
         signal
     } = {}) {
-        const token = accessToken
-            || (broadcasterChannel && this.#vault?.getBroadcasterAccessToken
-                ? await this.#vault.getBroadcasterAccessToken(broadcasterChannel, this.#botUsername)
-                : null)
-            || (useAppToken ? await this.#vault.getAppToken() : await this.#vault.getUserToken());
+        let token = accessToken;
+        if (!token && broadcasterChannel && this.#vault?.getBroadcasterAccessToken) {
+            token = await this.#vault.getBroadcasterAccessToken(broadcasterChannel);
+            if (!token) {
+                throw new Error(`No broadcaster token for ${cleanName(broadcasterChannel)}`);
+            }
+        }
+        if (!token) {
+            token = useAppToken ? await this.#vault.getAppToken() : await this.#vault.getUserToken();
+        }
 
         const response = await this.#fetchImpl(buildHelixUrl(path, query), {
             method,
@@ -461,7 +452,7 @@ class HelixClient {
             console.warn(`[TwitchTransport] 401 on ${method} ${path}; refreshing token and retrying once.`);
             let nextAccess = null;
             if (broadcasterChannel) {
-                nextAccess = await this.#vault.refreshBroadcasterToken(broadcasterChannel, this.#botUsername);
+                nextAccess = await this.#vault.refreshBroadcasterToken(broadcasterChannel);
             } else if (useAppToken) {
                 this.#vault.invalidateAppToken();
             } else {
@@ -730,7 +721,7 @@ export class TwitchTransport {
         this.#chunkDelayMs = chunkDelayMs;
 
         this.#vault = new TokenVault({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now: nowFn });
-        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl, botUsername: this.#botUsername });
+        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl });
         this.#buffers = new MessageBufferStore({ maxBufferSize, now: nowFn });
         this.#irc = new IrcBridge({
             botUsername: this.#botUsername,
@@ -904,19 +895,17 @@ export class TwitchTransport {
     get helix() { return this.#helix; }
 
     async getBroadcasterToken(channel) {
-        return this.#vault.getBroadcasterAccessToken(channel, this.#botUsername);
+        return this.#vault.getBroadcasterAccessToken(channel);
     }
 
     async getChannelAuthStatuses() {
         const statuses = {};
         for (const channel of this.#channels) {
             const key = cleanName(channel);
-            const isBot = Boolean(this.#botUsername && key === cleanName(this.#botUsername));
-            const authorized = await this.#vault.hasBroadcasterToken(key, this.#botUsername);
             statuses[channel] = {
                 channel,
-                authorized,
-                isBot
+                authorized: await this.#vault.hasBroadcasterToken(key),
+                isBot: Boolean(this.#botUsername && key === cleanName(this.#botUsername))
             };
         }
         return statuses;
@@ -1034,9 +1023,14 @@ export class TwitchTransport {
         const broadcasterId = this.#channelIdMap[login];
         if (!broadcasterId) return;
 
+        if (!(await this.#vault.hasBroadcasterToken(login))) {
+            console.warn(`[TwitchTransport] No broadcaster token for ${channel}; skipping EventSub subscriptions.`);
+            return;
+        }
+
         let token = null;
         try {
-            token = await this.#vault.getBroadcasterAccessToken(login, this.#botUsername);
+            token = await this.#vault.getBroadcasterAccessToken(login);
         } catch (err) {
             console.warn(`[TwitchTransport] Broadcaster token lookup failed for ${channel}:`, err.message);
             return;

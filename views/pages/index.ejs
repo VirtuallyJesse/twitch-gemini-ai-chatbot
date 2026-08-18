@@ -161,7 +161,7 @@
         function renderTabs() {
             els.tabs.innerHTML = state.channels.map(ch => {
                 const status = state.channelStatuses[ch];
-                const isUnlinked = status && !status.authorized && !status.isBot;
+                const isUnlinked = status && !status.authorized;
                 const warnBadge = isUnlinked ? '<span class="tab-warn" title="Stream controls unlinked">⚠️</span>' : '';
                 return `
                     <div class="tab ${ch === state.activeChannel ? 'active' : ''} ${isUnlinked ? 'tab-unlinked' : ''}" 
@@ -179,7 +179,7 @@
 
             const ch = state.activeChannel;
             const status = state.channelStatuses[ch];
-            if (status && !status.authorized && !status.isBot) {
+            if (status && !status.authorized) {
                 const safe = ch.replace('#', '');
                 pillEl.style.display = 'inline-flex';
                 pillEl.innerHTML = `

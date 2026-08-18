@@ -1,7 +1,8 @@
 // src/twitch/eventsub_client.js
 //
 // Deep module owning Twitch EventSub WebSocket lifecycle, event normalization,
-// message deduplication, and Helix subscription synchronization.
+// message deduplication, and Helix subscription synchronization across isolated
+// per-broadcaster WebSocket sessions.
 // Pure dependencies: reads zero process.env.
 
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
@@ -152,7 +153,8 @@ const SUBSCRIPTION_SPECS = [
     }
 ];
 
-export class EventSubClient {
+class BroadcasterSession {
+    #broadcasterUserId;
     #helix;
     #wsImpl;
     #nowFn;
@@ -163,14 +165,12 @@ export class EventSubClient {
     #keepaliveGraceMs;
     #reconnectBaseMs;
     #reconnectMaxMs;
-    #dedupeTtlMs;
-    #dedupeMaxSize;
+    #isStopped;
+    #onNotification;
 
     #socket = null;
     #sessionId = null;
-    #eventHandlers = [];
-    #desiredChannels = new Map();
-    #dedupeMap = new Map();
+    #desired = null;
     #connectPromise = null;
     #connectResolve = null;
     #connectReject = null;
@@ -179,26 +179,25 @@ export class EventSubClient {
     #keepaliveSec = 10;
     #reconnectTimer = null;
     #reconnectAttempt = 0;
-    #stopped = false;
+    #hadLiveSession = false;
 
     constructor({
-        helixClient,
-        wsImpl = globalThis.WebSocket,
-        nowFn = Date.now,
-        setTimeoutFn = setTimeout,
-        clearTimeoutFn = clearTimeout,
-        wsUrl = 'wss://eventsub.wss.twitch.tv/ws',
-        welcomeTimeoutMs = 10_000,
-        keepaliveGraceMs = 5_000,
-        reconnectBaseMs = 1_000,
-        reconnectMaxMs = 60_000,
-        dedupeTtlMs = 10 * 60 * 1000,
-        dedupeMaxSize = 1_000
-    } = {}) {
-        if (!helixClient) throw new Error('EventSubClient requires helixClient');
-        if (!wsImpl) throw new Error('EventSubClient requires wsImpl');
-
-        this.#helix = helixClient;
+        broadcasterUserId,
+        helix,
+        wsImpl,
+        nowFn,
+        setTimeoutFn,
+        clearTimeoutFn,
+        wsUrl,
+        welcomeTimeoutMs,
+        keepaliveGraceMs,
+        reconnectBaseMs,
+        reconnectMaxMs,
+        isStopped,
+        onNotification
+    }) {
+        this.#broadcasterUserId = broadcasterUserId;
+        this.#helix = helix;
         this.#wsImpl = wsImpl;
         this.#nowFn = nowFn;
         this.#setTimeoutFn = setTimeoutFn;
@@ -208,8 +207,8 @@ export class EventSubClient {
         this.#keepaliveGraceMs = keepaliveGraceMs;
         this.#reconnectBaseMs = reconnectBaseMs;
         this.#reconnectMaxMs = reconnectMaxMs;
-        this.#dedupeTtlMs = dedupeTtlMs;
-        this.#dedupeMaxSize = dedupeMaxSize;
+        this.#isStopped = isStopped;
+        this.#onNotification = onNotification;
     }
 
     get sessionId() {
@@ -217,47 +216,50 @@ export class EventSubClient {
     }
 
     get connected() {
-        return Boolean(this.#socket);
+        return Boolean(this.#socket && this.#sessionId);
     }
 
-    onEvent(handler) {
-        this.#eventHandlers.push(handler);
-        return () => {
-            this.#eventHandlers = this.#eventHandlers.filter((h) => h !== handler);
-        };
+    setDesired(item) {
+        this.#desired = item;
     }
 
-    async connect() {
-        this.#stopped = false;
+    async ensureConnected() {
+        if (this.#sessionId && this.#socket) return;
         if (this.#connectPromise) return this.#connectPromise;
         return this.#openSocket(this.#wsUrl, { isResume: false });
     }
 
-    async disconnect() {
-        this.#stopped = true;
-        this.#clearTimers();
-        if (this.#connectReject) {
-            this.#connectReject(new Error('EventSub disconnected'));
-            this.#connectReject = null;
-            this.#connectResolve = null;
+    async applySubscriptions() {
+        const desired = this.#desired;
+        if (!desired || !this.#sessionId) return;
+        for (const spec of SUBSCRIPTION_SPECS) {
+            try {
+                await this.#helix.request('/eventsub/subscriptions', {
+                    method: 'POST',
+                    accessToken: desired.accessToken,
+                    broadcasterChannel: desired.broadcasterChannel,
+                    body: {
+                        type: spec.type,
+                        version: spec.version,
+                        condition: spec.condition(desired.broadcasterUserId, desired.moderatorUserId),
+                        transport: { method: 'websocket', session_id: this.#sessionId }
+                    }
+                });
+            } catch (err) {
+                const status = err?.status;
+                if (status === 409) continue;
+                if (status === 401 || status === 403) {
+                    console.warn(
+                        `[EventSub] Skipping ${spec.type} for ${desired.broadcasterChannel}: missing scope (${status})`
+                    );
+                    continue;
+                }
+                console.warn(
+                    `[EventSub] Failed to subscribe ${spec.type} for ${desired.broadcasterChannel}:`,
+                    err?.message || err
+                );
+            }
         }
-        this.#cleanupSocket(this.#socket);
-        this.#socket = null;
-        this.#sessionId = null;
-    }
-
-    async subscribeChannel({ broadcasterUserId, broadcasterChannel, accessToken, moderatorUserId }) {
-        if (!broadcasterUserId) return;
-        const cleanChan = cleanName(broadcasterChannel);
-        const item = {
-            broadcasterUserId,
-            broadcasterChannel: cleanChan,
-            accessToken,
-            moderatorUserId: moderatorUserId || broadcasterUserId
-        };
-        this.#desiredChannels.set(broadcasterUserId, item);
-        if (!this.#sessionId) return;
-        await this.#applySubscriptions(item);
     }
 
     async #openSocket(url, { isResume = false }) {
@@ -277,8 +279,13 @@ export class EventSubClient {
                 this.#connectReject = null;
                 this.#connectResolve = null;
             }
+            this.#connectPromise = null;
             this.#cleanupSocket(ws);
-            if (!this.#stopped) this.#scheduleReconnect();
+            if (this.#socket === ws) {
+                this.#socket = null;
+                this.#sessionId = null;
+            }
+            if (!this.#isStopped()) this.#scheduleReconnect();
         }, this.#welcomeTimeoutMs);
         this.#welcomeTimer?.unref?.();
 
@@ -321,14 +328,14 @@ export class EventSubClient {
                     this.#connectResolve = null;
                     this.#connectReject = null;
                 }
+                this.#connectPromise = null;
 
-                if (!isResume) {
-                    for (const desired of this.#desiredChannels.values()) {
-                        this.#applySubscriptions(desired).catch((err) => {
-                            console.warn('[EventSub] Failed to subscribe channel on welcome:', err?.message || err);
-                        });
-                    }
+                if (this.#hadLiveSession && !isResume) {
+                    this.applySubscriptions().catch((err) => {
+                        console.warn('[EventSub] Failed to re-subscribe channel on reconnect:', err?.message || err);
+                    });
                 }
+                this.#hadLiveSession = true;
                 break;
             }
             case 'session_keepalive': {
@@ -337,12 +344,7 @@ export class EventSubClient {
             }
             case 'notification': {
                 this.#resetKeepalive();
-                const messageId = metadata.message_id;
-                if (this.#isDuplicate(messageId)) return;
-                const normalized = normalizeNotification(message, this.#nowFn);
-                if (normalized) {
-                    this.#emit(normalized);
-                }
+                this.#onNotification(message);
                 break;
             }
             case 'session_reconnect': {
@@ -371,7 +373,7 @@ export class EventSubClient {
         } catch (err) {
             console.warn('[EventSub] Reconnect URL resume failed, falling back to clean reconnect:', err.message);
             this.#cleanupSocket(oldSocket);
-            if (!this.#stopped) this.#scheduleReconnect(0, false);
+            if (!this.#isStopped()) this.#scheduleReconnect(0, false);
         }
     }
 
@@ -382,14 +384,19 @@ export class EventSubClient {
             this.#socket = null;
             this.#sessionId = null;
         }
-        if (!this.#stopped) {
+        if (this.#connectReject) {
+            this.#connectReject(new Error('EventSub connection closed'));
+            this.#connectReject = null;
+            this.#connectResolve = null;
+            this.#connectPromise = null;
+        }
+        if (!this.#isStopped()) {
             this.#scheduleReconnect(undefined, false);
         }
     }
 
     #handleSocketError(err, ws) {
         console.warn('[EventSub] WebSocket error:', err?.message || err);
-        // Error is typically followed by close; let close handle reconnection.
     }
 
     #armKeepalive(keepaliveSec) {
@@ -403,7 +410,7 @@ export class EventSubClient {
             this.#cleanupSocket(this.#socket);
             this.#socket = null;
             this.#sessionId = null;
-            if (!this.#stopped) this.#scheduleReconnect(0, false);
+            if (!this.#isStopped()) this.#scheduleReconnect(0, false);
         }, timeoutMs);
         this.#keepaliveTimer?.unref?.();
     }
@@ -417,7 +424,7 @@ export class EventSubClient {
             this.#clearTimeoutFn(this.#reconnectTimer);
             this.#reconnectTimer = null;
         }
-        if (this.#stopped) return;
+        if (this.#isStopped()) return;
 
         let waitMs = delayMs;
         if (waitMs === undefined) {
@@ -427,7 +434,7 @@ export class EventSubClient {
 
         this.#reconnectTimer = this.#setTimeoutFn(async () => {
             this.#reconnectTimer = null;
-            if (this.#stopped) return;
+            if (this.#isStopped()) return;
             try {
                 await this.#openSocket(this.#wsUrl, { isResume });
             } catch (err) {
@@ -437,58 +444,17 @@ export class EventSubClient {
         this.#reconnectTimer?.unref?.();
     }
 
-    #isDuplicate(messageId) {
-        if (!messageId) return false;
-        const now = this.#nowFn();
-        for (const [id, exp] of this.#dedupeMap) {
-            if (now >= exp) this.#dedupeMap.delete(id);
+    teardown() {
+        this.#clearTimers();
+        if (this.#connectReject) {
+            this.#connectReject(new Error('EventSub disconnected'));
+            this.#connectReject = null;
+            this.#connectResolve = null;
+            this.#connectPromise = null;
         }
-        if (this.#dedupeMap.has(messageId)) return true;
-        this.#dedupeMap.set(messageId, now + this.#dedupeTtlMs);
-        if (this.#dedupeMap.size > this.#dedupeMaxSize) {
-            const oldestKey = this.#dedupeMap.keys().next().value;
-            if (oldestKey) this.#dedupeMap.delete(oldestKey);
-        }
-        return false;
-    }
-
-    async #applySubscriptions({ broadcasterUserId, broadcasterChannel, accessToken, moderatorUserId }) {
-        for (const spec of SUBSCRIPTION_SPECS) {
-            try {
-                await this.#helix.request('/eventsub/subscriptions', {
-                    method: 'POST',
-                    accessToken,
-                    broadcasterChannel,
-                    body: {
-                        type: spec.type,
-                        version: spec.version,
-                        condition: spec.condition(broadcasterUserId, moderatorUserId),
-                        transport: { method: 'websocket', session_id: this.#sessionId }
-                    }
-                });
-            } catch (err) {
-                const status = err?.status;
-                if (status === 409) continue; // already exists
-                if (status === 401 || status === 403) {
-                    console.warn(`[EventSub] Skipping ${spec.type} for ${broadcasterChannel}: missing scope (${status})`);
-                    continue;
-                }
-                console.warn(`[EventSub] Failed to subscribe ${spec.type} for ${broadcasterChannel}:`, err?.message || err);
-            }
-        }
-    }
-
-    #emit(event) {
-        for (const handler of this.#eventHandlers) {
-            try {
-                const result = handler(event);
-                if (result && typeof result.catch === 'function') {
-                    result.catch((err) => console.error('[EventSub] onEvent handler failed:', err?.message || err));
-                }
-            } catch (err) {
-                console.error('[EventSub] onEvent handler failed:', err?.message || err);
-            }
-        }
+        this.#cleanupSocket(this.#socket);
+        this.#socket = null;
+        this.#sessionId = null;
     }
 
     #clearTimers() {
@@ -512,6 +478,165 @@ export class EventSubClient {
             if (typeof ws.close === 'function') ws.close();
         } catch {
             // ignore
+        }
+    }
+}
+
+export class EventSubClient {
+    #helix;
+    #wsImpl;
+    #nowFn;
+    #setTimeoutFn;
+    #clearTimeoutFn;
+    #wsUrl;
+    #welcomeTimeoutMs;
+    #keepaliveGraceMs;
+    #reconnectBaseMs;
+    #reconnectMaxMs;
+    #dedupeTtlMs;
+    #dedupeMaxSize;
+
+    #sessions = new Map(); // broadcasterUserId -> BroadcasterSession
+    #eventHandlers = [];
+    #dedupeMap = new Map();
+    #stopped = false;
+
+    constructor({
+        helixClient,
+        wsImpl = globalThis.WebSocket,
+        nowFn = Date.now,
+        setTimeoutFn = setTimeout,
+        clearTimeoutFn = clearTimeout,
+        wsUrl = 'wss://eventsub.wss.twitch.tv/ws',
+        welcomeTimeoutMs = 10_000,
+        keepaliveGraceMs = 5_000,
+        reconnectBaseMs = 1_000,
+        reconnectMaxMs = 60_000,
+        dedupeTtlMs = 10 * 60 * 1000,
+        dedupeMaxSize = 1_000
+    } = {}) {
+        if (!helixClient) throw new Error('EventSubClient requires helixClient');
+        if (!wsImpl) throw new Error('EventSubClient requires wsImpl');
+
+        this.#helix = helixClient;
+        this.#wsImpl = wsImpl;
+        this.#nowFn = nowFn;
+        this.#setTimeoutFn = setTimeoutFn;
+        this.#clearTimeoutFn = clearTimeoutFn;
+        this.#wsUrl = wsUrl;
+        this.#welcomeTimeoutMs = welcomeTimeoutMs;
+        this.#keepaliveGraceMs = keepaliveGraceMs;
+        this.#reconnectBaseMs = reconnectBaseMs;
+        this.#reconnectMaxMs = reconnectMaxMs;
+        this.#dedupeTtlMs = dedupeTtlMs;
+        this.#dedupeMaxSize = dedupeMaxSize;
+    }
+
+    get connected() {
+        for (const session of this.#sessions.values()) {
+            if (session.connected) return true;
+        }
+        return false;
+    }
+
+    getSessionId(broadcasterUserId) {
+        return this.#sessions.get(String(broadcasterUserId))?.sessionId || null;
+    }
+
+    onEvent(handler) {
+        this.#eventHandlers.push(handler);
+        return () => {
+            this.#eventHandlers = this.#eventHandlers.filter((h) => h !== handler);
+        };
+    }
+
+    async connect() {
+        this.#stopped = false;
+    }
+
+    async disconnect() {
+        this.#stopped = true;
+        for (const session of this.#sessions.values()) {
+            session.teardown();
+        }
+        this.#sessions.clear();
+    }
+
+    async subscribeChannel({ broadcasterUserId, broadcasterChannel, accessToken, moderatorUserId }) {
+        if (!broadcasterUserId) return;
+        this.#stopped = false;
+
+        const id = String(broadcasterUserId);
+        let session = this.#sessions.get(id);
+        if (!session) {
+            session = this.#createSession(id);
+            this.#sessions.set(id, session);
+        }
+
+        session.setDesired({
+            broadcasterUserId: id,
+            broadcasterChannel: cleanName(broadcasterChannel),
+            accessToken,
+            moderatorUserId: moderatorUserId || id
+        });
+
+        await session.ensureConnected();
+        if (this.#stopped) return;
+        await session.applySubscriptions();
+    }
+
+    #createSession(broadcasterUserId) {
+        return new BroadcasterSession({
+            broadcasterUserId,
+            helix: this.#helix,
+            wsImpl: this.#wsImpl,
+            nowFn: this.#nowFn,
+            setTimeoutFn: this.#setTimeoutFn,
+            clearTimeoutFn: this.#clearTimeoutFn,
+            wsUrl: this.#wsUrl,
+            welcomeTimeoutMs: this.#welcomeTimeoutMs,
+            keepaliveGraceMs: this.#keepaliveGraceMs,
+            reconnectBaseMs: this.#reconnectBaseMs,
+            reconnectMaxMs: this.#reconnectMaxMs,
+            isStopped: () => this.#stopped,
+            onNotification: (message) => this.#dispatchNotification(message)
+        });
+    }
+
+    #dispatchNotification(message) {
+        const messageId = message?.metadata?.message_id;
+        if (this.#isDuplicate(messageId)) return;
+        const normalized = normalizeNotification(message, this.#nowFn);
+        if (normalized) {
+            this.#emit(normalized);
+        }
+    }
+
+    #isDuplicate(messageId) {
+        if (!messageId) return false;
+        const now = this.#nowFn();
+        for (const [id, exp] of this.#dedupeMap) {
+            if (now >= exp) this.#dedupeMap.delete(id);
+        }
+        if (this.#dedupeMap.has(messageId)) return true;
+        this.#dedupeMap.set(messageId, now + this.#dedupeTtlMs);
+        if (this.#dedupeMap.size > this.#dedupeMaxSize) {
+            const oldestKey = this.#dedupeMap.keys().next().value;
+            if (oldestKey) this.#dedupeMap.delete(oldestKey);
+        }
+        return false;
+    }
+
+    #emit(event) {
+        for (const handler of this.#eventHandlers) {
+            try {
+                const result = handler(event);
+                if (result && typeof result.catch === 'function') {
+                    result.catch((err) => console.error('[EventSub] onEvent handler failed:', err?.message || err));
+                }
+            } catch (err) {
+                console.error('[EventSub] onEvent handler failed:', err?.message || err);
+            }
         }
     }
 }
