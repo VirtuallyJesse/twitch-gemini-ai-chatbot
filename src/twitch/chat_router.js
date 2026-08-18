@@ -22,48 +22,6 @@ function asPrefixList(value, fallback) {
     return items.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
 }
 
-function isMediaEnabled(apiKey) {
-    return !!apiKey && apiKey !== 'your-pollinations-api-key' && String(apiKey).trim().length > 0;
-}
-
-const MEDIA_TYPES = [
-    { key: 'image', noun: 'an image', bullet: 'Generating images' },
-    { key: 'video', noun: 'a video', bullet: 'Generating videos' },
-    { key: 'tts', noun: 'TTS audio', bullet: 'Generating text to speech' },
-    { key: 'music', noun: 'music', bullet: 'Generating music' }
-];
-
-function formatMediaNounList(nouns) {
-    if (nouns.length === 1) return nouns[0];
-    if (nouns.length === 2) return `${nouns[0]} or ${nouns[1]}`;
-    return `${nouns.slice(0, -1).join(', ')}, or ${nouns[nouns.length - 1]}`;
-}
-
-function buildMediaRedirectInstructions(prefixes, isEnabled) {
-    if (!isEnabled || !prefixes) return null;
-
-    const active = [];
-    for (const { key, noun, bullet } of MEDIA_TYPES) {
-        const cmdList = prefixes[key];
-        if (cmdList?.length) {
-            active.push({ noun, bullet: `- ${bullet}: ${cmdList[0]}` });
-        }
-    }
-
-    if (active.length === 0) return null;
-
-    const nounList = formatMediaNounList(active.map((a) => a.noun));
-    const commandLines = active.map((a) => a.bullet).join('\n');
-
-    return (
-        '<media_commands>\n' +
-        `For any user request to directly generate or edit ${nounList}, do not say you are unable to. Instead, instruct the user to use one of the following commands:\n\n` +
-        commandLines + '\n\n' +
-        'Never attempt to create media yourself by using one of the above generate commands. The system will create the media and alert you to present it.\n' +
-        '</media_commands>'
-    );
-}
-
 function parseCustomCommandText(source) {
     const commands = new Map();
     if (source == null) return commands;
@@ -223,7 +181,6 @@ export class ChatRouter {
         cooldownDuration = 1,
         chatContextLength = 10,
         maxMessageLength = 499,
-        pollinationsApiKey = '',
         prefixes = {},
         clock = Date.now,
         fileReader = defaultFileReader
@@ -240,7 +197,6 @@ export class ChatRouter {
             console.warn('[ChatRouter] No errorHandler provided; error immunity is degraded.');
         }
 
-        this.mediaEnabled = isMediaEnabled(pollinationsApiKey);
         this.chatContextLength = chatContextLength;
         this.maxMessageLength = maxMessageLength;
         this.transport = null;
@@ -271,7 +227,7 @@ export class ChatRouter {
 
     #buildHarnessInstructions() {
         const parts = [this.emotePool.getHarnessInstructions()];
-        const mediaHarness = buildMediaRedirectInstructions(this.prefixLists, this.mediaEnabled);
+        const mediaHarness = this.mediaPipeline.getHarnessInstructions?.(this.prefixLists);
         if (mediaHarness) parts.push(mediaHarness);
         return parts;
     }

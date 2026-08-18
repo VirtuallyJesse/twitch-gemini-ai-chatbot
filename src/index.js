@@ -8,7 +8,7 @@ import { EmotePool } from './twitch/emote_pool.js';
 import { MediaUploader } from './media/media_uploader.js';
 import { MediaPipeline } from './media/media_pipeline.js';
 import ErrorHandler from './utils/error_handler.js';
-import { PollinationsClient } from './media/media_providers.js';
+import { PollinationsProvider } from './media/pollinations_provider.js';
 import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
 import { TwitchTransport, renderAuthMismatchHtml } from './twitch/twitch_transport.js';
@@ -127,7 +127,26 @@ try {
 
 const mediaUploader = new MediaUploader();
 const errorHandler = new ErrorHandler();
-const pollinationsClient = new PollinationsClient();
+
+function isUsableSecret(value) {
+    const key = String(value || '').trim();
+    return key.length > 0 && key !== 'your-pollinations-api-key';
+}
+
+const mediaProviders = [];
+if (isUsableSecret(POLLINATIONS_API_KEY)) {
+    mediaProviders.push(new PollinationsProvider({
+        apiKey: POLLINATIONS_API_KEY,
+        imageModel: process.env.POLLINATIONS_IMAGE_MODEL || 'gptimage',
+        videoModel: process.env.POLLINATIONS_VIDEO_MODEL || 'seedance',
+        ttsModel: process.env.POLLINATIONS_TTS_MODEL || 'elevenlabs',
+        ttsVoice: process.env.POLLINATIONS_TTS_VOICE || 'charlotte',
+        musicModel: process.env.POLLINATIONS_MUSIC_MODEL || 'elevenmusic'
+    }));
+} else {
+    console.log('[Media] Pollinations disabled (missing or placeholder API key).');
+}
+
 const CHAT_CONTEXT_LENGTH = parseInt(process.env.CHAT_CONTEXT_LENGTH, 10) || 10;
 
 const transport = new TwitchTransport({
@@ -166,7 +185,7 @@ const aiEngine = new AIEngine({
 });
 
 const mediaPipeline = new MediaPipeline({
-    provider: pollinationsClient,
+    providers: mediaProviders,
     uploader: mediaUploader,
     storage,
     aiEngine,
@@ -183,7 +202,6 @@ const chatRouter = new ChatRouter({
     cooldownDuration: COOLDOWN_DURATION,
     chatContextLength: CHAT_CONTEXT_LENGTH,
     maxMessageLength: 499,
-    pollinationsApiKey: POLLINATIONS_API_KEY,
     prefixes: {
         ai: commandNames,
         image: imageCommandNames,

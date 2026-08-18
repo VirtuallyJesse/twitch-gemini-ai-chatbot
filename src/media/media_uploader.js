@@ -78,9 +78,18 @@ export class MediaUploader {
         return form;
     }
 
-    async #requestWithTimeout(url, form, timeoutMs) {
+    async #requestWithTimeout(url, form, timeoutMs, externalSignal) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const onExternalAbort = () => controller.abort();
+
+        if (externalSignal) {
+            if (externalSignal.aborted) {
+                clearTimeout(timeoutId);
+                throw new Error('Timeout');
+            }
+            externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+        }
 
         try {
             const res = await this.fetchImpl(url, {
@@ -101,12 +110,13 @@ export class MediaUploader {
             throw err;
         } finally {
             clearTimeout(timeoutId);
+            externalSignal?.removeEventListener('abort', onExternalAbort);
         }
     }
 
-    async #uploadPrimary(buffer, mimeType, filename, kind) {
+    async #uploadPrimary(buffer, mimeType, filename, kind, signal) {
         const form = this.#createForm(buffer, mimeType, filename);
-        const res = await this.#requestWithTimeout(this.primaryUrl, form, this.timeoutMs[kind]);
+        const res = await this.#requestWithTimeout(this.primaryUrl, form, this.timeoutMs[kind], signal);
         const url = (await res.text()).trim();
 
         if (!url || url === '<none>') {
@@ -116,9 +126,9 @@ export class MediaUploader {
         return url;
     }
 
-    async #uploadFallback(buffer, mimeType, filename, kind) {
+    async #uploadFallback(buffer, mimeType, filename, kind, signal) {
         const form = this.#createForm(buffer, mimeType, filename);
-        const res = await this.#requestWithTimeout(this.fallbackUrl, form, this.timeoutMs[kind]);
+        const res = await this.#requestWithTimeout(this.fallbackUrl, form, this.timeoutMs[kind], signal);
 
         let data;
         if (typeof res.json === 'function') {
@@ -142,7 +152,7 @@ export class MediaUploader {
         return data.link.trim();
     }
 
-    async upload(buffer, { mediaType, mimeType } = {}) {
+    async upload(buffer, { mediaType, mimeType, signal } = {}) {
         const kind = UPLOAD_KIND[mediaType];
 
         if (!kind) {
@@ -158,10 +168,10 @@ export class MediaUploader {
         const filename = `generated.${extensionFor(normalizedMime, kind)}`;
 
         try {
-            return await this.#uploadPrimary(buffer, normalizedMime, filename, kind);
+            return await this.#uploadPrimary(buffer, normalizedMime, filename, kind, signal);
         } catch (primaryError) {
             try {
-                return await this.#uploadFallback(buffer, normalizedMime, filename, kind);
+                return await this.#uploadFallback(buffer, normalizedMime, filename, kind, signal);
             } catch (fallbackError) {
                 throw new Error(
                     `${capitalize(kind)} upload failed: ` +
