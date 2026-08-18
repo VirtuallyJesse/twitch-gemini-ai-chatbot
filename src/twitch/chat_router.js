@@ -56,11 +56,11 @@ function buildMediaRedirectInstructions(prefixes, isEnabled) {
     const commandLines = active.map((a) => a.bullet).join('\n');
 
     return (
-        '<commands>\n' +
+        '<media_commands>\n' +
         `For any user request to directly generate or edit ${nounList}, do not say you are unable to. Instead, instruct the user to use one of the following commands:\n\n` +
         commandLines + '\n\n' +
         'Never attempt to create media yourself by using one of the above generate commands. The system will create the media and alert you to present it.\n' +
-        '</commands>'
+        '</media_commands>'
     );
 }
 
