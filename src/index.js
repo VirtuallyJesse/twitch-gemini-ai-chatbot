@@ -141,6 +141,7 @@ const chatRouter = new ChatRouter({
     mediaPipeline,
     emotePool: emotes,
     errorHandler,
+    systemInstructionsPath: './system_instructions.txt',
     cooldownDuration: env.COOLDOWN_DURATION !== undefined ? parseInt(env.COOLDOWN_DURATION, 10) : 1,
     chatContextLength: parseInt(env.CHAT_CONTEXT_LENGTH, 10) || 10,
     maxMessageLength: 499,

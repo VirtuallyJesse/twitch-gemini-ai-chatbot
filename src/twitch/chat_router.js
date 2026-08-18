@@ -368,6 +368,12 @@ function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
 
 export class ChatRouter {
     #communityGifts = new Map();
+    #systemInstructions = '';
+    #systemInstructionsPath;
+    #systemInstructionsSource = 'file';
+    #systemInstructionsMtimeMs = -1;
+    #fileReader;
+    #fileStat;
 
     /**
      * @param {object} options collaborator instances and policy. Never reads environment variables.
@@ -381,6 +387,8 @@ export class ChatRouter {
         customCommands,
         eventAlertsPath = './event_alerts.json',
         eventAlerts,
+        systemInstructionsPath = './system_instructions.txt',
+        systemInstructions,
         cooldownDuration = 1,
         chatContextLength = 10,
         maxMessageLength = 499,
@@ -407,6 +415,19 @@ export class ChatRouter {
         this.maxMessageLength = maxMessageLength;
         this.communityGiftWindowMs = communityGiftWindowMs;
         this.transport = null;
+
+        this.#systemInstructionsPath = systemInstructionsPath;
+        this.#systemInstructionsMtimeMs = -1;
+        this.#fileReader = fileReader;
+        this.#fileStat = fileStat;
+        if (typeof systemInstructions === 'string') {
+            this.#systemInstructionsSource = 'override';
+            this.#systemInstructions = systemInstructions;
+        } else {
+            this.#systemInstructionsSource = 'file';
+            this.#systemInstructions = '';
+            this.#maybeReloadSystemInstructions(true);
+        }
 
         this.prefixLists = {
             ai: asPrefixList(prefixes.ai, DEFAULT_PREFIXES.ai),
@@ -499,6 +520,59 @@ export class ChatRouter {
      */
     reloadEventAlerts(source) {
         this.eventAlerts.reload(source);
+    }
+
+    /**
+     * Current system instructions persona. Reloads from file if modified on disk.
+     */
+    get systemInstructions() {
+        this.#maybeReloadSystemInstructions(false);
+        return this.#systemInstructions;
+    }
+
+    /**
+     * Re-reads system instructions persona from configured source or supplied override.
+     * @param {string} [source] Optional string override
+     */
+    reloadSystemInstructions(source) {
+        if (typeof source === 'string') {
+            this.#systemInstructionsSource = 'override';
+            this.#systemInstructions = source;
+            return;
+        }
+        if (this.#systemInstructionsSource === 'override') return;
+        this.#systemInstructionsSource = 'file';
+        this.#systemInstructionsMtimeMs = -1;
+        this.#maybeReloadSystemInstructions(true);
+    }
+
+    #maybeReloadSystemInstructions(force) {
+        if (this.#systemInstructionsSource !== 'file') return;
+        try {
+            const stat = this.#fileStat(this.#systemInstructionsPath);
+            const mtimeMs = stat?.mtimeMs ?? 0;
+            if (!force && mtimeMs === this.#systemInstructionsMtimeMs) return;
+            this.#systemInstructions = String(this.#fileReader(this.#systemInstructionsPath) ?? '');
+            this.#systemInstructionsMtimeMs = mtimeMs;
+        } catch (error) {
+            if (force && error?.code === 'ENOENT') {
+                console.log('[System Instructions] No system_instructions.txt found.');
+                this.#systemInstructions = '';
+                return;
+            }
+            if (force) {
+                console.error('[System Instructions] Error loading system_instructions.txt:', error);
+                this.#systemInstructions = '';
+            }
+            // mid-flight parse/IO errors keep the last good persona
+        }
+    }
+
+    #flaggedPersona(channel) {
+        if (typeof this.emotePool.flagText === 'function') {
+            return this.emotePool.flagText(channel, this.systemInstructions);
+        }
+        return this.systemInstructions || '';
     }
 
     /**
@@ -619,6 +693,7 @@ export class ChatRouter {
                     channelContext,
                     recentLogs,
                     harnessInstructions: this.#buildHarnessInstructions(),
+                    overrideFileContext: this.#flaggedPersona(channel),
                     caller: {
                         loginName: message.loginName,
                         isBroadcaster: !!message.isBroadcaster,
@@ -762,7 +837,10 @@ export class ChatRouter {
                         commandPrefixes: this.allPrefixes
                     });
                     const framed = `[Event Alert: ${eventKind}] ${interpolate(promptTemplate, vars)}`;
-                    const raw = await this.aiEngine.generate(framed, {
+                    const flaggedFramed = typeof this.emotePool.flagText === 'function'
+                        ? this.emotePool.flagText(channel, framed)
+                        : framed;
+                    const raw = await this.aiEngine.generate(flaggedFramed, {
                         channel,
                         channelContext,
                         recentLogs,
@@ -770,6 +848,7 @@ export class ChatRouter {
                             this.emotePool.getHarnessInstructions(),
                             EVENT_ALERT_HARNESS
                         ],
+                        overrideFileContext: this.#flaggedPersona(channel),
                         caller: {
                             loginName: event.user?.login || '',
                             isBroadcaster: false,

@@ -228,7 +228,16 @@ export class EmotePool {
     return parts.join('\n');
   }
 
-
+  /**
+   * Tag recognized channel emotes in arbitrary text as `emote:NAME`.
+   * Idempotent: existing `emote:NAME` tokens are left untouched (same
+   * `(?<!\S)` boundary as ingest). Null/empty input and unhydrated
+   * channels return the original text without throwing.
+   */
+  flagText(channel, text) {
+    if (text == null || text === '') return text;
+    return this.#flag(this.#view(channel), String(text), new Set());
+  }
 
   /* ── Internal State & Helpers ────────────────────────────── */
 
