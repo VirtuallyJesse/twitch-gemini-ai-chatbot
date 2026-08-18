@@ -7,6 +7,7 @@
 // All config and I/O cross the constructor - this module reads zero environment variables directly.
 
 import tmi from 'tmi.js';
+import { EventSubClient } from './eventsub_client.js';
 
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
@@ -21,7 +22,13 @@ export const TWITCH_AUTH_SCOPES = [
     'channel:manage:broadcast'
 ];
 
-export const TWITCH_BROADCASTER_SCOPES = ['channel:manage:broadcast'];
+export const TWITCH_BROADCASTER_SCOPES = [
+    'channel:manage:broadcast',
+    'channel:read:subscriptions',
+    'bits:read',
+    'channel:read:redemptions',
+    'moderator:read:followers'
+];
 
 export class HelixApiError extends Error {
     constructor(method, path, status, data) {
@@ -433,6 +440,9 @@ class HelixClient {
         signal
     } = {}) {
         const token = accessToken
+            || (broadcasterChannel && this.#vault?.getBroadcasterAccessToken
+                ? await this.#vault.getBroadcasterAccessToken(broadcasterChannel, this.#botUsername)
+                : null)
             || (useAppToken ? await this.#vault.getAppToken() : await this.#vault.getUserToken());
 
         const response = await this.#fetchImpl(buildHelixUrl(path, query), {
@@ -682,6 +692,7 @@ export class TwitchTransport {
     #helix;
     #irc;
     #buffers;
+    #eventsub = null;
     #botId = null;
     #channelIdMap = {};
     #running = false;
@@ -689,6 +700,7 @@ export class TwitchTransport {
     #messageHandlers = [];
     #logHandlers = [];
     #statusHandlers = [];
+    #eventHandlers = [];
 
     constructor(options = {}) {
         const {
@@ -704,7 +716,10 @@ export class TwitchTransport {
             ignoredUsernames = [],
             fetchImpl = globalThis.fetch.bind(globalThis),
             ircClientFactory = (tmiOptions) => new tmi.client(tmiOptions),
-            nowFn = Date.now
+            nowFn = Date.now,
+            wsImpl = globalThis.WebSocket,
+            eventsubClient = null,
+            enableEventSub = true
         } = options;
 
         this.#clientId = clientId;
@@ -726,6 +741,20 @@ export class TwitchTransport {
             onStatus: status => this.#emitStatus(status)
         });
 
+        this.#eventHandlers = [];
+        this.#eventsub = eventsubClient
+            || (enableEventSub === false
+                ? null
+                : new EventSubClient({
+                    helixClient: this.#helix,
+                    wsImpl: wsImpl || globalThis.WebSocket,
+                    nowFn
+                }));
+
+        if (this.#eventsub?.onEvent) {
+            this.#eventsub.onEvent((event) => this.#emitEvent(event));
+        }
+
         this.auth = {
             getLoginUrl: (redirectUri, state) => this.#buildLoginUrl(redirectUri, state),
             handleCallback: (code, redirectUri) => this.#handleCallback(code, redirectUri),
@@ -745,6 +774,7 @@ export class TwitchTransport {
         if (handlers.onMessage) this.onMessage(handlers.onMessage);
         if (handlers.onLogEntry) this.onLogEntry(handlers.onLogEntry);
         if (handlers.onStatus) this.onStatus(handlers.onStatus);
+        if (handlers.onEvent) this.onEvent(handlers.onEvent);
 
         if (!this.#vault.isAuthorized()) {
             const bootstrapped = await this.#vault.bootstrap();
@@ -764,6 +794,11 @@ export class TwitchTransport {
 
     async stop() {
         this.#running = false;
+        try {
+            await this.#eventsub?.disconnect?.();
+        } catch (err) {
+            console.error('[TwitchTransport] EventSub disconnect failed:', err.message);
+        }
         await this.#irc.disconnect();
     }
 
@@ -812,6 +847,25 @@ export class TwitchTransport {
     onMessage(handler) { this.#messageHandlers.push(handler); }
     onLogEntry(handler) { this.#logHandlers.push(handler); }
     onStatus(handler) { this.#statusHandlers.push(handler); }
+    onEvent(handler) {
+        this.#eventHandlers.push(handler);
+        return () => {
+            this.#eventHandlers = this.#eventHandlers.filter(h => h !== handler);
+        };
+    }
+
+    #emitEvent(event) {
+        for (const handler of this.#eventHandlers) {
+            try {
+                const result = handler(event);
+                if (result && typeof result.catch === 'function') {
+                    result.catch((err) => console.error('[TwitchTransport] Event handler failed:', err.message));
+                }
+            } catch (err) {
+                console.error('[TwitchTransport] Event handler failed:', err.message);
+            }
+        }
+    }
 
     /** Appends to the channel history buffer (post-emote-processing text) and emits onLogEntry. */
     logMessage(channel, username, message, meta = null) {
@@ -902,6 +956,13 @@ export class TwitchTransport {
         if (!code) throw new Error('Missing authorization code.');
         if (!channel) throw new Error('Missing channel.');
         await this.#vault.exchangeBroadcasterCode(cleanName(channel), String(code), redirectUri);
+        if (this.#running) {
+            try {
+                await this.#subscribeEventSubChannel(channel);
+            } catch (err) {
+                console.error('[TwitchTransport] EventSub subscribe after broadcaster link failed:', err.message);
+            }
+        }
         return { authorized: true, channel: cleanName(channel) };
     }
 
@@ -925,6 +986,7 @@ export class TwitchTransport {
             await this.#vault.getUserToken();
             await this.#resolveIds();
             await this.#irc.connect();
+            await this.#startEventSub();
             this.#running = true;
             return { authorized: true, connected: true };
         })();
@@ -932,6 +994,52 @@ export class TwitchTransport {
             return await this.#bootPromise;
         } finally {
             this.#bootPromise = null;
+        }
+    }
+
+    async #startEventSub() {
+        if (!this.#eventsub) return;
+        try {
+            await this.#eventsub.connect();
+        } catch (err) {
+            console.error('[TwitchTransport] EventSub failed to start:', err.message);
+        }
+        await this.#subscribeEventSubChannels();
+    }
+
+    async #subscribeEventSubChannels() {
+        for (const channel of this.#channels) {
+            await this.#subscribeEventSubChannel(channel);
+        }
+    }
+
+    async #subscribeEventSubChannel(channel) {
+        if (!this.#eventsub) return;
+        const login = cleanName(channel);
+        const broadcasterId = this.#channelIdMap[login];
+        if (!broadcasterId) return;
+
+        let token = null;
+        try {
+            token = await this.#vault.getBroadcasterAccessToken(login, this.#botUsername);
+        } catch (err) {
+            console.warn(`[TwitchTransport] Broadcaster token lookup failed for ${channel}:`, err.message);
+            return;
+        }
+        if (!token) {
+            console.warn(`[TwitchTransport] No broadcaster token for ${channel}; skipping EventSub subscriptions.`);
+            return;
+        }
+
+        try {
+            await this.#eventsub.subscribeChannel({
+                broadcasterUserId: broadcasterId,
+                broadcasterChannel: login,
+                accessToken: token,
+                moderatorUserId: broadcasterId
+            });
+        } catch (err) {
+            console.error(`[TwitchTransport] EventSub subscribe failed for ${channel}:`, err.message);
         }
     }
 

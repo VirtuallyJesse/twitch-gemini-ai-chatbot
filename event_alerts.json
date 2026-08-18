@@ -1,0 +1,67 @@
+{
+    "subscription": {
+        "enabled": true,
+        "ai_enabled": true,
+        "cooldown_seconds": 0,
+        "fallback_template": "Welcome to the community, {username}! Thanks for subscribing at {tier}!",
+        "ai_prompt": "Acknowledge {username} subscribing at {tier} with an enthusiastic welcome."
+    },
+    "resub": {
+        "enabled": true,
+        "ai_enabled": true,
+        "cooldown_seconds": 0,
+        "fallback_template": "Welcome back, {username}! Thanks for {months} months of support (streak: {streak})! {message}",
+        "ai_prompt": "Celebrate {username} resubscribing for {months} cumulative months (streak: {streak}). Their resub message: '{message}'."
+    },
+    "community_sub_gift": {
+        "enabled": true,
+        "ai_enabled": true,
+        "cooldown_seconds": 0,
+        "fallback_template": "Huge hype! {username} just gifted {count} subscriptions to the community!",
+        "ai_prompt": "Celebrate {username} generously gifting {count} subscriptions to the community with massive hype."
+    },
+    "sub_gift": {
+        "enabled": true,
+        "ai_enabled": true,
+        "cooldown_seconds": 0,
+        "suppress_in_community_gift": true,
+        "fallback_template": "Thanks for the gift sub, {username}!",
+        "ai_prompt": "Thank {username} for gifting a subscription to the channel."
+    },
+    "cheer": {
+        "enabled": true,
+        "ai_enabled": true,
+        "min_bits": 100,
+        "cooldown_seconds": 0,
+        "fallback_template": "Thanks for cheering {bits} bits, {username}! {message}",
+        "ai_prompt": "Thank {username} for cheering {bits} bits. Their cheer message: '{message}'."
+    },
+    "channel_points": {
+        "enabled": true,
+        "ai_enabled": true,
+        "cooldown_seconds": 5,
+        "default_fallback_template": "{username} redeemed {reward}!",
+        "rewards": {
+            "Hydrate": {
+                "ai_enabled": true,
+                "fallback_template": "Drink water, streamer! {username} redeemed Hydrate!",
+                "ai_prompt": "Remind the streamer to hydrate in your cheeky persona, requested by {username}. Note: '{user_input}'."
+            }
+        }
+    },
+    "raid": {
+        "enabled": true,
+        "ai_enabled": true,
+        "min_viewers": 1,
+        "cooldown_seconds": 10,
+        "fallback_template": "Welcome raiders! Thanks {username} for bringing {viewers} viewers over!",
+        "ai_prompt": "Welcome {username} and their raid of {viewers} viewers with huge energy."
+    },
+    "follow": {
+        "enabled": false,
+        "ai_enabled": false,
+        "cooldown_seconds": 5,
+        "fallback_template": "Thanks for following the channel, {username}!",
+        "ai_prompt": "Thank {username} for following the channel."
+    }
+}

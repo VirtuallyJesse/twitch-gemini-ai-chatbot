@@ -70,6 +70,10 @@ Define static commands with instant responses — no AI call needed.
 
 Override the default error messages to match your bot's personality.
 
+**`event_alerts.json`** (optional)
+
+Configure how the bot reacts to subscriptions, bits, raids, and channel point redemptions.
+
 #### Deploy to Render
 
 Once your files are ready, click the button below to deploy your fork:
@@ -136,7 +140,7 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
    ```
    https://YOUR-APP.onrender.com/
    ```
-   Click the **`[Link Broadcaster]`** button next to your channel name to allow the bot to change your title and game category.
+   Click the **`[Link Broadcaster]`** button next to your channel name to enable Twitch actions and live stream alerts.
 
 3. **Mod the Bot:** In your Twitch stream chat, type `/mod mybot` so the bot can use it's full toolkit.
 
@@ -283,6 +287,15 @@ Pollinations powers the `!image`, `!video`, `!tts`, and `!song` commands.
 <br>
 
 On the free tier, each API key under a project at [`console.cloud.google.com`](https://console.cloud.google.com/) gets around 20 calls per day. Your account may have anywhere from 5–15 available projects depending on account age, giving you 100–300 API calls per day. The `GEMINI_API_KEY` env var accepts multiple comma-separated keys and rotates through them automatically.
+
+</details>
+
+<details>
+<summary><strong>Does the bot react to subs, bits, and raids?</strong></summary>
+
+<br>
+
+Yes, the bot automatically celebrates new subs, gift bombs, cheers, raids, and channel point redemptions in chat. You can tweak templates, set minimum bit thresholds, or turn specific alerts on/off in `event_alerts.json`.
 
 </details>
 

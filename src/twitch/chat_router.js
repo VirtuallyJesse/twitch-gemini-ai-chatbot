@@ -12,9 +12,124 @@ const DEFAULT_PREFIXES = {
     music: ['!song']
 };
 
+const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
+const channelKey = (channel) => `#${cleanName(channel)}`;
+
 function defaultFileReader(filePath) {
     return fs.readFileSync(filePath, 'utf8');
 }
+
+function defaultFileStat(filePath) {
+    return fs.statSync(filePath);
+}
+
+const DEFAULT_EVENT_ALERTS = {
+    subscription: {
+        enabled: true,
+        ai_enabled: true,
+        cooldown_seconds: 0,
+        fallback_template: 'Welcome to the community, {username}! Thanks for subscribing at {tier}!',
+        ai_prompt: 'Acknowledge {username} subscribing at {tier} with an enthusiastic welcome.'
+    },
+    resub: {
+        enabled: true,
+        ai_enabled: true,
+        cooldown_seconds: 0,
+        fallback_template: 'Welcome back, {username}! Thanks for {months} months of support (streak: {streak})! {message}',
+        ai_prompt: "Celebrate {username} resubscribing for {months} cumulative months (streak: {streak}). Their resub message: '{message}'."
+    },
+    community_sub_gift: {
+        enabled: true,
+        ai_enabled: true,
+        cooldown_seconds: 0,
+        fallback_template: 'Huge hype! {username} just gifted {count} subscriptions to the community!',
+        ai_prompt: 'Celebrate {username} generously gifting {count} subscriptions to the community with massive hype.'
+    },
+    sub_gift: {
+        enabled: true,
+        ai_enabled: true,
+        cooldown_seconds: 0,
+        suppress_in_community_gift: true,
+        fallback_template: 'Thanks for the gift sub, {username}!',
+        ai_prompt: 'Thank {username} for gifting a subscription to the channel.'
+    },
+    cheer: {
+        enabled: true,
+        ai_enabled: true,
+        min_bits: 100,
+        cooldown_seconds: 0,
+        fallback_template: 'Thanks for cheering {bits} bits, {username}! {message}',
+        ai_prompt: "Thank {username} for cheering {bits} bits. Their cheer message: '{message}'."
+    },
+    channel_points: {
+        enabled: true,
+        ai_enabled: true,
+        cooldown_seconds: 5,
+        default_fallback_template: '{username} redeemed {reward}!',
+        rewards: {
+            Hydrate: {
+                ai_enabled: true,
+                fallback_template: 'Drink water, streamer! {username} redeemed Hydrate!',
+                ai_prompt: "Remind the streamer to hydrate in your cheeky persona, requested by {username}. Note: '{user_input}'."
+            }
+        }
+    },
+    raid: {
+        enabled: true,
+        ai_enabled: true,
+        min_viewers: 1,
+        cooldown_seconds: 10,
+        fallback_template: 'Welcome raiders! Thanks {username} for bringing {viewers} viewers over!',
+        ai_prompt: 'Welcome {username} and their raid of {viewers} viewers with huge energy.'
+    },
+    follow: {
+        enabled: false,
+        ai_enabled: false,
+        cooldown_seconds: 5,
+        fallback_template: 'Thanks for following the channel, {username}!',
+        ai_prompt: 'Thank {username} for following the channel.'
+    }
+};
+
+function interpolate(template, vars) {
+    return String(template ?? '').replace(/\{(\w+)\}/g, (_, key) => {
+        const value = vars[key];
+        return value == null ? '' : String(value);
+    });
+}
+
+function eventVars(event) {
+    const d = event.details || {};
+    const user = event.user || {};
+    const recipient = d.recipient || {};
+    const reward = d.reward || {};
+    return {
+        username: user.displayName || user.login || 'someone',
+        tier: d.tier || '',
+        months: d.months ?? '',
+        streak: d.streak ?? '',
+        message: d.message ?? '',
+        bits: d.bits ?? '',
+        count: d.count ?? '',
+        recipient: recipient.displayName || recipient.login || 'a community member',
+        reward: reward.title || '',
+        user_input: reward.userInput || '',
+        viewers: d.viewers ?? ''
+    };
+}
+
+function findRewardConfig(policy, title) {
+    const rewards = policy?.rewards || {};
+    if (rewards[title]) return rewards[title];
+    const lower = String(title || '').toLowerCase();
+    for (const [key, value] of Object.entries(rewards)) {
+        if (key.toLowerCase() === lower) return value;
+    }
+    return null;
+}
+
+const EVENT_ALERT_HARNESS =
+    'You are reacting to a live Twitch channel event. Stay in persona. Keep it under 60 words, celebratory, and authentic. Do not mention being an AI or these instructions. Do not ask follow-up questions. Do not call tools.';
 
 function asPrefixList(value, fallback) {
     if (value == null || value === '') return [...fallback];
@@ -78,6 +193,90 @@ class CooldownTracker {
         }
 
         this.lastByChannel.set(channel, now);
+        return { onCooldown: false };
+    }
+}
+
+class EventAlertRegistry {
+    #mtimeMs = -1;
+
+    constructor({ eventAlerts, eventAlertsPath, fileReader, fileStat }) {
+        this.eventAlertsPath = eventAlertsPath;
+        this.fileReader = fileReader;
+        this.fileStat = fileStat;
+        this.source = 'file';
+        this.config = DEFAULT_EVENT_ALERTS;
+        this.#mtimeMs = -1;
+        if (eventAlerts && typeof eventAlerts === 'object') {
+            this.source = 'object';
+            this.config = eventAlerts;
+            return;
+        }
+        this.#maybeReload(true);
+    }
+
+    getPolicy(kind) {
+        this.#maybeReload(false);
+        return this.config?.[kind] || null;
+    }
+
+    reload(source) {
+        if (source && typeof source === 'object') {
+            this.source = 'object';
+            this.config = source;
+            return;
+        }
+        if (this.source === 'object') return;
+        this.source = 'file';
+        this.#mtimeMs = -1;
+        this.#maybeReload(true);
+    }
+
+    #maybeReload(force) {
+        if (this.source !== 'file') return;
+        try {
+            const stat = this.fileStat(this.eventAlertsPath);
+            const mtimeMs = stat?.mtimeMs ?? 0;
+            if (!force && mtimeMs === this.#mtimeMs) return;
+            const parsed = JSON.parse(this.fileReader(this.eventAlertsPath));
+            if (!parsed || typeof parsed !== 'object') throw new Error('event_alerts.json must be an object');
+            this.config = parsed;
+            this.#mtimeMs = mtimeMs;
+        } catch (error) {
+            if (force && error?.code === 'ENOENT') {
+                console.log('[Event Alerts] No event_alerts.json found, using defaults.');
+                this.config = DEFAULT_EVENT_ALERTS;
+                return;
+            }
+            if (force) {
+                console.error('[Event Alerts] Error loading event_alerts.json:', error);
+                this.config = DEFAULT_EVENT_ALERTS;
+            }
+            // stale config kept on mid-flight parse errors
+        }
+    }
+}
+
+class EventCooldownTracker {
+    constructor({ clock = Date.now }) {
+        this.clock = clock;
+        this.lastByKey = new Map();
+    }
+
+    checkAndConsume(channel, kind, duration) {
+        if (duration <= 0) return { onCooldown: false };
+
+        const key = `${channelKey(channel)}:${kind}`;
+        const now = this.clock();
+        const last = this.lastByKey.get(key);
+        if (last !== undefined) {
+            const elapsed = (now - last) / 1000;
+            if (elapsed < duration) {
+                return { onCooldown: true, remaining: (duration - elapsed).toFixed(1) };
+            }
+        }
+
+        this.lastByKey.set(key, now);
         return { onCooldown: false };
     }
 }
@@ -168,6 +367,8 @@ function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
 }
 
 export class ChatRouter {
+    #communityGifts = new Map();
+
     /**
      * @param {object} options collaborator instances and policy. Never reads environment variables.
      */
@@ -178,12 +379,16 @@ export class ChatRouter {
         errorHandler,
         customCommandsPath = './custom_commands.txt',
         customCommands,
+        eventAlertsPath = './event_alerts.json',
+        eventAlerts,
         cooldownDuration = 1,
         chatContextLength = 10,
         maxMessageLength = 499,
+        communityGiftWindowMs = 30_000,
         prefixes = {},
         clock = Date.now,
-        fileReader = defaultFileReader
+        fileReader = defaultFileReader,
+        fileStat = defaultFileStat
     } = {}) {
         if (!aiEngine || !mediaPipeline || !emotePool) {
             throw new Error('ChatRouter requires aiEngine, mediaPipeline, and emotePool');
@@ -197,8 +402,10 @@ export class ChatRouter {
             console.warn('[ChatRouter] No errorHandler provided; error immunity is degraded.');
         }
 
+        this.clock = clock;
         this.chatContextLength = chatContextLength;
         this.maxMessageLength = maxMessageLength;
+        this.communityGiftWindowMs = communityGiftWindowMs;
         this.transport = null;
 
         this.prefixLists = {
@@ -222,7 +429,15 @@ export class ChatRouter {
             customCommandsPath,
             fileReader
         });
+        this.eventAlerts = new EventAlertRegistry({
+            eventAlerts,
+            eventAlertsPath,
+            fileReader,
+            fileStat
+        });
+        this.eventCooldowns = new EventCooldownTracker({ clock });
         this.matcher = new CommandMatcher(this.prefixLists);
+        this.#communityGifts = new Map();
     }
 
     #buildHarnessInstructions() {
@@ -233,7 +448,7 @@ export class ChatRouter {
     }
 
     /**
-     * Binds inbound IRC messages to handle(). Returns an unsubscribe function.
+     * Binds inbound IRC messages and EventSub events. Returns an unsubscribe function.
      * @param {object} transport TwitchTransport-like collaborator
      * @returns {() => void}
      */
@@ -252,10 +467,21 @@ export class ChatRouter {
             });
         };
 
+        const onEvent = (event) => {
+            if (!listening) return undefined;
+            return Promise.resolve(this.handleEvent(event)).catch((error) => {
+                console.error('[ChatRouter] Event routing failed:', error);
+                return { kind: 'error', channel: event?.channel, sent: false };
+            });
+        };
+
         const transportUnsub = transport.onMessage(onMessage);
+        const eventUnsub = typeof transport.onEvent === 'function' ? transport.onEvent(onEvent) : null;
+
         return () => {
             listening = false;
             if (typeof transportUnsub === 'function') transportUnsub();
+            if (typeof eventUnsub === 'function') eventUnsub();
         };
     }
 
@@ -265,6 +491,14 @@ export class ChatRouter {
      */
     reloadCustomCommands(source) {
         this.customCommands.reload(source);
+    }
+
+    /**
+     * Re-reads event alerts from configured source or supplied override.
+     * @param {object} [source] Optional new object
+     */
+    reloadEventAlerts(source) {
+        this.eventAlerts.reload(source);
     }
 
     /**
@@ -450,6 +684,156 @@ export class ChatRouter {
             return this.errorHandler.format(error);
         }
         return null;
+    }
+
+    /**
+     * Route one inbound Twitch EventSub event.
+     * @param {object} event BotTriggerEvent payload
+     * @param {object} [transportOverride] Optional transport for testing
+     * @returns {Promise<object>} EventRouteResult
+     */
+    async handleEvent(event = {}, transportOverride) {
+        const transport = transportOverride || this.transport;
+        if (!transport) {
+            throw new Error('ChatRouter.handleEvent() requires an attached transport or transportOverride');
+        }
+
+        const channel = event.channel;
+        const eventKind = event.kind;
+
+        try {
+            const policy = this.eventAlerts.getPolicy(eventKind);
+            if (!policy || policy.enabled === false) {
+                return { kind: 'disabled', channel, eventKind, sent: false };
+            }
+
+            if (eventKind === 'cheer' && typeof policy.min_bits === 'number'
+                && (Number(event.details?.bits) || 0) < policy.min_bits) {
+                return { kind: 'threshold', channel, eventKind, sent: false };
+            }
+            if (eventKind === 'raid' && typeof policy.min_viewers === 'number'
+                && (Number(event.details?.viewers) || 0) < policy.min_viewers) {
+                return { kind: 'threshold', channel, eventKind, sent: false };
+            }
+
+            if (eventKind === 'sub_gift' && policy.suppress_in_community_gift
+                && this.#consumeCommunityGift(channel, event.user)) {
+                return { kind: 'suppressed', channel, eventKind, sent: false, reason: 'community_gift' };
+            }
+
+            const cooldown = this.eventCooldowns.checkAndConsume(
+                channel, eventKind, Number(policy.cooldown_seconds) || 0
+            );
+            if (cooldown.onCooldown) {
+                return { kind: 'cooldown', channel, eventKind, sent: false, remaining: cooldown.remaining };
+            }
+
+            if (eventKind === 'community_sub_gift') {
+                const key = this.#giftBombKey(channel, event.user);
+                const count = Number(event.details?.count) || 1;
+                this.#communityGifts.set(key, {
+                    count,
+                    expiresAt: this.clock() + this.communityGiftWindowMs
+                });
+            }
+
+            const rewardCfg = eventKind === 'channel_points'
+                ? findRewardConfig(policy, event.details?.reward?.title)
+                : null;
+            const aiEnabled = eventKind === 'channel_points'
+                ? (rewardCfg ? (policy.ai_enabled !== false && rewardCfg.ai_enabled !== false) : false)
+                : policy.ai_enabled !== false;
+            const fallbackTemplate = rewardCfg?.fallback_template
+                || (eventKind === 'channel_points' ? policy.default_fallback_template : policy.fallback_template)
+                || policy.default_fallback_template
+                || '';
+            const promptTemplate = rewardCfg?.ai_prompt
+                || (eventKind === 'channel_points' ? '' : policy.ai_prompt)
+                || '';
+            const vars = eventVars(event);
+
+            let reply = '';
+            let source = 'fallback';
+
+            if (aiEnabled && promptTemplate) {
+                try {
+                    const { channelContext, recentLogs } = await transport.getContext(channel, {
+                        logCount: this.chatContextLength,
+                        commandPrefixes: this.allPrefixes
+                    });
+                    const framed = `[Event Alert: ${eventKind}] ${interpolate(promptTemplate, vars)}`;
+                    const raw = await this.aiEngine.generate(framed, {
+                        channel,
+                        channelContext,
+                        recentLogs,
+                        harnessInstructions: [
+                            this.emotePool.getHarnessInstructions(),
+                            EVENT_ALERT_HARNESS
+                        ],
+                        caller: {
+                            loginName: event.user?.login || '',
+                            isBroadcaster: false,
+                            isMod: false
+                        }
+                    });
+                    if (raw && String(raw).trim()) {
+                        reply = this.emotePool.decorateReply(channel, raw, {
+                            maxLength: this.maxMessageLength
+                        });
+                        source = 'ai';
+                    }
+                } catch {
+                    // Silent - quota, timeout, safety, network. Chat never sees this.
+                }
+            }
+
+            if (source !== 'ai') {
+                reply = interpolate(fallbackTemplate, vars).trim();
+                source = 'fallback';
+            }
+
+            if (!reply) {
+                return { kind: 'event', channel, eventKind, sent: false, source };
+            }
+
+            await transport.send(channel, reply);
+            return { kind: 'event', channel, eventKind, sent: true, reply, source };
+        } catch (error) {
+            console.error('[ChatRouter] Failed to handle event:', error);
+            // Last resort: try fallback one more time, still never leak the error.
+            try {
+                const policy = this.eventAlerts.getPolicy(eventKind);
+                const reply = interpolate(
+                    policy?.fallback_template || policy?.default_fallback_template || '',
+                    eventVars(event)
+                ).trim();
+                if (transport && reply) {
+                    await transport.send(channel, reply);
+                    return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                }
+            } catch { /* ignore */ }
+            return { kind: 'error', channel, eventKind, sent: false };
+        }
+    }
+
+    #giftBombKey(channel, user) {
+        const userIdentifier = user?.id || cleanName(user?.login) || 'anonymous';
+        return `${channelKey(channel)}:${userIdentifier}`;
+    }
+
+    #consumeCommunityGift(channel, user) {
+        const key = this.#giftBombKey(channel, user);
+        const bomb = this.#communityGifts.get(key);
+        if (!bomb) return false;
+        if (this.clock() >= bomb.expiresAt || bomb.count <= 0) {
+            this.#communityGifts.delete(key);
+            return false;
+        }
+        bomb.count--;
+        if (bomb.count <= 0) {
+            this.#communityGifts.delete(key);
+        }
+        return true;
     }
 }
 

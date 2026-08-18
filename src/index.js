@@ -156,7 +156,8 @@ const transport = new TwitchTransport({
     channels,
     initialRefreshToken: process.env.TWITCH_REFRESH_TOKEN || '',
     storage,
-    ignoredUsernames
+    ignoredUsernames,
+    wsImpl: WebSocket
 });
 
 let helixTools = [];
