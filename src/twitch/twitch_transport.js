@@ -844,9 +844,24 @@ export class TwitchTransport {
 
     /* ── ingestion & history ───────────────────────────────── */
 
-    onMessage(handler) { this.#messageHandlers.push(handler); }
-    onLogEntry(handler) { this.#logHandlers.push(handler); }
-    onStatus(handler) { this.#statusHandlers.push(handler); }
+    onMessage(handler) {
+        this.#messageHandlers.push(handler);
+        return () => {
+            this.#messageHandlers = this.#messageHandlers.filter(h => h !== handler);
+        };
+    }
+    onLogEntry(handler) {
+        this.#logHandlers.push(handler);
+        return () => {
+            this.#logHandlers = this.#logHandlers.filter(h => h !== handler);
+        };
+    }
+    onStatus(handler) {
+        this.#statusHandlers.push(handler);
+        return () => {
+            this.#statusHandlers = this.#statusHandlers.filter(h => h !== handler);
+        };
+    }
     onEvent(handler) {
         this.#eventHandlers.push(handler);
         return () => {

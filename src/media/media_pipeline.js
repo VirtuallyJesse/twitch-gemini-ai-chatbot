@@ -144,6 +144,8 @@ function fitReplyAroundUrl(replyText, url, maxLength = 499) {
 }
 
 export class MediaPipeline {
+    #onMediaSaved = null;
+
     constructor({
         providers = [],
         uploader,
@@ -151,7 +153,7 @@ export class MediaPipeline {
         aiEngine,
         errorHandler = new ErrorHandler(),
         emotes,
-        onMediaSaved = () => {},
+        onMediaSaved = null,
         maxLength = 499,
         now = () => Date.now(),
         idFactory = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -162,10 +164,15 @@ export class MediaPipeline {
         this.aiEngine = aiEngine;
         this.errorHandler = errorHandler || new ErrorHandler();
         this.emotes = emotes;
-        this.onMediaSaved = onMediaSaved;
+        this.#onMediaSaved = typeof onMediaSaved === 'function' ? onMediaSaved : null;
         this.maxLength = maxLength;
         this.now = now;
         this.idFactory = idFactory;
+    }
+
+    get onMediaSaved() { return this.#onMediaSaved; }
+    set onMediaSaved(handler) {
+        this.#onMediaSaved = typeof handler === 'function' ? handler : null;
     }
 
     #resolveProvider(mediaType) {
@@ -214,9 +221,9 @@ export class MediaPipeline {
             }
         }
 
-        if (typeof this.onMediaSaved === 'function') {
+        if (typeof this.#onMediaSaved === 'function') {
             try {
-                await this.onMediaSaved(entry);
+                await this.#onMediaSaved(entry);
             } catch (error) {
                 console.error('[Media] Failed to notify media subscribers:', error);
             }
