@@ -12,6 +12,8 @@ services:
       # ═══════════════════════════════════════════════════════════════════
       - key: TWITCH_USERNAME
         value: "your-bot-username"
+      - key: ADMIN_USERNAMES
+        value: "your-streamer-username"
       - key: JOIN_CHANNELS
         value: "your-channel-1,your-channel-2"
       - key: TWITCH_CLIENT_ID

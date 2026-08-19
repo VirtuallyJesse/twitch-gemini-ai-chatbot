@@ -109,6 +109,31 @@ export class MemoryStorageAdapter {
         }
     }
 
+    async getValue(key) {
+        try {
+            return this.kv.has(String(key)) ? this.kv.get(String(key)) : null;
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return null;
+        }
+    }
+
+    async setValue(key, value) {
+        try {
+            this.kv.set(String(key), String(value));
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+        }
+    }
+
+    async deleteValue(key) {
+        try {
+            this.kv.delete(String(key));
+        } catch (error) {
+            console.error('[Storage] Memory delete failed:', error.message);
+        }
+    }
+
     async addChatMessage(channel, entry) {
         try {
             const key = normalizeChannel(channel);
@@ -317,6 +342,33 @@ export class UpstashRedisAdapter {
         }
     }
 
+    async getValue(key) {
+        try {
+            const data = await this.request('/', ['GET', String(key)]);
+            if (!data || data.result == null) return null;
+            return typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return null;
+        }
+    }
+
+    async setValue(key, value) {
+        try {
+            await this.request('/', ['SET', String(key), String(value)]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
+    async deleteValue(key) {
+        try {
+            await this.request('/', ['DEL', String(key)]);
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+        }
+    }
+
     async getBroadcasterToken(channel) {
         try {
             return await this.getJson(broadcasterKey(channel));
@@ -411,5 +463,17 @@ export class Storage {
 
     getJson(key) {
         return this.adapter.getJson(key);
+    }
+
+    getValue(key) {
+        return this.adapter.getValue(key);
+    }
+
+    setValue(key, value) {
+        return this.adapter.setValue(key, value);
+    }
+
+    deleteValue(key) {
+        return this.adapter.deleteValue(key);
     }
 }

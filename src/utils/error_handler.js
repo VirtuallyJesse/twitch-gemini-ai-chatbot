@@ -1,4 +1,5 @@
-import fs from 'fs';
+// src/utils/error_handler.js
+import { FACTORY } from './bot_config.js';
 
 const HARD_FALLBACK = '❌ Unknown Error';
 const INFO_CATEGORY = 'info';
@@ -215,30 +216,18 @@ export class ErrorHandler {
 
     /**
      * @param {object} [options]
-     * @param {Record<string, string>|null} [options.catalog] In-memory dictionary (skips disk)
-     * @param {string} [options.filePath]
-     * @param {(filePath: string) => string} [options.fileReader]
+     * @param {Record<string, string>|null} [options.messages] In-memory dictionary
      */
     constructor({
-        catalog = null,
-        filePath = './error_messages.json',
-        fileReader = defaultFileReader
+        messages = null
     } = {}) {
-        this.messages = catalog && typeof catalog === 'object'
-            ? { ...catalog }
-            : this.#loadMessages(filePath, fileReader);
+        this.messages = { ...FACTORY.error_messages, ...(messages && typeof messages === 'object' ? messages : {}) };
         this.#indexCatalog();
     }
 
-    #loadMessages(filePath, fileReader) {
-        try {
-            const data = fileReader(filePath);
-            const parsed = JSON.parse(data);
-            return parsed && typeof parsed === 'object' ? parsed : {};
-        } catch (error) {
-            console.error('[ErrorHandler] Failed to load error catalog:', error?.message || error);
-            return {};
-        }
+    reload(messages) {
+        this.messages = { ...FACTORY.error_messages, ...(messages || {}) };
+        this.#indexCatalog();
     }
 
     #indexCatalog() {

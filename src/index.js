@@ -1,5 +1,4 @@
 import WebSocket from 'ws';
-import fs from 'fs';
 import { AIEngine } from './ai/ai_engine.js';
 import { EmotePool } from './twitch/emote_pool.js';
 import { MediaUploader } from './media/media_uploader.js';
@@ -8,6 +7,7 @@ import ErrorHandler from './utils/error_handler.js';
 import { PollinationsProvider } from './media/pollinations_provider.js';
 import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
+import { ConfigStore } from './utils/bot_config.js';
 import { TwitchTransport } from './twitch/twitch_transport.js';
 import { ChatRouter } from './twitch/chat_router.js';
 import { createHelixTools } from './twitch/helix_actions.js';
@@ -22,6 +22,9 @@ const storage = new Storage({
     restUrl: env.UPSTASH_REDIS_REST_URL,
     restToken: env.UPSTASH_REDIS_REST_TOKEN
 });
+
+const configStore = new ConfigStore({ storage });
+const bootConfig = await configStore.getAll();
 
 if (!env.GEMINI_API_KEY) {
     console.error('No GEMINI_API_KEY found. Please set it as an environment variable.');
@@ -62,15 +65,8 @@ const emotes = new EmotePool({
     excludePrefixes: csv(env.EMOTE_APPEND_EXCLUDE_PREFIXES)
 });
 
-let fileContext = 'You are a helpful Twitch Chatbot.';
-try {
-    fileContext = fs.readFileSync('./system_instructions.txt', 'utf8');
-} catch (error) {
-    console.error('Error reading system_instructions.txt:', error);
-}
-
 const mediaUploader = new MediaUploader();
-const errorHandler = new ErrorHandler();
+const errorHandler = new ErrorHandler({ messages: bootConfig.error_messages });
 
 function isUsableSecret(value) {
     const key = String(value || '').trim();
@@ -115,7 +111,7 @@ if (env.ENABLE_HELIX_ACTIONS !== 'false') {
 const aiEngine = new AIEngine({
     apiKeys: env.GEMINI_API_KEY || '',
     modelName: env.MODEL_NAME || 'gemini-3.7-flash',
-    fileContext,
+    fileContext: bootConfig.system_instructions,
     historyLength: parseInt(env.AI_HISTORY_LENGTH, 10) || 5,
     searchGrounding: env.SEARCH_GROUNDING || '',
     searchProvider,
@@ -141,7 +137,9 @@ const chatRouter = new ChatRouter({
     mediaPipeline,
     emotePool: emotes,
     errorHandler,
-    systemInstructionsPath: './system_instructions.txt',
+    systemInstructions: bootConfig.system_instructions,
+    customCommands: bootConfig.custom_commands,
+    eventAlerts: bootConfig.event_alerts,
     cooldownDuration: env.COOLDOWN_DURATION !== undefined ? parseInt(env.COOLDOWN_DURATION, 10) : 1,
     chatContextLength: parseInt(env.CHAT_CONTEXT_LENGTH, 10) || 10,
     maxMessageLength: 499,
@@ -163,6 +161,11 @@ const server = new WebServer({
     emotePool: emotes,
     mediaPipeline,
     errorHandler,
+    configStore,
+    chatRouter,
+    adminUsernames: csv(env.ADMIN_USERNAMES),
+    clientId: env.TWITCH_CLIENT_ID || '',
+    clientSecret: env.TWITCH_CLIENT_SECRET || '',
     botUsername: env.TWITCH_USERNAME || '',
     externalUrl: env.RENDER_EXTERNAL_URL || '',
     trustProxy: 1

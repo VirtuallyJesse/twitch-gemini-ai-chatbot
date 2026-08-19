@@ -1,9 +1,8 @@
 // twitch-gemini-ai-chatbot/src/twitch/chat_router.js
 // Coordinates Twitch chat ingestion, command RBAC, media/AI dispatch,
 // per-channel cooldowns, and chatter-safe error translation.
-import fs from 'fs';
+import { FACTORY, commandsToMap } from '../utils/bot_config.js';
 
-const VALID_ROLES = new Set(['broadcaster', 'moderator', 'all']);
 const DEFAULT_PREFIXES = {
     ai: ['!gemini'],
     image: ['!image'],
@@ -15,81 +14,7 @@ const DEFAULT_PREFIXES = {
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
 const channelKey = (channel) => `#${cleanName(channel)}`;
 
-function defaultFileReader(filePath) {
-    return fs.readFileSync(filePath, 'utf8');
-}
-
-function defaultFileStat(filePath) {
-    return fs.statSync(filePath);
-}
-
-const DEFAULT_EVENT_ALERTS = {
-    subscription: {
-        enabled: true,
-        ai_enabled: true,
-        cooldown_seconds: 0,
-        fallback_template: 'Welcome to the community, {username}! Thanks for subscribing at {tier}!',
-        ai_prompt: 'Acknowledge {username} subscribing at {tier} with an enthusiastic welcome.'
-    },
-    resub: {
-        enabled: true,
-        ai_enabled: true,
-        cooldown_seconds: 0,
-        fallback_template: 'Welcome back, {username}! Thanks for {months} months of support (streak: {streak})! {message}',
-        ai_prompt: "Celebrate {username} resubscribing for {months} cumulative months (streak: {streak}). Their resub message: '{message}'."
-    },
-    community_sub_gift: {
-        enabled: true,
-        ai_enabled: true,
-        cooldown_seconds: 0,
-        fallback_template: 'Huge hype! {username} just gifted {count} subscriptions to the community!',
-        ai_prompt: 'Celebrate {username} generously gifting {count} subscriptions to the community with massive hype.'
-    },
-    sub_gift: {
-        enabled: true,
-        ai_enabled: true,
-        cooldown_seconds: 0,
-        suppress_in_community_gift: true,
-        fallback_template: 'Thanks for the gift sub, {username}!',
-        ai_prompt: 'Thank {username} for gifting a subscription to the channel.'
-    },
-    cheer: {
-        enabled: true,
-        ai_enabled: true,
-        min_bits: 100,
-        cooldown_seconds: 0,
-        fallback_template: 'Thanks for cheering {bits} bits, {username}! {message}',
-        ai_prompt: "Thank {username} for cheering {bits} bits. Their cheer message: '{message}'."
-    },
-    channel_points: {
-        enabled: true,
-        ai_enabled: true,
-        cooldown_seconds: 5,
-        default_fallback_template: '{username} redeemed {reward}!',
-        rewards: {
-            Hydrate: {
-                ai_enabled: true,
-                fallback_template: 'Drink water, streamer! {username} redeemed Hydrate!',
-                ai_prompt: "Remind the streamer to hydrate in your cheeky persona, requested by {username}. Note: '{user_input}'."
-            }
-        }
-    },
-    raid: {
-        enabled: true,
-        ai_enabled: true,
-        min_viewers: 1,
-        cooldown_seconds: 10,
-        fallback_template: 'Welcome raiders! Thanks {username} for bringing {viewers} viewers over!',
-        ai_prompt: 'Welcome {username} and their raid of {viewers} viewers with huge energy.'
-    },
-    follow: {
-        enabled: false,
-        ai_enabled: false,
-        cooldown_seconds: 5,
-        fallback_template: 'Thanks for following the channel, {username}!',
-        ai_prompt: 'Thank {username} for following the channel.'
-    }
-};
+const DEFAULT_EVENT_ALERTS = FACTORY.event_alerts;
 
 function interpolate(template, vars) {
     return String(template ?? '').replace(/\{(\w+)\}/g, (_, key) => {
@@ -137,44 +62,6 @@ function asPrefixList(value, fallback) {
     return items.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
 }
 
-function parseCustomCommandText(source) {
-    const commands = new Map();
-    if (source == null) return commands;
-
-    for (const line of String(source).split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-
-        const eqIndex = trimmed.indexOf('=');
-        if (eqIndex === -1) continue;
-
-        const left = trimmed.substring(0, eqIndex).trim();
-        const response = trimmed.substring(eqIndex + 1).trim();
-
-        let cmd;
-        let role;
-        const pipeIndex = left.indexOf('|');
-        if (pipeIndex !== -1) {
-            cmd = left.substring(0, pipeIndex).trim().toLowerCase();
-            role = left.substring(pipeIndex + 1).trim().toLowerCase();
-        } else {
-            cmd = left.toLowerCase();
-            role = 'all';
-        }
-
-        if (!VALID_ROLES.has(role)) {
-            console.warn(`[Custom Commands] Invalid role "${role}" for command "${cmd}", defaulting to "all"`);
-            role = 'all';
-        }
-
-        if (cmd && response) {
-            commands.set(cmd, { response, role });
-        }
-    }
-
-    return commands;
-}
-
 class CooldownTracker {
     constructor({ duration, clock }) {
         this.duration = typeof duration === 'number' ? duration : 1;
@@ -198,61 +85,17 @@ class CooldownTracker {
 }
 
 class EventAlertRegistry {
-    #mtimeMs = -1;
-
-    constructor({ eventAlerts, eventAlertsPath, fileReader, fileStat }) {
-        this.eventAlertsPath = eventAlertsPath;
-        this.fileReader = fileReader;
-        this.fileStat = fileStat;
-        this.source = 'file';
-        this.config = DEFAULT_EVENT_ALERTS;
-        this.#mtimeMs = -1;
-        if (eventAlerts && typeof eventAlerts === 'object') {
-            this.source = 'object';
-            this.config = eventAlerts;
-            return;
-        }
-        this.#maybeReload(true);
+    constructor({ eventAlerts } = {}) {
+        this.config = eventAlerts && typeof eventAlerts === 'object' ? eventAlerts : DEFAULT_EVENT_ALERTS;
     }
 
     getPolicy(kind) {
-        this.#maybeReload(false);
         return this.config?.[kind] || null;
     }
 
     reload(source) {
         if (source && typeof source === 'object') {
-            this.source = 'object';
             this.config = source;
-            return;
-        }
-        if (this.source === 'object') return;
-        this.source = 'file';
-        this.#mtimeMs = -1;
-        this.#maybeReload(true);
-    }
-
-    #maybeReload(force) {
-        if (this.source !== 'file') return;
-        try {
-            const stat = this.fileStat(this.eventAlertsPath);
-            const mtimeMs = stat?.mtimeMs ?? 0;
-            if (!force && mtimeMs === this.#mtimeMs) return;
-            const parsed = JSON.parse(this.fileReader(this.eventAlertsPath));
-            if (!parsed || typeof parsed !== 'object') throw new Error('event_alerts.json must be an object');
-            this.config = parsed;
-            this.#mtimeMs = mtimeMs;
-        } catch (error) {
-            if (force && error?.code === 'ENOENT') {
-                console.log('[Event Alerts] No event_alerts.json found, using defaults.');
-                this.config = DEFAULT_EVENT_ALERTS;
-                return;
-            }
-            if (force) {
-                console.error('[Event Alerts] Error loading event_alerts.json:', error);
-                this.config = DEFAULT_EVENT_ALERTS;
-            }
-            // stale config kept on mid-flight parse errors
         }
     }
 }
@@ -282,46 +125,20 @@ class EventCooldownTracker {
 }
 
 class CustomCommandRegistry {
-    constructor({ customCommands, customCommandsPath, fileReader }) {
-        this.customCommandsPath = customCommandsPath;
-        this.fileReader = fileReader;
-        this.source = 'file';
+    constructor({ customCommands } = {}) {
         this.commands = new Map();
         this.reload(customCommands);
     }
 
     reload(source) {
+        if (Array.isArray(source)) {
+            this.commands = commandsToMap(source);
+            return;
+        }
+
         if (source instanceof Map) {
-            this.source = 'map';
             this.commands = source;
             return;
-        }
-
-        if (typeof source === 'string') {
-            this.source = 'string';
-            this.raw = source;
-            this.commands = parseCustomCommandText(source);
-            return;
-        }
-
-        if (this.source === 'map') return;
-
-        if (this.source === 'string') {
-            this.commands = parseCustomCommandText(this.raw);
-            return;
-        }
-
-        try {
-            const data = this.fileReader(this.customCommandsPath);
-            this.commands = parseCustomCommandText(data);
-            console.log(`[Custom Commands] Loaded ${this.commands.size} command(s) from custom_commands.txt`);
-        } catch (error) {
-            if (error && error.code === 'ENOENT') {
-                console.log('[Custom Commands] No custom_commands.txt found, skipping.');
-            } else {
-                console.error('[Custom Commands] Error loading custom_commands.txt:', error);
-            }
-            this.commands = new Map();
         }
     }
 
@@ -369,11 +186,6 @@ function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
 export class ChatRouter {
     #communityGifts = new Map();
     #systemInstructions = '';
-    #systemInstructionsPath;
-    #systemInstructionsSource = 'file';
-    #systemInstructionsMtimeMs = -1;
-    #fileReader;
-    #fileStat;
 
     /**
      * @param {object} options collaborator instances and policy. Never reads environment variables.
@@ -383,20 +195,15 @@ export class ChatRouter {
         mediaPipeline,
         emotePool,
         errorHandler,
-        customCommandsPath = './custom_commands.txt',
         customCommands,
-        eventAlertsPath = './event_alerts.json',
         eventAlerts,
-        systemInstructionsPath = './system_instructions.txt',
         systemInstructions,
         cooldownDuration = 1,
         chatContextLength = 10,
         maxMessageLength = 499,
         communityGiftWindowMs = 30_000,
         prefixes = {},
-        clock = Date.now,
-        fileReader = defaultFileReader,
-        fileStat = defaultFileStat
+        clock = Date.now
     } = {}) {
         if (!aiEngine || !mediaPipeline || !emotePool) {
             throw new Error('ChatRouter requires aiEngine, mediaPipeline, and emotePool');
@@ -416,18 +223,7 @@ export class ChatRouter {
         this.communityGiftWindowMs = communityGiftWindowMs;
         this.transport = null;
 
-        this.#systemInstructionsPath = systemInstructionsPath;
-        this.#systemInstructionsMtimeMs = -1;
-        this.#fileReader = fileReader;
-        this.#fileStat = fileStat;
-        if (typeof systemInstructions === 'string') {
-            this.#systemInstructionsSource = 'override';
-            this.#systemInstructions = systemInstructions;
-        } else {
-            this.#systemInstructionsSource = 'file';
-            this.#systemInstructions = '';
-            this.#maybeReloadSystemInstructions(true);
-        }
+        this.#systemInstructions = typeof systemInstructions === 'string' ? systemInstructions : FACTORY.system_instructions;
 
         this.prefixLists = {
             ai: asPrefixList(prefixes.ai, DEFAULT_PREFIXES.ai),
@@ -445,17 +241,8 @@ export class ChatRouter {
         ];
 
         this.cooldowns = new CooldownTracker({ duration: cooldownDuration, clock });
-        this.customCommands = new CustomCommandRegistry({
-            customCommands,
-            customCommandsPath,
-            fileReader
-        });
-        this.eventAlerts = new EventAlertRegistry({
-            eventAlerts,
-            eventAlertsPath,
-            fileReader,
-            fileStat
-        });
+        this.customCommands = new CustomCommandRegistry({ customCommands });
+        this.eventAlerts = new EventAlertRegistry({ eventAlerts });
         this.eventCooldowns = new EventCooldownTracker({ clock });
         this.matcher = new CommandMatcher(this.prefixLists);
         this.#communityGifts = new Map();
@@ -508,7 +295,7 @@ export class ChatRouter {
 
     /**
      * Re-reads custom commands from configured source or supplied override.
-     * @param {Map|string} [source] Optional new Map or raw string
+     * @param {Array|Map} [source] Optional new Array or Map
      */
     reloadCustomCommands(source) {
         this.customCommands.reload(source);
@@ -523,48 +310,19 @@ export class ChatRouter {
     }
 
     /**
-     * Current system instructions persona. Reloads from file if modified on disk.
+     * Current system instructions persona.
      */
     get systemInstructions() {
-        this.#maybeReloadSystemInstructions(false);
         return this.#systemInstructions;
     }
 
     /**
-     * Re-reads system instructions persona from configured source or supplied override.
+     * Re-reads system instructions persona from supplied string.
      * @param {string} [source] Optional string override
      */
     reloadSystemInstructions(source) {
         if (typeof source === 'string') {
-            this.#systemInstructionsSource = 'override';
             this.#systemInstructions = source;
-            return;
-        }
-        if (this.#systemInstructionsSource === 'override') return;
-        this.#systemInstructionsSource = 'file';
-        this.#systemInstructionsMtimeMs = -1;
-        this.#maybeReloadSystemInstructions(true);
-    }
-
-    #maybeReloadSystemInstructions(force) {
-        if (this.#systemInstructionsSource !== 'file') return;
-        try {
-            const stat = this.#fileStat(this.#systemInstructionsPath);
-            const mtimeMs = stat?.mtimeMs ?? 0;
-            if (!force && mtimeMs === this.#systemInstructionsMtimeMs) return;
-            this.#systemInstructions = String(this.#fileReader(this.#systemInstructionsPath) ?? '');
-            this.#systemInstructionsMtimeMs = mtimeMs;
-        } catch (error) {
-            if (force && error?.code === 'ENOENT') {
-                console.log('[System Instructions] No system_instructions.txt found.');
-                this.#systemInstructions = '';
-                return;
-            }
-            if (force) {
-                console.error('[System Instructions] Error loading system_instructions.txt:', error);
-                this.#systemInstructions = '';
-            }
-            // mid-flight parse/IO errors keep the last good persona
         }
     }
 
@@ -812,23 +570,71 @@ export class ChatRouter {
                 });
             }
 
-            const rewardCfg = eventKind === 'channel_points'
-                ? findRewardConfig(policy, event.details?.reward?.title)
-                : null;
-            const aiEnabled = eventKind === 'channel_points'
-                ? (rewardCfg ? (policy.ai_enabled !== false && rewardCfg.ai_enabled !== false) : false)
-                : policy.ai_enabled !== false;
-            const fallbackTemplate = rewardCfg?.fallback_template
-                || (eventKind === 'channel_points' ? policy.default_fallback_template : policy.fallback_template)
-                || policy.default_fallback_template
-                || '';
-            const promptTemplate = rewardCfg?.ai_prompt
-                || (eventKind === 'channel_points' ? '' : policy.ai_prompt)
-                || '';
             const vars = eventVars(event);
-
             let reply = '';
             let source = 'fallback';
+
+            if (eventKind === 'channel_points') {
+                const rewardCfg = findRewardConfig(policy, event.details?.reward?.title);
+                if (!rewardCfg) {
+                    return { kind: 'unconfigured_reward', channel, eventKind, sent: false };
+                }
+                const aiEnabled = rewardCfg.ai_enabled !== false;
+                const fallbackTemplate = rewardCfg.fallback_template || '';
+                const promptTemplate = rewardCfg.ai_prompt || '';
+
+                if (aiEnabled && promptTemplate) {
+                    try {
+                        const { channelContext, recentLogs } = await transport.getContext(channel, {
+                            logCount: this.chatContextLength,
+                            commandPrefixes: this.allPrefixes
+                        });
+                        const framed = `[Event Alert: ${eventKind}] ${interpolate(promptTemplate, vars)}`;
+                        const flaggedFramed = typeof this.emotePool.flagText === 'function'
+                            ? this.emotePool.flagText(channel, framed)
+                            : framed;
+                        const raw = await this.aiEngine.generate(flaggedFramed, {
+                            channel,
+                            channelContext,
+                            recentLogs,
+                            harnessInstructions: [
+                                this.emotePool.getHarnessInstructions(),
+                                EVENT_ALERT_HARNESS
+                            ],
+                            overrideFileContext: this.#flaggedPersona(channel),
+                            caller: {
+                                loginName: event.user?.login || '',
+                                isBroadcaster: false,
+                                isMod: false
+                            }
+                        });
+                        if (raw && String(raw).trim()) {
+                            reply = this.emotePool.decorateReply(channel, raw, {
+                                maxLength: this.maxMessageLength
+                            });
+                            source = 'ai';
+                        }
+                    } catch {
+                        // Silent - quota, timeout, safety, network. Chat never sees this.
+                    }
+                }
+
+                if (source !== 'ai') {
+                    reply = interpolate(fallbackTemplate, vars).trim();
+                    source = 'fallback';
+                }
+
+                if (!reply) {
+                    return { kind: 'event', channel, eventKind, sent: false, source };
+                }
+
+                await transport.send(channel, reply);
+                return { kind: 'event', channel, eventKind, sent: true, reply, source };
+            }
+
+            const aiEnabled = policy.ai_enabled !== false;
+            const fallbackTemplate = policy.fallback_template || '';
+            const promptTemplate = policy.ai_prompt || '';
 
             if (aiEnabled && promptTemplate) {
                 try {
@@ -882,13 +688,21 @@ export class ChatRouter {
             // Last resort: try fallback one more time, still never leak the error.
             try {
                 const policy = this.eventAlerts.getPolicy(eventKind);
-                const reply = interpolate(
-                    policy?.fallback_template || policy?.default_fallback_template || '',
-                    eventVars(event)
-                ).trim();
-                if (transport && reply) {
-                    await transport.send(channel, reply);
-                    return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                if (eventKind === 'channel_points') {
+                    const rewardCfg = findRewardConfig(policy, event.details?.reward?.title);
+                    if (rewardCfg?.fallback_template) {
+                        const reply = interpolate(rewardCfg.fallback_template, eventVars(event)).trim();
+                        if (transport && reply) {
+                            await transport.send(channel, reply);
+                            return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                        }
+                    }
+                } else if (policy?.fallback_template) {
+                    const reply = interpolate(policy.fallback_template, eventVars(event)).trim();
+                    if (transport && reply) {
+                        await transport.send(channel, reply);
+                        return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                    }
                 }
             } catch { /* ignore */ }
             return { kind: 'error', channel, eventKind, sent: false };

@@ -799,6 +799,14 @@ export class AIEngine {
         }
         return this.errorHandler.format(lastError);
     }
+
+    /**
+     * Hot-reloads the default persona / system instructions context.
+     * @param {string} next
+     */
+    reloadFileContext(next) {
+        this.fileContext = String(next ?? '');
+    }
 }
 
 export default AIEngine;

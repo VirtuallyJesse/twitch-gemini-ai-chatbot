@@ -25,14 +25,15 @@
 
 A high-level checklist — the [Tutorial](#tutorial) below covers every step in detail.
 
-1. **Fork this repository** and customize the bot's personality files
+1. **Fork this repository** to your GitHub account
 2. **Create a Twitch application** at [`dev.twitch.tv/console`](https://dev.twitch.tv/console) — note your Client ID & Secret
 3. **Get Gemini API key(s)** from [`console.cloud.google.com`](https://console.cloud.google.com/)
 4. **Create an Upstash Redis database** at [`console.upstash.com`](https://console.upstash.com) — copy the Redis connection string
 5. *(Optional)* **Get a Tavily API key** from [`app.tavily.com`](https://app.tavily.com) to enable live web search
 6. *(Optional)* **Get a Pollinations API key** from [`enter.pollinations.ai`](https://enter.pollinations.ai) to enable `!image`, `!video`, `!tts`, and `!song`
 7. **Deploy your fork to Render** and fill in your environment variables
-8. **Authorize the bot** at `https://YOUR-APP.onrender.com/auth/login` and link your channel on the dashboard
+8. **Authorize the bot** at `https://YOUR-APP.onrender.com/auth/login`
+9. **Open your dashboard** at `https://YOUR-APP.onrender.com/` to customize personality, commands, and alerts
 
 That's it. No local install. No terminal commands.
 
@@ -45,47 +46,27 @@ Full walkthrough for each requirement. Complete these in order.
 <!-- ─── 1. FORK & DEPLOY ─────────────────────────────────── -->
 
 <details>
-<summary><strong>1 — Fork, Customize & Deploy to Render</strong></summary>
+<summary><strong>1 — Fork & Deploy to Render</strong></summary>
 
 <br>
 
-#### Fork the repository
+#### 1. Fork the repository
 
-1. Click **Fork** at the top of this GitHub repo
-2. This creates your own copy where you can edit all files freely
+1. Click **Fork** at the top right of this GitHub repo
+2. Click **Create Fork** to make a copy in your own GitHub account
 
-#### Customize your bot
+> 💡 Forking keeps your bot isolated and stable so updates here never restart your bot mid-stream. You do not need to edit any code or files.
 
-These files shape the bot's personality and behavior — edit them in your fork before deploying:
+#### 2. Deploy to Render
 
-**`system_instructions.txt`** (required)
-
-This is the bot's personality prompt — Gemini follows these instructions for every response. Define tone, character, rules, etc.
-
-**`custom_commands.txt`** (optional)
-
-Define static commands with instant responses — no AI call needed.
-
-**`error_messages.json`** (optional)
-
-Override the default error messages to match your bot's personality.
-
-**`event_alerts.json`** (optional)
-
-Configure how the bot reacts to subscriptions, bits, raids, and channel point redemptions.
-
-#### Deploy to Render
-
-Once your files are ready, click the button below to deploy your fork:
+Click the button below to deploy your fork:
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
 
 1. Sign into [Render](https://render.com) with your **GitHub account**
-2. Render will detect your fork and the `render.yaml` Blueprint
-3. You'll see a form with all the environment variables — fill these in as you complete the sections below
+2. Render will detect your fork and open the Blueprint form
+3. Fill in the environment variables as you complete the sections below
 4. Click **Deploy Blueprint** once every value is ready
-
-> 💡 After the first deploy, every push to `main` in your fork automatically redeploys your bot.
 
 </details>
 
@@ -124,11 +105,12 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
 | Variable | What to enter |
 |---|---|
 | `TWITCH_USERNAME` | Your **bot account's** username (lowercase) |
+| `ADMIN_USERNAMES` | Your **streamer account's** username (grants access to dashboard settings) |
 | `JOIN_CHANNELS` | Your **streamer channel's** username (where the bot should chat) |
 | `TWITCH_CLIENT_ID` | The Client ID copied above |
 | `TWITCH_CLIENT_SECRET` | The Client Secret copied above |
 
-#### 4. Connect your accounts (after Render deploys)
+#### 4. Connect and configure your accounts (after Render deploys)
 
 1. In your **Bot's Incognito window**, visit:
    ```
@@ -140,9 +122,11 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
    ```
    https://YOUR-APP.onrender.com/
    ```
-   Click the **`[Link Broadcaster]`** button next to your channel name to enable Twitch actions and live stream alerts.
+   - Click **Sign in with Twitch** in the top right.
+   - Click the **`[Link Broadcaster]`** button next to your channel name to enable stream controls and live alerts.
+   - Click your profile name → **⚙️ Bot Configuration** to customize persona, commands, and alerts.
 
-3. **Mod the Bot:** In your Twitch stream chat, type `/mod mybot` so the bot can use it's full toolkit.
+3. **Mod the Bot:** In your Twitch stream chat, type `/mod yourbotusername` so the bot can use its full toolkit.
 
 </details>
 
@@ -277,6 +261,24 @@ Pollinations powers the `!image`, `!video`, `!tts`, and `!song` commands.
 
 </details>
 
+<!-- ─── 7. DASHBOARD CONFIG ─────────────────────────────── -->
+
+<details>
+<summary><strong>7 — Dashboard & Bot Customization</strong></summary>
+
+<br>
+
+Your Render URL (`https://YOUR-APP.onrender.com`) is your live control center. Sign in with Twitch and click your name → **⚙️ Bot Configuration** to customize:
+
+- **Persona** — Set your bot's personality, tone, and channel rules.
+- **Commands** — Add instant chat commands (e.g. `!discord`, `!socials`) with custom role permissions.
+- **Alerts** — Toggle and customize AI or static celebrations for subs, raids, cheers, follows, and channel points.
+- **Errors** — Fine-tune chat fallback notices if external services go down.
+
+> 💡 All dashboard changes save instantly — no redeploying or waiting required.
+
+</details>
+
 ---
 
 ## FAQ
@@ -295,7 +297,7 @@ On the free tier, each API key under a project at [`console.cloud.google.com`](h
 
 <br>
 
-Yes, the bot automatically celebrates new subs, gift bombs, cheers, raids, and channel point redemptions in chat. You can tweak templates, set minimum bit thresholds, or turn specific alerts on/off in `event_alerts.json`.
+Yes, the bot automatically celebrates new subs, gift bombs, cheers, raids, and channel point redemptions in chat. You can toggle alerts, tweak templates, and adjust bit/viewer thresholds directly in your dashboard under **Alerts**.
 
 </details>
 
@@ -400,11 +402,11 @@ The bot has a built-in keepalive mechanism to prevent Render's free-tier spin-do
 </details>
 
 <details>
-<summary><strong>How do I see chat logs and the media gallery?</strong></summary>
+<summary><strong>How do I see chat logs, media gallery, and settings?</strong></summary>
 
 <br>
 
-Your Render service URL doubles as a public web dashboard that displays your channels' chat logs and generated media gallery. It's the same base link you used to authorize your bot (e.g. `https://YOUR-APP.onrender.com`).
+Your Render service URL (`https://YOUR-APP.onrender.com`) doubles as a split-screen web dashboard that displays live chat logs and generated media. Sign in with your Twitch account in the top right to open the **⚙️ Bot Configuration** menu.
 
 </details>
 
@@ -414,6 +416,22 @@ Your Render service URL doubles as a public web dashboard that displays your cha
 <br>
 
 Pollinations is an actively evolving platform — available models change frequently. You can update the model names in your environment variables at any time. Current model names are listed on the same page as your API key at [enter.pollinations.ai](https://enter.pollinations.ai).
+
+</details>
+
+<details>
+<summary><strong>How do I update my bot with new features and fixes?</strong></summary>
+
+<br>
+
+When a new update is released, your fork on GitHub will show *"This branch is X commits behind VirtuallyJesse:main"*.
+
+To update:
+1. Open your fork on GitHub
+2. Click **Sync fork → Update branch**
+3. Render will automatically detect the new commits, rebuild, and redeploy your bot
+
+> 💡 All your dashboard settings, personality, commands, and alerts stay completely safe in Redis during updates.
 
 </details>
 

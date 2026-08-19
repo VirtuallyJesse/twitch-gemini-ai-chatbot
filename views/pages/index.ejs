@@ -5,6 +5,9 @@
     <link rel="stylesheet" href="/public/style.css">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Gemini Bot Dashboard</title>
+    <script>
+        window.__VIEWER__ = <%- JSON.stringify(viewer || null) %>;
+    </script>
 </head>
 <body class="dashboard-body<%= storageConfigured ? '' : ' no-storage' %>">
     <div class="dashboard-container">
@@ -32,6 +35,37 @@
                     <button class="filter-btn" onclick="setFilter('video')">Videos</button>
                     <button class="filter-btn" onclick="setFilter('audio')">Audio</button>
                 </div>
+                <!-- User Chip / Auth -->
+                <div class="user-chip-container" id="user-chip-container">
+                    <% if (!viewer || !viewer.login) { %>
+                        <a href="/auth/dashboard" class="user-chip unauthenticated" id="user-chip">
+                            <span class="chip-avatar" style="display:flex;align-items:center;justify-content:center;">👤</span>
+                            <span class="chip-label">Sign in with Twitch</span>
+                        </a>
+                    <% } else { %>
+                        <button class="user-chip" id="user-chip-btn" aria-haspopup="true" aria-expanded="false">
+                            <% if (viewer.profileImageUrl) { %>
+                                <img src="<%= viewer.profileImageUrl %>" alt="<%= viewer.displayName %>" class="chip-avatar" onerror="this.style.display='none'">
+                            <% } else { %>
+                                <span class="chip-avatar" style="display:flex;align-items:center;justify-content:center;">👤</span>
+                            <% } %>
+                            <span class="chip-label"><%= viewer.displayName || viewer.login %></span>
+                            <% if (viewer.isAdmin) { %>
+                                <span class="admin-badge">Admin</span>
+                            <% } %>
+                        </button>
+                        <div class="user-drawer" id="user-drawer" style="display: none;">
+                            <div class="drawer-header">
+                                <strong><%= viewer.displayName || viewer.login %></strong>
+                                <span class="drawer-role"><%= viewer.isAdmin ? 'Bot Administrator' : 'Viewer' %></span>
+                            </div>
+                            <% if (viewer.isAdmin) { %>
+                                <button class="drawer-item" id="open-config-btn">⚙️ Bot Configuration</button>
+                            <% } %>
+                            <a href="/auth/logout" class="drawer-item drawer-logout">Sign Out</a>
+                        </div>
+                    <% } %>
+                </div>
             </div>
             <div class="pagination-controls" id="pagination-controls"></div>
             <div class="media-gallery" id="media-gallery">
@@ -40,13 +74,151 @@
         </div>
     </div>
 
+    <!-- CONFIG MODAL (ADMIN ONLY) -->
+    <% if (viewer && viewer.isAdmin) { %>
+    <div class="modal-backdrop" id="config-modal" style="display: none;">
+        <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+            <div class="modal-header">
+                <h2 id="config-modal-title">⚙️ Bot Configuration</h2>
+                <button class="modal-close" id="close-config-btn" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-nav">
+                <button class="modal-tab active" data-tab="system_instructions">Persona</button>
+                <button class="modal-tab" data-tab="custom_commands">Commands</button>
+                <button class="modal-tab" data-tab="event_alerts">Alerts</button>
+                <button class="modal-tab" data-tab="error_messages">Errors</button>
+            </div>
+            <div class="modal-body">
+                <!-- Tab 1: Persona -->
+                <div class="tab-pane active" id="pane-system_instructions">
+                    <div class="pane-header">
+                        <span class="pane-status" id="status-system_instructions"><span class="status-dot">●</span> Factory Preset</span>
+                        <div class="pane-actions">
+                            <button class="btn btn-secondary btn-reset" data-type="system_instructions" title="Restore factory default persona preset">↺ Restore Defaults</button>
+                            <button class="btn btn-primary btn-save" data-type="system_instructions">Save Persona</button>
+                        </div>
+                    </div>
+                    <div class="config-guidance">
+                        <strong>💡 Tip:</strong> Define the bot's personality and channel rules. Wrap instructions in <code>&lt;tags&gt;</code> for best results.
+                    </div>
+                    <textarea class="config-textarea" id="input-system_instructions" rows="16" placeholder="Enter bot persona and instructions..."></textarea>
+                    <div class="char-counter" id="persona-char-counter">0 / 16,000 characters</div>
+                </div>
+
+                <!-- Tab 2: Custom Commands -->
+                <div class="tab-pane" id="pane-custom_commands" style="display: none;">
+                    <div class="pane-header">
+                        <span class="pane-status" id="status-custom_commands"><span class="status-dot">●</span> Factory Preset</span>
+                        <div class="pane-actions">
+                            <button class="btn btn-secondary" id="btn-add-command">+ Add Command</button>
+                            <button class="btn btn-secondary btn-reset" data-type="custom_commands" title="Restore factory default commands preset">↺ Restore Defaults</button>
+                            <button class="btn btn-primary btn-save" data-type="custom_commands">Save Commands</button>
+                        </div>
+                    </div>
+                    <div class="pane-toolbar">
+                        <input type="text" class="table-input search-input" id="search-commands" placeholder="🔍 Filter commands by name, alias, or response..." autocomplete="off">
+                    </div>
+                    <div class="commands-table-container">
+                        <table class="commands-table" id="commands-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 22%;">Command</th>
+                                    <th style="width: 22%;">Aliases</th>
+                                    <th style="width: 36%;">Response</th>
+                                    <th style="width: 14%;">Permission</th>
+                                    <th style="width: 6%; text-align: center;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="commands-tbody">
+                                <!-- Command rows injected here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Tab 3: Event Alerts (Master-Detail 2-Panel) -->
+                <div class="tab-pane" id="pane-event_alerts" style="display: none;">
+                    <div class="pane-header">
+                        <span class="pane-status" id="status-event_alerts"><span class="status-dot">●</span> Factory Preset</span>
+                        <div class="pane-actions">
+                            <button class="btn btn-secondary btn-reset" data-type="event_alerts" title="Restore factory default alerts preset">↺ Restore Defaults</button>
+                            <button class="btn btn-primary btn-save" data-type="event_alerts">Save Alerts</button>
+                        </div>
+                    </div>
+                    <div class="alerts-master-detail" id="alerts-master-detail">
+                        <!-- Left Master Nav List -->
+                        <div class="alerts-nav-panel">
+                            <div class="alerts-nav-header">
+                                <span class="nav-panel-title">Twitch Events</span>
+                            </div>
+                            <div class="alerts-nav-list" id="alerts-nav-list">
+                                <!-- Nav item cards injected here -->
+                            </div>
+                        </div>
+                        <!-- Right Detail Editor Canvas -->
+                        <div class="alerts-detail-panel" id="alerts-detail-panel">
+                            <!-- Detail editor injected here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 4: Error Messages (2-Panel Master-Detail) -->
+                <div class="tab-pane" id="pane-error_messages" style="display: none;">
+                    <!-- Advanced User Gate Blocker -->
+                    <div class="errors-gate-overlay" id="errors-gate-overlay">
+                        <div class="errors-gate-card">
+                            <div class="errors-gate-icon">⚠️</div>
+                            <strong class="errors-gate-title">This section is for advanced users!</strong>
+                            <button type="button" class="btn btn-primary btn-errors-proceed" id="btn-errors-proceed">Proceed</button>
+                        </div>
+                    </div>
+
+                    <!-- Main Errors Content (Hidden behind gate until unlocked) -->
+                    <div class="errors-content-wrapper" id="errors-content-wrapper" style="display: none;">
+                        <div class="pane-header">
+                            <span class="pane-status" id="status-error_messages"><span class="status-dot">●</span> Factory Preset</span>
+                            <div class="pane-actions">
+                                <button class="btn btn-secondary btn-reset" data-type="error_messages" title="Restore factory default errors preset">↺ Restore Defaults</button>
+                                <button class="btn btn-primary btn-save" data-type="error_messages">Save Errors</button>
+                            </div>
+                        </div>
+                        <div class="config-guidance errors-guidance">
+                            <strong>💡 Tip:</strong> Error messages are pre-written fallback notices sent to chat if an external API or service fails. The bot works reliably out of the box with factory defaults. Customize these only if you want bot failure responses to match your channel's unique persona.
+                        </div>
+
+                        <!-- 2-Panel Master-Detail Error Catalog -->
+                        <div class="errors-master-detail" id="errors-master-detail">
+                            <!-- Left Categories Nav -->
+                            <div class="errors-nav-panel">
+                                <div class="errors-nav-header">
+                                    <span class="nav-panel-title">Categories</span>
+                                </div>
+                                <div class="errors-nav-list" id="errors-nav-list">
+                                    <!-- Nav category items injected here -->
+                                </div>
+                            </div>
+                            <!-- Right Detail Panel Canvas -->
+                            <div class="errors-detail-panel" id="errors-detail-panel">
+                                <!-- Category error items injected here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span class="modal-save-notice" id="modal-save-notice"></span>
+            </div>
+        </div>
+    </div>
+    <% } %>
+
     <% if (!storageConfigured) { %>
     <div class="critical-banner">
         🚨 <strong>Upstash Redis is REQUIRED</strong> — Authorization token refreshing and chat persistence will not work without it.
         Set <code>UPSTASH_REDIS_URL</code> in your environment variables to enable the bot.
         <a href="https://upstash.com" target="_blank" rel="noopener">Get a free database →</a>
     </div>
-<% } %>
+    <% } %>
 
     <script type="module">
         import {
@@ -68,7 +240,14 @@
             socket: null,
 
             // channel -> combined emote map { code: { url, provider } }
-            emoteMapsByChannel: {}
+            emoteMapsByChannel: {},
+
+            // Config state
+            config: null,
+            activeModalTab: 'system_instructions',
+            selectedAlertKind: 'subscription',
+            selectedErrorGroup: 'common',
+            errorsUnlocked: false
         };
 
         // --- DOM ELEMENTS ---
@@ -76,8 +255,307 @@
             tabs: document.getElementById('channel-tabs'),
             chatLog: document.getElementById('chat-log'),
             gallery: document.getElementById('media-gallery'),
-            pagination: document.getElementById('pagination-controls')
+            pagination: document.getElementById('pagination-controls'),
+            userChipBtn: document.getElementById('user-chip-btn'),
+            userDrawer: document.getElementById('user-drawer'),
+            configModal: document.getElementById('config-modal'),
+            openConfigBtn: document.getElementById('open-config-btn'),
+            closeConfigBtn: document.getElementById('close-config-btn'),
+            commandsTbody: document.getElementById('commands-tbody'),
+            btnAddCommand: document.getElementById('btn-add-command'),
+            modalSaveNotice: document.getElementById('modal-save-notice'),
+            personaTextarea: document.getElementById('input-system_instructions'),
+            personaCharCounter: document.getElementById('persona-char-counter'),
+            alertsNavList: document.getElementById('alerts-nav-list'),
+            alertsDetailPanel: document.getElementById('alerts-detail-panel'),
+            errorsNavList: document.getElementById('errors-nav-list'),
+            errorsDetailPanel: document.getElementById('errors-detail-panel'),
+            errorsGateOverlay: document.getElementById('errors-gate-overlay'),
+            errorsContentWrapper: document.getElementById('errors-content-wrapper'),
+            btnErrorsProceed: document.getElementById('btn-errors-proceed'),
+            searchCommands: document.getElementById('search-commands')
         };
+
+        const ALERT_SPECS = [
+            {
+                kind: 'subscription',
+                title: '⭐ New Subscription',
+                desc: 'Fires when a viewer subscribes to the channel.',
+                vars: ['username', 'tier'],
+                sample: { username: 'CoolViewer', tier: 'Tier 1' },
+                hasCooldown: true
+            },
+            {
+                kind: 'resub',
+                title: '🔄 Resubscription',
+                desc: 'Fires when a viewer renews their subscription.',
+                vars: ['username', 'months', 'streak', 'message'],
+                sample: { username: 'LoyalViewer', months: '12', streak: '6', message: 'Love the stream!' },
+                hasCooldown: true
+            },
+            {
+                kind: 'community_sub_gift',
+                title: '🎊 Community Gift Bomb',
+                desc: 'Fires when a chatter gifts multiple subscriptions.',
+                vars: ['username', 'count'],
+                sample: { username: 'GenerousDonor', count: '5' },
+                hasCooldown: true
+            },
+            {
+                kind: 'sub_gift',
+                title: '🎁 Gift Subscription',
+                desc: 'Fires for individual gift subscription recipients.',
+                vars: ['username', 'recipient'],
+                sample: { username: 'GenerousDonor', recipient: 'LuckyChatter' },
+                hasCooldown: true,
+                extraToggle: { key: 'suppress_in_community_gift', label: 'Ignore during gift bombs' }
+            },
+            {
+                kind: 'cheer',
+                title: '💎 Cheer & Bits',
+                desc: 'Fires when a chatter cheers bits.',
+                vars: ['username', 'bits', 'message'],
+                sample: { username: 'SuperFan', bits: '500', message: 'Let\'s go!' },
+                hasCooldown: true,
+                extraNum: { key: 'min_bits', label: 'Min Bits' }
+            },
+            {
+                kind: 'raid',
+                title: '🚀 Incoming Raid',
+                desc: 'Fires when another streamer raids your channel.',
+                vars: ['username', 'viewers'],
+                sample: { username: 'FriendlyStreamer', viewers: '35' },
+                hasCooldown: true,
+                extraNum: { key: 'min_viewers', label: 'Min Viewers' }
+            },
+            {
+                kind: 'follow',
+                title: '💜 Channel Follow',
+                desc: 'Fires when a viewer follows the channel.',
+                vars: ['username'],
+                sample: { username: 'NewFollower' },
+                hasCooldown: true
+            },
+            {
+                kind: 'channel_points',
+                title: '🎯 Channel Points Rewards',
+                desc: 'Fires when a viewer redeems custom channel point rewards.',
+                vars: ['username', 'reward', 'user_input'],
+                sample: { username: 'HydrateFan', reward: 'Hydrate', user_input: 'Drink water!' },
+                hasCooldown: true,
+                isChannelPoints: true
+            }
+        ];
+
+        const FACTORY_ERRORS = {
+            RATE_LIMIT_EXHAUSTED: '⏰ All API keys rate limited. Try again tomorrow.',
+            GEMINI_EMPTY_RESPONSE: "🔭 Empty Response. Google's servers are having issues. Try again in 30 seconds.",
+            POLLINATIONS_NOT_CONFIGURED: '❌ Pollinations API key not configured.',
+            POLLINATIONS_AUDIO_EMPTY_INPUT: '⚠️ Text Required. You need to add text for TTS, tags alone are not enough.',
+            POLLINATIONS_BAD_PROMPT: '🚫 Content Blocked. That prompt violates the terms of service. Try something else.',
+            POLLINATIONS_INSUFFICIENT_BALANCE: '📉 Insufficient Pollen. Pollen refills every hour. Try again later.',
+            POLLINATIONS_CONTENT_BLOCKED: '🚫 Content Blocked. The request was deemed inappropriate. Try being more specific or use different words.',
+            POLLINATIONS_SERVER_DOWN: '🔧 Server Down. Pollinations servers are offline. Try again later.',
+            POLLINATIONS_BAD_GATEWAY: '🔧 Bad Gateway. Pollinations servers are having issues. Try again in 30 seconds.',
+            POLLINATIONS_SERVER_ERROR: '🔧 Server Error. Pollinations servers are having issues. Try again in 30 seconds.',
+            POLLINATIONS_GATEWAY_TIMEOUT: '⏱️ Gateway Timeout. Pollinations took too long. Try again in 30 seconds.',
+            POLLINATIONS_BAD_REQUEST: '❌ Bad Request. Pollinations rejected that prompt. Try different words.',
+            POLLINATIONS_RATE_LIMITED: '⏰ Rate Limited. Pollinations is busy. Try again in 30 seconds.',
+            POLLINATIONS_GENERIC_ERROR: '🔧 Pollinations {modelType} Error. Something went wrong. Try again in 30 seconds.',
+            MEDIA_PROMPT_REQUIRED: '@{username} Please provide a description for the {mediaType}.',
+            MEDIA_NO_DATA: '🔧 {service} Error. No {mediaType} data returned. Try again.',
+            MEDIA_FALLBACK_RESPONSE: "Here's your {mediaType} {username}: {url}",
+            COOLDOWN_ACTIVE: 'Cooldown active. Please wait {remainingTime} seconds before sending another message.',
+            VIDEO_UPLOAD_EMPTY: '❌ Video Upload Failed. Host returned empty response. Try again.',
+            VIDEO_UPLOAD_TIMEOUT: '⏱️ Video Upload Timeout. Host took too long. Try again.',
+            VIDEO_UPLOAD_FAILED: '❌ Video Upload Failed. Could not upload video. Try again in 30 seconds.',
+            VIDEO_TOO_LARGE: '🎬 Video Too Large. The generated video was too big. Try a simpler prompt.',
+            AUDIO_UPLOAD_EMPTY: '❌ Audio Upload Failed. Host returned empty response. Try again.',
+            AUDIO_UPLOAD_BAD_GATEWAY: '🔧 Audio Upload Error. Audio host is having issues. Try again in 30 seconds.',
+            AUDIO_UPLOAD_SERVICE_UNAVAILABLE: '🔧 Audio Upload Error. Audio host is overloaded. Try again in 30 seconds.',
+            AUDIO_UPLOAD_TIMEOUT: '⏱️ Audio Upload Timeout. Audio host took too long. Try again.',
+            AUDIO_UPLOAD_FAILED: '❌ Audio Upload Failed. Could not upload audio. Try again in 30 seconds.',
+            FETCH_TIMEOUT: '⏱️ Connection Timeout. The server took too long to respond. Try again.',
+            FETCH_REFUSED: '🌐 Connection Refused. Could not reach the server. Try again.',
+            FETCH_NOT_FOUND: '🌐 Server Not Found. Could not reach the server. Try again.',
+            FETCH_RESET: '🌐 Connection Reset. The server dropped the connection. Try again.',
+            FETCH_NETWORK_ERROR: '🌐 Network Error. Connection failed. Try again.',
+            REQUEST_TIMEOUT: '⏱️ Timeout Error. The request took too long. Try again.',
+            REQUEST_ABORTED: '⏱️ Request Aborted. The request was cancelled. Try again.',
+            IMAGE_UPLOAD_EMPTY: '❌ Upload Failed. Image host returned empty response. Try again.',
+            IMAGE_UPLOAD_BAD_GATEWAY: '🔧 Upload Error. Image host is having issues. Try again in 30 seconds.',
+            IMAGE_UPLOAD_SERVICE_UNAVAILABLE: '🔧 Upload Error. Image host is overloaded. Try again in 30 seconds.',
+            IMAGE_UPLOAD_TIMEOUT: '⏱️ Upload Timeout. Image host took too long. Try again.',
+            IMAGE_UPLOAD_FAILED: '❌ Upload Failed. Could not upload image. Try again in 30 seconds.',
+            IMAGE_TOO_LARGE: '🖼️ Image Too Large. Try a smaller image.',
+            IMAGE_LOAD_ERROR: '🖼️ Image Error. Could not load that image. Try a different URL.',
+            CONTENT_BLOCKED: '🚫 Content Blocked. The request was deemed inappropriate. Try being more specific or use different words.',
+            SAFETY_FILTER: '⚠️ Safety Filter Triggered. Flagged as {categories}. Try rephrasing your message.',
+            HTTP_429: '⏰ Quota Exceeded. API rate limit reached. Try again in 30 seconds.',
+            HTTP_401: '🔐 Authentication Error. Ask the bot owner to fix this.',
+            HTTP_403: '🚫 Access Denied. Ask the bot owner to fix this.',
+            YOUTUBE_RESTRICTED: '🚫 Access Denied. The video is likely copyrighted or geo-restricted.',
+            BOT_NOT_MODERATOR: 'I need moderator status in this channel to do that! Please /mod the bot in chat.',
+            BROADCASTER_AUTH_REQUIRED: 'I need broadcaster authorization to update the stream in this channel.',
+            HELIX_ACTION_TIMEOUT: '⏱️ Twitch took too long to respond. Try again in a moment.',
+            HELIX_ACTION_FAILED: '🔧 Twitch action failed. Try again in a moment.',
+            HTTP_400: '❌ Bad Request. Ask the bot owner to fix this.',
+            HTTP_404: '🔍 Not Found. Ask the bot owner to fix this.',
+            HTTP_500: "🔧 Server Error. Google's servers are having issues. Try again in 30 seconds.",
+            HTTP_521: '🔧 Server Down. Origin server is offline. Try again later.',
+            HTTP_504: '⏱️ Gateway Timeout. Server took too long. Try again.',
+            HTTP_UNKNOWN: '❌ HTTP Error {statusCode}: {message}.',
+            RENDER_NETWORK_ERROR: '🌐 Network Error. Could not reach external services. Try again.',
+            JSON_PARSE_ERROR: '📄 Parse Error. Ask the bot owner to fix this.',
+            UNKNOWN_ERROR: '❌ Unknown Error. Ask the bot owner to fix this.'
+        };
+
+        const ERROR_GROUPS = [
+            {
+                id: 'common',
+                name: 'High Impact & Critical',
+                icon: '⚡',
+                desc: 'Most frequently triggered runtime fallbacks across AI, media, and Twitch moderation.',
+                keys: [
+                    { key: 'RATE_LIMIT_EXHAUSTED', desc: 'All Gemini API keys exhausted daily quota limits', vars: [] },
+                    { key: 'GEMINI_EMPTY_RESPONSE', desc: 'Gemini API returned an empty payload or 500 error', vars: [] },
+                    { key: 'SAFETY_FILTER', desc: 'Input prompt or AI output flagged by safety filters', vars: ['categories'] },
+                    { key: 'CONTENT_BLOCKED', desc: 'Upstream content moderation triggered', vars: [] },
+                    { key: 'POLLINATIONS_BAD_PROMPT', desc: 'Media generation prompt rejected by filters', vars: [] },
+                    { key: 'POLLINATIONS_SERVER_DOWN', desc: 'Media generation host unavailable or 503', vars: [] },
+                    { key: 'COOLDOWN_ACTIVE', desc: 'User rate-limiting cooldown notice', vars: ['remainingTime'] },
+                    { key: 'BOT_NOT_MODERATOR', desc: 'Chat moderator permission missing for Helix action', vars: [] },
+                    { key: 'BROADCASTER_AUTH_REQUIRED', desc: 'Broadcaster OAuth token missing for stream metadata edit', vars: [] }
+                ]
+            },
+            {
+                id: 'gemini',
+                name: 'Gemini & AI Engine',
+                icon: '🤖',
+                desc: 'LLM reasoning errors, token exhaustion, and content safety filtering.',
+                keys: [
+                    { key: 'RATE_LIMIT_EXHAUSTED', desc: 'All Gemini API keys exhausted daily quota limits', vars: [] },
+                    { key: 'GEMINI_EMPTY_RESPONSE', desc: 'Gemini API returned an empty payload or 500 error', vars: [] },
+                    { key: 'SAFETY_FILTER', desc: 'Input prompt or AI output flagged by safety filters', vars: ['categories'] },
+                    { key: 'CONTENT_BLOCKED', desc: 'Upstream content moderation triggered', vars: [] }
+                ]
+            },
+            {
+                id: 'pollinations',
+                name: 'Pollinations & Media',
+                icon: '🎨',
+                desc: 'Image, video, audio generation pipeline errors and delivery fallbacks.',
+                keys: [
+                    { key: 'POLLINATIONS_NOT_CONFIGURED', desc: 'Pollinations API key missing from environment', vars: [] },
+                    { key: 'POLLINATIONS_AUDIO_EMPTY_INPUT', desc: 'Audio generation invoked with empty prompt text', vars: [] },
+                    { key: 'POLLINATIONS_BAD_PROMPT', desc: 'Media generation prompt rejected by filters', vars: [] },
+                    { key: 'POLLINATIONS_INSUFFICIENT_BALANCE', desc: 'Hourly generation balance exhausted', vars: [] },
+                    { key: 'POLLINATIONS_CONTENT_BLOCKED', desc: 'Prompt deemed inappropriate by upstream filter', vars: [] },
+                    { key: 'POLLINATIONS_SERVER_DOWN', desc: 'Pollinations origin servers unreachable', vars: [] },
+                    { key: 'POLLINATIONS_BAD_GATEWAY', desc: 'Pollinations upstream returned 502 Bad Gateway', vars: [] },
+                    { key: 'POLLINATIONS_SERVER_ERROR', desc: 'Pollinations upstream returned 500 Server Error', vars: [] },
+                    { key: 'POLLINATIONS_GATEWAY_TIMEOUT', desc: 'Pollinations upstream returned 504 Gateway Timeout', vars: [] },
+                    { key: 'POLLINATIONS_BAD_REQUEST', desc: 'Pollinations rejected prompt syntax (400)', vars: [] },
+                    { key: 'POLLINATIONS_RATE_LIMITED', desc: 'Pollinations rate limit active (429)', vars: [] },
+                    { key: 'POLLINATIONS_GENERIC_ERROR', desc: 'General Pollinations generation error', vars: ['modelType'] },
+                    { key: 'MEDIA_PROMPT_REQUIRED', desc: 'Command invoked without required description prompt', vars: ['username', 'mediaType'] },
+                    { key: 'MEDIA_NO_DATA', desc: 'Host returned success status with zero byte buffer', vars: ['service', 'mediaType'] },
+                    { key: 'MEDIA_FALLBACK_RESPONSE', desc: 'Chat notification delivering generated media URL', vars: ['mediaType', 'username', 'url'] },
+                    { key: 'COOLDOWN_ACTIVE', desc: 'User rate-limiting cooldown notice', vars: ['remainingTime'] }
+                ]
+            },
+            {
+                id: 'uploads',
+                name: 'Media Uploads & CDN',
+                icon: '☁️',
+                desc: 'Direct CDN uploads (Catbox, Litterbox, Pomf) and file size restrictions.',
+                keys: [
+                    { key: 'VIDEO_UPLOAD_EMPTY', desc: 'Video host returned empty response buffer', vars: [] },
+                    { key: 'VIDEO_UPLOAD_TIMEOUT', desc: 'Video upload network timeout', vars: [] },
+                    { key: 'VIDEO_UPLOAD_FAILED', desc: 'Video upload multipart request failure', vars: [] },
+                    { key: 'VIDEO_TOO_LARGE', desc: 'Rendered video exceeds host byte size ceiling', vars: [] },
+                    { key: 'AUDIO_UPLOAD_EMPTY', desc: 'Audio host returned empty response buffer', vars: [] },
+                    { key: 'AUDIO_UPLOAD_BAD_GATEWAY', desc: 'Audio host returned 502 Bad Gateway', vars: [] },
+                    { key: 'AUDIO_UPLOAD_SERVICE_UNAVAILABLE', desc: 'Audio host returned 503 Service Unavailable', vars: [] },
+                    { key: 'AUDIO_UPLOAD_TIMEOUT', desc: 'Audio upload network timeout', vars: [] },
+                    { key: 'AUDIO_UPLOAD_FAILED', desc: 'Audio upload multipart request failure', vars: [] },
+                    { key: 'IMAGE_UPLOAD_EMPTY', desc: 'Image host returned empty response buffer', vars: [] },
+                    { key: 'IMAGE_UPLOAD_BAD_GATEWAY', desc: 'Image host returned 502 Bad Gateway', vars: [] },
+                    { key: 'IMAGE_UPLOAD_SERVICE_UNAVAILABLE', desc: 'Image host returned 503 Service Unavailable', vars: [] },
+                    { key: 'IMAGE_UPLOAD_TIMEOUT', desc: 'Image upload network timeout', vars: [] },
+                    { key: 'IMAGE_UPLOAD_FAILED', desc: 'Image upload multipart request failure', vars: [] },
+                    { key: 'IMAGE_TOO_LARGE', desc: 'Rendered image exceeds host byte size ceiling', vars: [] },
+                    { key: 'IMAGE_LOAD_ERROR', desc: 'Failed to fetch source image URL into memory buffer', vars: [] }
+                ]
+            },
+            {
+                id: 'network',
+                name: 'Network & Connectivity',
+                icon: '🌐',
+                desc: 'TCP sockets, DNS resolution, and outbound HTTP request failures.',
+                keys: [
+                    { key: 'FETCH_TIMEOUT', desc: 'Outbound fetch connection timed out', vars: [] },
+                    { key: 'FETCH_REFUSED', desc: 'Connection refused by remote host (ECONNREFUSED)', vars: [] },
+                    { key: 'FETCH_NOT_FOUND', desc: 'Remote host DNS resolution failed (ENOTFOUND)', vars: [] },
+                    { key: 'FETCH_RESET', desc: 'TCP connection reset by peer (ECONNRESET)', vars: [] },
+                    { key: 'FETCH_NETWORK_ERROR', desc: 'General socket network I/O error', vars: [] },
+                    { key: 'REQUEST_TIMEOUT', desc: 'HTTP transaction deadline exceeded', vars: [] },
+                    { key: 'REQUEST_ABORTED', desc: 'HTTP request aborted by signal controller', vars: [] },
+                    { key: 'RENDER_NETWORK_ERROR', desc: 'Render hosting outbound connectivity failure', vars: [] }
+                ]
+            },
+            {
+                id: 'twitch',
+                name: 'Twitch & Moderation',
+                icon: '📺',
+                desc: 'Twitch Helix REST API actions, scopes, and moderation enforcement.',
+                keys: [
+                    { key: 'BOT_NOT_MODERATOR', desc: 'Bot lacks moderator permission in chat', vars: [] },
+                    { key: 'BROADCASTER_AUTH_REQUIRED', desc: 'Broadcaster authorization required for title/category', vars: [] },
+                    { key: 'HELIX_ACTION_TIMEOUT', desc: 'Twitch Helix API network request timed out', vars: [] },
+                    { key: 'HELIX_ACTION_FAILED', desc: 'Twitch Helix action execution failed', vars: [] },
+                    { key: 'YOUTUBE_RESTRICTED', desc: 'YouTube video restricted or unavailable', vars: [] }
+                ]
+            },
+            {
+                id: 'http',
+                name: 'HTTP & Status Codes',
+                icon: '⚠️',
+                desc: 'HTTP status codes and general application catch-alls.',
+                keys: [
+                    { key: 'HTTP_400', desc: 'HTTP 400 Bad Request error', vars: [] },
+                    { key: 'HTTP_401', desc: 'HTTP 401 Unauthorized error', vars: [] },
+                    { key: 'HTTP_403', desc: 'HTTP 403 Access Denied error', vars: [] },
+                    { key: 'HTTP_404', desc: 'HTTP 404 Not Found error', vars: [] },
+                    { key: 'HTTP_429', desc: 'HTTP 429 Rate Limit Exceeded error', vars: [] },
+                    { key: 'HTTP_500', desc: 'HTTP 500 Server Error', vars: [] },
+                    { key: 'HTTP_504', desc: 'HTTP 504 Gateway Timeout', vars: [] },
+                    { key: 'HTTP_521', desc: 'HTTP 521 Origin Server Down', vars: [] },
+                    { key: 'HTTP_UNKNOWN', desc: 'Generic unexpected HTTP error code', vars: ['statusCode', 'message'] },
+                    { key: 'JSON_PARSE_ERROR', desc: 'JSON response body parse failure', vars: [] },
+                    { key: 'UNKNOWN_ERROR', desc: 'Ultimate catch-all unhandled fallback', vars: [] }
+                ]
+            }
+        ];
+
+        function interpolate(template, vars) {
+            return String(template ?? '').replace(/\{(\w+)\}/g, (_, key) => {
+                const v = vars[key];
+                return v == null ? `{${key}}` : String(v);
+            });
+        }
+
+        function insertTokenAtCursor(inputEl, token) {
+            if (!inputEl) return;
+            const start = inputEl.selectionStart ?? inputEl.value.length;
+            const end = inputEl.selectionEnd ?? inputEl.value.length;
+            const oldVal = inputEl.value;
+            inputEl.value = oldVal.substring(0, start) + token + oldVal.substring(end);
+            const newPos = start + token.length;
+            inputEl.setSelectionRange(newPos, newPos);
+            inputEl.focus();
+            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
 
         // --- INITIALIZATION ---
         async function init() {
@@ -91,6 +569,9 @@
                         }
                     }, true);
                 }
+
+                // Setup User Drawer and Config Modal if present
+                setupUserAuthUI();
 
                 // 1. Fetch Channels and Channel Statuses
                 const [channelsRes, statusRes] = await Promise.all([
@@ -121,11 +602,1412 @@
                 state.mediaData = await mediaRes.json();
                 renderGallery();
 
-                // 4. Connect WebSocket
+                // 4. If admin, load initial bot config
+                if (window.__VIEWER__ && window.__VIEWER__.isAdmin) {
+                    loadConfig();
+                }
+
+                // 5. Connect WebSocket
                 connectWS();
 
             } catch (e) {
                 console.error("Init failed", e);
+            }
+        }
+
+        // --- AUTH & CONFIG UI ---
+        function setupUserAuthUI() {
+            if (els.userChipBtn && els.userDrawer) {
+                els.userChipBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const isOpen = els.userDrawer.style.display !== 'none';
+                    els.userDrawer.style.display = isOpen ? 'none' : 'flex';
+                    els.userChipBtn.setAttribute('aria-expanded', String(!isOpen));
+                });
+
+                document.addEventListener('click', (e) => {
+                    if (!els.userDrawer.contains(e.target) && e.target !== els.userChipBtn) {
+                        els.userDrawer.style.display = 'none';
+                        els.userChipBtn.setAttribute('aria-expanded', 'false');
+                    }
+                });
+            }
+
+            if (els.openConfigBtn && els.configModal) {
+                els.openConfigBtn.addEventListener('click', () => {
+                    els.userDrawer.style.display = 'none';
+                    openConfigModal();
+                });
+            }
+
+            if (els.closeConfigBtn && els.configModal) {
+                els.closeConfigBtn.addEventListener('click', closeConfigModal);
+                els.configModal.addEventListener('click', (e) => {
+                    if (e.target === els.configModal) {
+                        const dialog = els.configModal.querySelector('.modal-dialog');
+                        if (dialog) {
+                            dialog.classList.remove('modal-shake');
+                            void dialog.offsetWidth;
+                            dialog.classList.add('modal-shake');
+                            dialog.addEventListener('animationend', () => {
+                                dialog.classList.remove('modal-shake');
+                            }, { once: true });
+                        }
+                    }
+                });
+                window.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && els.configModal && els.configModal.style.display !== 'none') {
+                        closeConfigModal();
+                    }
+                });
+            }
+
+            // Scroll stabilization on accordion toggle to prevent bumpy jumps
+            const modalBody = els.configModal?.querySelector('.modal-body');
+            if (modalBody) {
+                modalBody.addEventListener('click', (e) => {
+                    const summary = e.target.closest('summary');
+                    if (!summary) return;
+                    if (e.target.closest('button, input, select, label')) return;
+
+                    const containerRect = modalBody.getBoundingClientRect();
+                    const summaryRect = summary.getBoundingClientRect();
+                    const initialOffsetTop = summaryRect.top - containerRect.top;
+
+                    requestAnimationFrame(() => {
+                        const newSummaryRect = summary.getBoundingClientRect();
+                        const newOffsetTop = newSummaryRect.top - containerRect.top;
+                        const diff = newOffsetTop - initialOffsetTop;
+                        if (Math.abs(diff) > 0.5) {
+                            modalBody.scrollTop += diff;
+                        }
+                    });
+                });
+            }
+
+            // Tab switching in Config Modal
+            document.querySelectorAll('.modal-tab').forEach(tab => {
+                tab.addEventListener('click', () => {
+                    const targetTab = tab.dataset.tab;
+                    switchModalTab(targetTab);
+                });
+            });
+
+            // Save and Reset buttons
+            document.querySelectorAll('.btn-save').forEach(btn => {
+                btn.addEventListener('click', () => saveConfig(btn.dataset.type));
+            });
+
+            document.querySelectorAll('.btn-reset').forEach(btn => {
+                btn.addEventListener('click', () => resetConfig(btn.dataset.type));
+            });
+
+            if (els.btnAddCommand) {
+                els.btnAddCommand.addEventListener('click', () => {
+                    addCommandRow({ command: '', response: '', role: 'all' });
+                    updateStatusBadge('custom_commands', true, true);
+                });
+            }
+
+            if (els.personaTextarea) {
+                els.personaTextarea.addEventListener('input', () => {
+                    updatePersonaCounter();
+                    updateStatusBadge('system_instructions', true, true);
+                });
+            }
+
+            if (els.btnErrorsProceed) {
+                els.btnErrorsProceed.addEventListener('click', () => {
+                    state.errorsUnlocked = true;
+                    updateErrorsGateVisibility();
+                    renderErrorsMasterDetail();
+                });
+            }
+
+            // Search filters
+            if (els.searchCommands) {
+                els.searchCommands.addEventListener('input', () => {
+                    const q = (els.searchCommands.value || '').trim().toLowerCase();
+                    if (!els.commandsTbody) return;
+                    els.commandsTbody.querySelectorAll('tr').forEach(row => {
+                        const cmd = row.querySelector('.cmd-name')?.value.toLowerCase() || '';
+                        const aliases = row.querySelector('.cmd-aliases')?.value.toLowerCase() || '';
+                        const resp = row.querySelector('.cmd-resp')?.value.toLowerCase() || '';
+                        const match = !q || cmd.includes(q) || aliases.includes(q) || resp.includes(q);
+                        row.style.display = match ? '' : 'none';
+                    });
+                });
+            }
+        }
+
+        function updatePersonaCounter() {
+            if (!els.personaTextarea || !els.personaCharCounter) return;
+            const len = els.personaTextarea.value.length;
+            els.personaCharCounter.textContent = `${len.toLocaleString()} / 16,000 characters`;
+            if (len > 16000) {
+                els.personaCharCounter.classList.add('error');
+            } else {
+                els.personaCharCounter.classList.remove('error');
+            }
+        }
+
+        function openConfigModal() {
+            if (!els.configModal) return;
+            const dialog = els.configModal.querySelector('.modal-dialog');
+            if (dialog) dialog.classList.remove('modal-shake');
+            els.configModal.style.display = 'flex';
+            updateErrorsGateVisibility();
+            loadConfig();
+        }
+
+        function closeConfigModal() {
+            if (!els.configModal) return;
+            const dialog = els.configModal.querySelector('.modal-dialog');
+            if (dialog) dialog.classList.remove('modal-shake');
+            els.configModal.style.display = 'none';
+            if (els.modalSaveNotice) els.modalSaveNotice.textContent = '';
+        }
+
+        function switchModalTab(tabKey) {
+            state.activeModalTab = tabKey;
+            document.querySelectorAll('.modal-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.tab === tabKey);
+            });
+            document.querySelectorAll('.tab-pane').forEach(p => {
+                p.style.display = p.id === `pane-${tabKey}` ? 'flex' : 'none';
+                p.classList.toggle('active', p.id === `pane-${tabKey}`);
+            });
+            if (tabKey === 'error_messages') {
+                updateErrorsGateVisibility();
+                if (state.errorsUnlocked) {
+                    renderErrorsMasterDetail();
+                }
+            }
+            if (els.modalSaveNotice) els.modalSaveNotice.textContent = '';
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (!res.ok) return;
+                state.config = await res.json();
+                renderConfigForm();
+            } catch (err) {
+                console.error('Failed to load config:', err);
+            }
+        }
+
+        function renderConfigForm() {
+            if (!state.config) return;
+
+            // 1. Persona
+            if (els.personaTextarea) {
+                els.personaTextarea.value = state.config.system_instructions || '';
+                updatePersonaCounter();
+            }
+            updateStatusBadge('system_instructions', state.config.overrides?.system_instructions);
+
+            // 2. Custom Commands
+            if (els.commandsTbody) {
+                els.commandsTbody.innerHTML = '';
+                const commands = Array.isArray(state.config.custom_commands) ? state.config.custom_commands : [];
+                commands.forEach(cmd => addCommandRow(cmd));
+            }
+            updateStatusBadge('custom_commands', state.config.overrides?.custom_commands);
+
+            // 3. Event Alerts (Master-Detail 2-Panel)
+            renderAlertsMasterDetail();
+            updateStatusBadge('event_alerts', state.config.overrides?.event_alerts);
+
+            // 4. Error Messages (Master-Detail 2-Panel)
+            renderErrorsMasterDetail();
+            updateStatusBadge('error_messages', state.config.overrides?.error_messages);
+        }
+
+        function updateStatusBadge(type, isOverride, isDirty = false) {
+            const badge = document.getElementById(`status-${type}`);
+            if (!badge) return;
+            if (isDirty) {
+                badge.innerHTML = '<span class="status-dot dirty">●</span> Unsaved Changes';
+                badge.className = 'pane-status dirty';
+            } else if (isOverride) {
+                badge.innerHTML = '<span class="status-dot override">●</span> Custom Config';
+                badge.className = 'pane-status override';
+            } else {
+                badge.innerHTML = '<span class="status-dot default">●</span> Factory Preset';
+                badge.className = 'pane-status';
+            }
+        }
+
+        function getBotDisplayName() {
+            return window.__VIEWER__?.displayName || window.__VIEWER__?.login || 'TwitchBot';
+        }
+
+        function addCommandRow(cmd = {}) {
+            if (!els.commandsTbody) return;
+            const tr = document.createElement('tr');
+            const aliasesStr = Array.isArray(cmd.aliases) ? cmd.aliases.join(', ') : (cmd.aliases || '');
+            tr.innerHTML = `
+                <td><input type="text" class="table-input cmd-name" value="${escapeHtml(cmd.command || '')}" placeholder="!command" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></td>
+                <td><input type="text" class="table-input cmd-aliases" value="${escapeHtml(aliasesStr)}" placeholder="!alias1, !alias2" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></td>
+                <td><input type="text" class="table-input cmd-resp" value="${escapeHtml(cmd.response || '')}" placeholder="Response text" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></td>
+                <td>
+                    <select class="table-select cmd-role">
+                        <option value="all" ${cmd.role === 'all' ? 'selected' : ''}>Everyone</option>
+                        <option value="moderator" ${cmd.role === 'moderator' ? 'selected' : ''}>Moderator+</option>
+                        <option value="broadcaster" ${cmd.role === 'broadcaster' ? 'selected' : ''}>Broadcaster Only</option>
+                    </select>
+                </td>
+                <td style="text-align: center;"><button class="btn btn-danger btn-del-row" title="Delete">✕</button></td>
+            `;
+            const nameInput = tr.querySelector('.cmd-name');
+            const aliasInput = tr.querySelector('.cmd-aliases');
+            const respInput = tr.querySelector('.cmd-resp');
+            const roleSelect = tr.querySelector('.cmd-role');
+
+            nameInput.addEventListener('blur', () => {
+                let v = nameInput.value.trim();
+                if (v && !v.startsWith('!')) nameInput.value = `!${v}`;
+            });
+            aliasInput.addEventListener('blur', () => {
+                let parts = aliasInput.value.split(',').map(s => s.trim()).filter(Boolean);
+                aliasInput.value = parts.map(p => p.startsWith('!') ? p : `!${p}`).join(', ');
+            });
+            nameInput.addEventListener('input', () => updateStatusBadge('custom_commands', true, true));
+            aliasInput.addEventListener('input', () => updateStatusBadge('custom_commands', true, true));
+            respInput.addEventListener('input', () => updateStatusBadge('custom_commands', true, true));
+            roleSelect.addEventListener('change', () => updateStatusBadge('custom_commands', true, true));
+            tr.querySelector('.btn-del-row').addEventListener('click', () => {
+                tr.remove();
+                updateStatusBadge('custom_commands', true, true);
+            });
+            els.commandsTbody.appendChild(tr);
+        }
+
+        function collectCommandsFromTable() {
+            if (!els.commandsTbody) return [];
+            const rows = els.commandsTbody.querySelectorAll('tr');
+            const list = [];
+            for (const row of rows) {
+                let command = row.querySelector('.cmd-name')?.value.trim();
+                let aliasesRaw = row.querySelector('.cmd-aliases')?.value.trim() || '';
+                const response = row.querySelector('.cmd-resp')?.value.trim();
+                const role = row.querySelector('.cmd-role')?.value || 'all';
+                if (command && response) {
+                    if (!command.startsWith('!')) command = `!${command}`;
+                    const aliases = aliasesRaw
+                        ? aliasesRaw.split(',').map(s => s.trim()).filter(Boolean).map(a => a.startsWith('!') ? a : `!${a}`)
+                        : [];
+                    list.push({ command, aliases, response, role });
+                }
+            }
+            return list;
+        }
+
+        // --- 2-PANEL MASTER-DETAIL ALERTS LOGIC ---
+        function renderAlertsMasterDetail() {
+            if (!state.config?.event_alerts) state.config.event_alerts = {};
+            if (!state.selectedAlertKind || !ALERT_SPECS.some(s => s.kind === state.selectedAlertKind)) {
+                state.selectedAlertKind = ALERT_SPECS[0].kind;
+            }
+            renderAlertsNav();
+            renderAlertDetail(state.selectedAlertKind);
+        }
+
+        function renderAlertsNav() {
+            if (!els.alertsNavList) return;
+            els.alertsNavList.innerHTML = '';
+            const alerts = state.config?.event_alerts || {};
+
+            ALERT_SPECS.forEach(spec => {
+                const data = alerts[spec.kind] || {};
+                const enabled = data.enabled !== false;
+                const aiEnabled = data.ai_enabled !== false;
+                const isActive = spec.kind === state.selectedAlertKind;
+
+                const navItem = document.createElement('div');
+                navItem.className = `alerts-nav-item ${isActive ? 'active' : ''}`;
+                navItem.dataset.kind = spec.kind;
+
+                let modeBadgeHtml = '';
+                if (spec.isChannelPoints) {
+                    modeBadgeHtml = enabled
+                        ? '<span class="alert-mode-badge badge-ai">Enabled</span>'
+                        : '<span class="alert-mode-badge badge-off">Off</span>';
+                } else {
+                    if (!enabled) {
+                        modeBadgeHtml = '<span class="alert-mode-badge badge-off">Off</span>';
+                    } else if (aiEnabled) {
+                        modeBadgeHtml = '<span class="alert-mode-badge badge-ai">✨ AI</span>';
+                    } else {
+                        modeBadgeHtml = '<span class="alert-mode-badge badge-tpl">💬 Static</span>';
+                    }
+                }
+
+                navItem.innerHTML = `
+                    <div class="alerts-nav-left">
+                        <div class="alerts-nav-title">${escapeHtml(spec.title)}</div>
+                        <div class="alerts-nav-meta">
+                            <span class="nav-mode-slot">${modeBadgeHtml}</span>
+                        </div>
+                    </div>
+                    <div class="alerts-nav-right" onclick="event.stopPropagation();">
+                        <label class="switch-toggle small" title="Toggle ${escapeHtml(spec.title)}">
+                            <input type="checkbox" class="nav-alert-toggle" ${enabled ? 'checked' : ''}>
+                            <span class="switch-slider"></span>
+                        </label>
+                    </div>
+                `;
+
+                const toggleInput = navItem.querySelector('.nav-alert-toggle');
+                toggleInput.addEventListener('change', () => {
+                    const isEn = toggleInput.checked;
+                    if (!state.config.event_alerts[spec.kind]) state.config.event_alerts[spec.kind] = {};
+                    state.config.event_alerts[spec.kind].enabled = isEn;
+
+                    // Update left mode badge
+                    const slot = navItem.querySelector('.nav-mode-slot');
+                    if (slot) {
+                        if (spec.isChannelPoints) {
+                            slot.innerHTML = isEn
+                                ? '<span class="alert-mode-badge badge-ai">Enabled</span>'
+                                : '<span class="alert-mode-badge badge-off">Off</span>';
+                        } else {
+                            const curAi = state.config.event_alerts[spec.kind].ai_enabled !== false;
+                            if (!isEn) {
+                                slot.innerHTML = '<span class="alert-mode-badge badge-off">Off</span>';
+                            } else if (curAi) {
+                                slot.innerHTML = '<span class="alert-mode-badge badge-ai">✨ AI</span>';
+                            } else {
+                                slot.innerHTML = '<span class="alert-mode-badge badge-tpl">💬 Static</span>';
+                            }
+                        }
+                    }
+
+                    // If currently selected alert, update detail panel toggle too
+                    if (state.selectedAlertKind === spec.kind) {
+                        const detailToggle = els.alertsDetailPanel?.querySelector('.detail-enabled-toggle');
+                        if (detailToggle && detailToggle.checked !== isEn) {
+                            detailToggle.checked = isEn;
+                        }
+                    }
+                    updateStatusBadge('event_alerts', true, true);
+                });
+
+                navItem.addEventListener('click', () => {
+                    if (state.selectedAlertKind !== spec.kind) {
+                        selectAlert(spec.kind);
+                    }
+                });
+
+                els.alertsNavList.appendChild(navItem);
+            });
+        }
+
+        function selectAlert(kind) {
+            flushActiveAlertDetail();
+            state.selectedAlertKind = kind;
+
+            if (els.alertsNavList) {
+                els.alertsNavList.querySelectorAll('.alerts-nav-item').forEach(item => {
+                    item.classList.toggle('active', item.dataset.kind === kind);
+                });
+            }
+            renderAlertDetail(kind);
+        }
+
+        function flushActiveAlertDetail() {
+            if (!els.alertsDetailPanel || !state.selectedAlertKind) return;
+            const kind = state.selectedAlertKind;
+            if (!state.config.event_alerts[kind]) state.config.event_alerts[kind] = {};
+            const curData = state.config.event_alerts[kind];
+
+            const detailToggle = els.alertsDetailPanel.querySelector('.detail-enabled-toggle');
+            if (detailToggle) curData.enabled = detailToggle.checked;
+
+            const cooldownInput = els.alertsDetailPanel.querySelector('.alert-cooldown');
+            if (cooldownInput) curData.cooldown_seconds = Number(cooldownInput.value) || 0;
+
+            const extraNum = els.alertsDetailPanel.querySelector('.alert-extra-num');
+            if (extraNum) curData[extraNum.dataset.key] = Number(extraNum.value) || 0;
+
+            const extraToggle = els.alertsDetailPanel.querySelector('.alert-extra-toggle');
+            if (extraToggle) curData[extraToggle.dataset.key] = extraToggle.checked;
+
+            if (kind === 'channel_points') {
+                const rewards = {};
+                els.alertsDetailPanel.querySelectorAll('.reward-rule-card').forEach(rc => {
+                    const name = rc.querySelector('.reward-name-input')?.value.trim();
+                    if (!name) return;
+                    const rAiEnabled = rc.querySelector('.reward-ai-toggle')?.checked ?? true;
+                    const rFallback = (rAiEnabled
+                        ? rc.querySelector('.reward-fallback-input')?.value
+                        : rc.querySelector('.reward-static-input')?.value)?.trim() || '';
+                    const rPrompt = rc.querySelector('.reward-prompt-input')?.value.trim() || '';
+                    rewards[name] = {
+                        ai_enabled: rAiEnabled,
+                        fallback_template: rFallback,
+                        ai_prompt: rPrompt
+                    };
+                });
+                curData.rewards = rewards;
+            } else {
+                const isAi = els.alertsDetailPanel.querySelector('.alert-ai-toggle')?.checked ?? true;
+                curData.ai_enabled = isAi;
+                const fallbackVal = (isAi
+                    ? els.alertsDetailPanel.querySelector('.alert-fallback-input')?.value
+                    : els.alertsDetailPanel.querySelector('.alert-static-input')?.value)?.trim() || '';
+                curData.fallback_template = fallbackVal;
+                curData.ai_prompt = els.alertsDetailPanel.querySelector('.alert-ai-prompt-input')?.value.trim() || '';
+            }
+        }
+
+        function attachInputSyntaxHighlighter(inputEl, validVars = []) {
+            if (!inputEl) return;
+            const wrapper = inputEl.closest('.highlight-input-wrapper');
+            if (!wrapper) return;
+            const backdrop = wrapper.querySelector('.highlight-backdrop');
+            if (!backdrop) return;
+
+            const isTextarea = inputEl.tagName === 'TEXTAREA';
+
+            const update = () => {
+                const val = inputEl.value || '';
+                let escaped = escapeHtml(val);
+                escaped = escaped.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, vName) => {
+                    const isValid = validVars.includes(vName);
+                    return isValid 
+                        ? `<mark class="token-var valid">${match}</mark>`
+                        : `<mark class="token-var invalid">${match}</mark>`;
+                });
+
+                if (isTextarea) {
+                    if (val.endsWith('\n')) escaped += ' ';
+                    backdrop.innerHTML = escaped;
+
+                    // Strictly clamp height between 38px (1 line) and 82px (3 lines max)
+                    inputEl.style.height = 'auto';
+                    const scrollH = inputEl.scrollHeight;
+                    if (scrollH > 0) {
+                        const nextHeight = Math.min(Math.max(scrollH, 38), 82);
+                        inputEl.style.height = `${nextHeight}px`;
+                        const hasOverflow = scrollH > 82;
+                        inputEl.classList.toggle('has-overflow', hasOverflow);
+                        inputEl.style.overflowY = hasOverflow ? 'auto' : 'hidden';
+                    }
+                    backdrop.scrollTop = inputEl.scrollTop;
+                } else {
+                    backdrop.innerHTML = escaped;
+                    backdrop.scrollLeft = inputEl.scrollLeft;
+                }
+            };
+
+            // Prevent Enter key from creating empty newlines (prompts are natural word-wrapping single expressions)
+            if (isTextarea) {
+                inputEl.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                    }
+                });
+            }
+
+            inputEl.addEventListener('input', update);
+            inputEl.addEventListener('scroll', () => {
+                if (isTextarea) {
+                    backdrop.scrollTop = inputEl.scrollTop;
+                } else {
+                    backdrop.scrollLeft = inputEl.scrollLeft;
+                }
+            });
+
+            update();
+            requestAnimationFrame(update);
+        }
+
+        function createRewardRuleElement(rewardName, rData = {}, spec) {
+            const rCard = document.createElement('div');
+            rCard.className = 'reward-rule-card';
+            const rAiEnabled = rData.ai_enabled !== undefined ? Boolean(rData.ai_enabled) : true;
+            const rFallback = rData.fallback_template || '';
+            const rPrompt = rData.ai_prompt || '';
+            const botName = getBotDisplayName();
+            const rVars = spec.vars || ['username', 'reward', 'user_input'];
+
+            const varPillsHtml = rVars.map(v => 
+                `<button type="button" class="var-pill" data-var="{${v}}">+ {${v}}</button>`
+            ).join('');
+
+            rCard.innerHTML = `
+                <div class="reward-rule-header">
+                    <div class="reward-rule-title-row">
+                        <input type="text" class="table-input reward-name-input" value="${escapeHtml(rewardName)}" placeholder="Reward Title (e.g. Hydrate)" spellcheck="false" autocomplete="off">
+                    </div>
+                    <div class="reward-rule-actions">
+                        <div class="mode-segmented-btn-group small">
+                            <button type="button" class="mode-btn reward-mode-ai ${rAiEnabled ? 'active' : ''}">✨ AI Mode</button>
+                            <button type="button" class="mode-btn reward-mode-tpl ${!rAiEnabled ? 'active template-mode' : ''}">💬 Static Mode</button>
+                        </div>
+                        <input type="checkbox" class="reward-ai-toggle" style="display: none;" ${rAiEnabled ? 'checked' : ''}>
+                        <button type="button" class="btn btn-danger btn-del-reward" title="Delete Reward">✕</button>
+                    </div>
+                </div>
+                <div class="reward-rule-body">
+                    <!-- AI Mode Editor -->
+                    <div class="reward-ai-view" style="${rAiEnabled ? '' : 'display: none;'}">
+                        <div class="field-block">
+                            <div class="field-header-row">
+                                <label class="field-label">AI Prompt:</label>
+                                <span class="char-counter reward-prompt-counter">${rPrompt.length} / 1,000 chars</span>
+                            </div>
+                            <div class="highlight-input-wrapper multiline">
+                                <div class="highlight-backdrop" aria-hidden="true"></div>
+                                <textarea class="table-input highlight-textarea reward-prompt-input code-font" rows="1" maxlength="1000" placeholder="e.g. Remind the streamer to hydrate in your cheeky persona, requested by {username}.">${escapeHtml(rPrompt)}</textarea>
+                            </div>
+                            <div class="var-pills-row">
+                                <div class="pills-group">${varPillsHtml}</div>
+                                <button type="button" class="btn-test-ai reward-test-ai" title="Generate a live test response using Gemini">✨ Test AI Reply</button>
+                            </div>
+                        </div>
+
+                        <!-- Live AI Test Mock Preview (Only shown on test) -->
+                        <div class="twitch-chat-mock reward-test-preview" style="display: none;">
+                            <div class="mock-chat-header">
+                                <span class="mock-chat-label">CHAT PREVIEW</span>
+                                <span class="mock-chat-tag reward-preview-tag"></span>
+                            </div>
+                            <div class="mock-chat-bubble">
+                                <span class="chat-badge-bot">BOT</span>
+                                <span class="chat-username">${escapeHtml(botName)}:</span>
+                                <span class="chat-message-text reward-preview-text"></span>
+                            </div>
+                        </div>
+
+                        <div class="field-block" style="margin-top: 6px;">
+                            <div class="field-header-row">
+                                <div class="field-label-group">
+                                    <label class="field-label">Offline Fallback: <span class="field-subtext">(if AI is offline or rate-limited)</span></label>
+                                </div>
+                                <span class="char-counter reward-fallback-counter">${rFallback.length} / 450 chars</span>
+                            </div>
+                            <div class="highlight-input-wrapper multiline">
+                                <div class="highlight-backdrop" aria-hidden="true"></div>
+                                <textarea class="table-input highlight-textarea reward-fallback-input code-font" rows="1" maxlength="450" placeholder="e.g. Drink water, streamer! {username} redeemed {reward}!">${escapeHtml(rFallback)}</textarea>
+                            </div>
+                            <div class="var-pills-row">
+                                <div class="pills-group">${varPillsHtml}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Static Mode Editor -->
+                    <div class="reward-template-view" style="${rAiEnabled ? 'display: none;' : ''}">
+                        <div class="field-block">
+                            <div class="field-header-row">
+                                <label class="field-label">Message Template:</label>
+                                <span class="char-counter reward-static-counter">${rFallback.length} / 450 chars</span>
+                            </div>
+                            <div class="highlight-input-wrapper multiline">
+                                <div class="highlight-backdrop" aria-hidden="true"></div>
+                                <textarea class="table-input highlight-textarea reward-static-input code-font" rows="1" maxlength="450" placeholder="e.g. Drink water, streamer! {username} redeemed {reward}!">${escapeHtml(rFallback)}</textarea>
+                            </div>
+                            <div class="var-pills-row">
+                                <div class="pills-group">${varPillsHtml}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const nameInput = rCard.querySelector('.reward-name-input');
+            const fallbackInput = rCard.querySelector('.reward-fallback-input');
+            const staticInput = rCard.querySelector('.reward-static-input');
+            const aiToggle = rCard.querySelector('.reward-ai-toggle');
+            const promptInput = rCard.querySelector('.reward-prompt-input');
+            const btnAi = rCard.querySelector('.reward-mode-ai');
+            const btnTpl = rCard.querySelector('.reward-mode-tpl');
+            const aiView = rCard.querySelector('.reward-ai-view');
+            const staticView = rCard.querySelector('.reward-template-view');
+            const btnTestAi = rCard.querySelector('.reward-test-ai');
+            const promptCounter = rCard.querySelector('.reward-prompt-counter');
+            const fallbackCounter = rCard.querySelector('.reward-fallback-counter');
+            const staticCounter = rCard.querySelector('.reward-static-counter');
+            const testPreview = rCard.querySelector('.reward-test-preview');
+            const previewTag = rCard.querySelector('.reward-preview-tag');
+            const previewText = rCard.querySelector('.reward-preview-text');
+
+            attachInputSyntaxHighlighter(promptInput, rVars);
+            attachInputSyntaxHighlighter(fallbackInput, rVars);
+            attachInputSyntaxHighlighter(staticInput, rVars);
+
+            const updateCounters = () => {
+                if (promptCounter && promptInput) {
+                    promptCounter.textContent = `${promptInput.value.length} / 1,000 chars`;
+                }
+                if (fallbackCounter && fallbackInput) {
+                    const len = fallbackInput.value.length;
+                    fallbackCounter.textContent = `${len} / 450 chars`;
+                    fallbackCounter.classList.toggle('warning', len > 400);
+                    fallbackCounter.classList.toggle('error', len > 450);
+                }
+                if (staticCounter && staticInput) {
+                    const len = staticInput.value.length;
+                    staticCounter.textContent = `${len} / 450 chars`;
+                    staticCounter.classList.toggle('warning', len > 400);
+                    staticCounter.classList.toggle('error', len > 450);
+                }
+            };
+
+            const setRewardMode = (isAi) => {
+                aiToggle.checked = isAi;
+                btnAi.classList.toggle('active', isAi);
+                btnTpl.classList.toggle('active', !isAi);
+                btnTpl.classList.toggle('template-mode', !isAi);
+                aiView.style.display = isAi ? 'flex' : 'none';
+                staticView.style.display = isAi ? 'none' : 'flex';
+                if (isAi && staticInput && fallbackInput && !fallbackInput.value && staticInput.value) {
+                    fallbackInput.value = staticInput.value;
+                    fallbackInput.dispatchEvent(new Event('input', { bubbles: true }));
+                } else if (!isAi && staticInput && fallbackInput && !staticInput.value && fallbackInput.value) {
+                    staticInput.value = fallbackInput.value;
+                    staticInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                updateCounters();
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            };
+
+            btnAi.addEventListener('click', () => setRewardMode(true));
+            btnTpl.addEventListener('click', () => setRewardMode(false));
+
+            nameInput.addEventListener('input', () => {
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+            if (fallbackInput) {
+                fallbackInput.addEventListener('input', () => {
+                    updateCounters();
+                    if (staticInput && staticInput.value !== fallbackInput.value) {
+                        staticInput.value = fallbackInput.value;
+                        staticInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+            }
+            if (staticInput) {
+                staticInput.addEventListener('input', () => {
+                    updateCounters();
+                    if (fallbackInput && fallbackInput.value !== staticInput.value) {
+                        fallbackInput.value = staticInput.value;
+                        fallbackInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+            }
+            if (promptInput) {
+                promptInput.addEventListener('input', () => {
+                    updateCounters();
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+            }
+            updateCounters();
+
+            if (btnTestAi) {
+                btnTestAi.addEventListener('click', async () => {
+                    const rawPrompt = (promptInput?.value || '').trim();
+                    if (!rawPrompt) {
+                        alert('Please enter an AI prompt first before testing.');
+                        return;
+                    }
+                    const sample = { ...(spec.sample || {}), reward: nameInput.value.trim() || 'Reward' };
+                    const interpolated = interpolate(rawPrompt, sample);
+                    btnTestAi.disabled = true;
+                    btnTestAi.innerHTML = '✨ Generating...';
+                    if (testPreview) testPreview.style.display = 'flex';
+                    if (previewTag) {
+                        previewTag.textContent = 'GENERATING...';
+                        previewTag.className = 'mock-chat-tag pending';
+                    }
+                    if (previewText) previewText.textContent = 'Generating real AI response from Gemini...';
+
+                    try {
+                        const res = await fetch(`/gemini/${encodeURIComponent(interpolated)}`);
+                        if (!res.ok) {
+                            const errText = await res.text();
+                            throw new Error(errText || 'Failed to generate AI response');
+                        }
+                        const aiAnswer = await res.text();
+                        if (previewText) previewText.textContent = aiAnswer;
+                        if (previewTag) {
+                            previewTag.textContent = '✨ AI TEST OUTPUT';
+                            previewTag.className = 'mock-chat-tag ai-tested';
+                        }
+                    } catch (err) {
+                        if (previewText) previewText.textContent = `[AI Test Error: ${err.message}]`;
+                        if (previewTag) {
+                            previewTag.textContent = '⚠️ AI ERROR';
+                            previewTag.className = 'mock-chat-tag error';
+                        }
+                    } finally {
+                        btnTestAi.disabled = false;
+                        btnTestAi.innerHTML = '✨ Test AI Reply';
+                    }
+                });
+            }
+
+            rCard.querySelector('.btn-del-reward').addEventListener('click', () => {
+                rCard.remove();
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            rCard.querySelectorAll('.var-pill').forEach(pill => {
+                pill.addEventListener('click', () => {
+                    const block = pill.closest('.field-block');
+                    const target = block ? block.querySelector('.table-input') : promptInput;
+                    insertTokenAtCursor(target || promptInput, pill.dataset.var);
+                    updateCounters();
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+            });
+
+            return rCard;
+        }
+
+        function renderAlertDetail(kind) {
+            if (!els.alertsDetailPanel) return;
+            els.alertsDetailPanel.innerHTML = '';
+
+            const spec = ALERT_SPECS.find(s => s.kind === kind);
+            if (!spec) return;
+
+            const data = state.config?.event_alerts?.[kind] || {};
+            const enabled = data.enabled !== false;
+            const aiEnabled = data.ai_enabled !== false;
+            const cooldown = data.cooldown_seconds !== undefined ? data.cooldown_seconds : (spec.isChannelPoints ? 5 : 0);
+            const fallbackTpl = data.fallback_template || '';
+            const aiPrompt = data.ai_prompt || '';
+            const botName = getBotDisplayName();
+
+            if (spec.isChannelPoints) {
+                // Channel points detail view
+                const detailEl = document.createElement('div');
+                detailEl.className = 'alerts-detail-content';
+                detailEl.innerHTML = `
+                    <div class="alert-detail-header">
+                        <div class="alert-detail-title-group">
+                            <strong class="alert-detail-title">${escapeHtml(spec.title)}</strong>
+                            <span class="alert-detail-desc">${escapeHtml(spec.desc)}</span>
+                        </div>
+                        <button type="button" class="btn btn-secondary btn-add-reward">+ Add Custom Reward</button>
+                    </div>
+
+                    <!-- Cooldown rule bar -->
+                    <div class="alert-delivery-footer" style="padding-top: 0; border-top: none; margin-top: 0;">
+                        <div class="delivery-control">
+                            <label class="delivery-label">⏱️ Cooldown:</label>
+                            <div class="input-unit-group">
+                                <input type="number" class="table-input alert-cooldown" value="${cooldown}" min="0" style="width: 65px;">
+                                <span class="input-unit">sec</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="rewards-container" style="margin-top: 4px;"></div>
+                `;
+
+                const cooldownInput = detailEl.querySelector('.alert-cooldown');
+                const rewardsContainer = detailEl.querySelector('.rewards-container');
+                const btnAddReward = detailEl.querySelector('.btn-add-reward');
+                const rewards = (data.rewards && typeof data.rewards === 'object') ? data.rewards : {};
+
+                cooldownInput.addEventListener('input', () => {
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+
+                for (const [rName, rData] of Object.entries(rewards)) {
+                    rewardsContainer.appendChild(createRewardRuleElement(rName, rData, spec));
+                }
+
+                btnAddReward.addEventListener('click', () => {
+                    const newEl = createRewardRuleElement('', { ai_enabled: true, fallback_template: '', ai_prompt: '' }, spec);
+                    rewardsContainer.appendChild(newEl);
+                    const nameInput = newEl.querySelector('.reward-name-input');
+                    if (nameInput) nameInput.focus();
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+
+                els.alertsDetailPanel.appendChild(detailEl);
+                return;
+            }
+
+            // Standard alert detail view
+            let extrasHtml = '';
+            if (spec.extraToggle) {
+                const extraVal = data[spec.extraToggle.key] !== undefined ? Boolean(data[spec.extraToggle.key]) : true;
+                extrasHtml += `
+                    <label class="switch-toggle small">
+                        <input type="checkbox" class="alert-extra-toggle" data-key="${spec.extraToggle.key}" ${extraVal ? 'checked' : ''}>
+                        <span class="switch-slider"></span>
+                        <span class="switch-label">${escapeHtml(spec.extraToggle.label)}</span>
+                    </label>
+                `;
+            }
+            if (spec.extraNum) {
+                const numVal = data[spec.extraNum.key] !== undefined ? data[spec.extraNum.key] : 100;
+                extrasHtml += `
+                    <div class="delivery-control">
+                        <label class="delivery-label">${escapeHtml(spec.extraNum.label)}:</label>
+                        <input type="number" class="table-input alert-extra-num" data-key="${spec.extraNum.key}" value="${numVal}" min="0" style="width: 65px;">
+                    </div>
+                `;
+            }
+
+            const varPillsHtml = spec.vars.map(v => 
+                `<button type="button" class="var-pill" data-var="{${v}}">+ {${v}}</button>`
+            ).join('');
+
+            // Initial live preview string
+            const initialPreviewText = aiEnabled
+                ? (fallbackTpl ? interpolate(fallbackTpl, spec.sample) : `Thank you ${spec.sample.username || 'Chatter'}!`)
+                : (fallbackTpl ? interpolate(fallbackTpl, spec.sample) : `Thank you ${spec.sample.username || 'Chatter'}!`);
+
+            const detailEl = document.createElement('div');
+            detailEl.className = 'alerts-detail-content';
+            detailEl.innerHTML = `
+                <!-- 1. Header with Title & Mode Switcher directly embedded -->
+                <div class="alert-detail-header">
+                    <div class="alert-detail-title-group">
+                        <strong class="alert-detail-title">${escapeHtml(spec.title)}</strong>
+                        <span class="alert-detail-desc">${escapeHtml(spec.desc)}</span>
+                    </div>
+                    <div class="mode-segmented-btn-group">
+                        <button type="button" class="mode-btn mode-btn-ai ${aiEnabled ? 'active' : ''}">✨ AI Mode</button>
+                        <button type="button" class="mode-btn mode-btn-tpl ${!aiEnabled ? 'active template-mode' : ''}">💬 Static Mode</button>
+                    </div>
+                    <input type="checkbox" class="alert-ai-toggle" style="display: none;" ${aiEnabled ? 'checked' : ''}>
+                </div>
+
+                <!-- 2. Chat Mock Preview Bubble -->
+                <div class="twitch-chat-mock alert-live-preview">
+                    <div class="mock-chat-header">
+                        <span class="mock-chat-label">CHAT PREVIEW</span>
+                        <span class="mock-chat-tag" style="display: none;"></span>
+                    </div>
+                    <div class="mock-chat-bubble">
+                        <span class="chat-badge-bot">BOT</span>
+                        <span class="chat-username">${escapeHtml(botName)}:</span>
+                        <span class="chat-message-text alert-preview-text">${escapeHtml(initialPreviewText)}</span>
+                    </div>
+                </div>
+
+                <!-- 3. AI Mode Form -->
+                <div class="alert-ai-view" style="${aiEnabled ? '' : 'display: none;'}">
+                    <div class="field-block">
+                        <div class="field-header-row">
+                            <label class="field-label">AI Prompt:</label>
+                            <span class="char-counter alert-prompt-counter">${aiPrompt.length} / 1,000 chars</span>
+                        </div>
+                        <div class="highlight-input-wrapper multiline">
+                            <div class="highlight-backdrop" aria-hidden="true"></div>
+                            <textarea class="table-input highlight-textarea alert-ai-prompt-input code-font" rows="1" maxlength="1000" placeholder="e.g. Acknowledge {username} subscribing with an enthusiastic welcome.">${escapeHtml(aiPrompt)}</textarea>
+                        </div>
+                        <div class="var-pills-row">
+                            <div class="pills-group">${varPillsHtml}</div>
+                            <button type="button" class="btn-test-ai alert-test-ai" title="Generate a test response using Gemini">✨ Test AI Reply</button>
+                        </div>
+                    </div>
+
+                    <div class="field-block" style="margin-top: 10px;">
+                        <div class="field-header-row">
+                            <div class="field-label-group">
+                                <label class="field-label">Offline Fallback: <span class="field-subtext">(if AI is offline or rate-limited)</span></label>
+                            </div>
+                            <span class="char-counter alert-fallback-counter">${fallbackTpl.length} / 450 chars</span>
+                        </div>
+                        <div class="highlight-input-wrapper multiline">
+                            <div class="highlight-backdrop" aria-hidden="true"></div>
+                            <textarea class="table-input highlight-textarea alert-fallback-input code-font" rows="1" maxlength="450" placeholder="e.g. Welcome to the community, {username}!">${escapeHtml(fallbackTpl)}</textarea>
+                        </div>
+                        <div class="var-pills-row">
+                            <div class="pills-group">${varPillsHtml}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 4. Static Mode Form -->
+                <div class="alert-template-view" style="${aiEnabled ? 'display: none;' : ''}">
+                    <div class="field-block">
+                        <div class="field-header-row">
+                            <label class="field-label">Message Template:</label>
+                            <span class="char-counter alert-static-counter">${fallbackTpl.length} / 450 chars</span>
+                        </div>
+                        <div class="highlight-input-wrapper multiline">
+                            <div class="highlight-backdrop" aria-hidden="true"></div>
+                            <textarea class="table-input highlight-textarea alert-static-input code-font" rows="1" maxlength="450" placeholder="e.g. Welcome to the community, {username}!">${escapeHtml(fallbackTpl)}</textarea>
+                        </div>
+                        <div class="var-pills-row">
+                            <div class="pills-group">${varPillsHtml}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 5. Trigger Conditions & Delivery rules -->
+                <div class="alert-delivery-footer">
+                    <div class="delivery-control">
+                        <label class="delivery-label">⏱️ Cooldown:</label>
+                        <div class="input-unit-group">
+                            <input type="number" class="table-input alert-cooldown" value="${cooldown}" min="0" style="width: 65px;">
+                            <span class="input-unit">sec</span>
+                        </div>
+                    </div>
+                    ${extrasHtml}
+                </div>
+            `;
+
+            const btnAi = detailEl.querySelector('.mode-btn-ai');
+            const btnTpl = detailEl.querySelector('.mode-btn-tpl');
+            const aiToggle = detailEl.querySelector('.alert-ai-toggle');
+            const aiView = detailEl.querySelector('.alert-ai-view');
+            const staticView = detailEl.querySelector('.alert-template-view');
+            const previewTag = detailEl.querySelector('.mock-chat-tag');
+            const previewText = detailEl.querySelector('.alert-preview-text');
+
+            const promptInput = detailEl.querySelector('.alert-ai-prompt-input');
+            const fallbackInput = detailEl.querySelector('.alert-fallback-input');
+            const staticInput = detailEl.querySelector('.alert-static-input');
+            const promptCounter = detailEl.querySelector('.alert-prompt-counter');
+            const fallbackCounter = detailEl.querySelector('.alert-fallback-counter');
+            const staticCounter = detailEl.querySelector('.alert-static-counter');
+            const btnTestAi = detailEl.querySelector('.alert-test-ai');
+            const cooldownInput = detailEl.querySelector('.alert-cooldown');
+            const extraNum = detailEl.querySelector('.alert-extra-num');
+            const extraToggle = detailEl.querySelector('.alert-extra-toggle');
+
+            attachInputSyntaxHighlighter(promptInput, spec.vars || []);
+            attachInputSyntaxHighlighter(fallbackInput, spec.vars || []);
+            attachInputSyntaxHighlighter(staticInput, spec.vars || []);
+
+            const updateCounters = () => {
+                if (promptCounter && promptInput) {
+                    promptCounter.textContent = `${promptInput.value.length} / 1,000 chars`;
+                }
+                if (fallbackCounter && fallbackInput) {
+                    const len = fallbackInput.value.length;
+                    fallbackCounter.textContent = `${len} / 450 chars`;
+                    fallbackCounter.classList.toggle('warning', len > 400);
+                    fallbackCounter.classList.toggle('error', len > 450);
+                }
+                if (staticCounter && staticInput) {
+                    const len = staticInput.value.length;
+                    staticCounter.textContent = `${len} / 450 chars`;
+                    staticCounter.classList.toggle('warning', len > 400);
+                    staticCounter.classList.toggle('error', len > 450);
+                }
+            };
+
+            const updatePreviewFromTemplate = () => {
+                if (previewTag) {
+                    previewTag.style.display = 'none';
+                    previewTag.textContent = '';
+                }
+                const tplVal = (aiToggle.checked ? fallbackInput?.value : staticInput?.value) || '';
+                if (tplVal) {
+                    previewText.textContent = interpolate(tplVal, spec.sample);
+                } else {
+                    previewText.textContent = `[${spec.title} will fire in chat]`;
+                }
+            };
+
+            const setMode = (isAi) => {
+                aiToggle.checked = isAi;
+                btnAi.classList.toggle('active', isAi);
+                btnTpl.classList.toggle('active', !isAi);
+                btnTpl.classList.toggle('template-mode', !isAi);
+                aiView.style.display = isAi ? 'flex' : 'none';
+                staticView.style.display = isAi ? 'none' : 'flex';
+
+                if (isAi && staticInput && fallbackInput && !fallbackInput.value && staticInput.value) {
+                    fallbackInput.value = staticInput.value;
+                    fallbackInput.dispatchEvent(new Event('input', { bubbles: true }));
+                } else if (!isAi && staticInput && fallbackInput && !staticInput.value && fallbackInput.value) {
+                    staticInput.value = fallbackInput.value;
+                    staticInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+
+                updatePreviewFromTemplate();
+                updateCounters();
+                flushActiveAlertDetail();
+                renderAlertsNav();
+                updateStatusBadge('event_alerts', true, true);
+            };
+
+            btnAi.addEventListener('click', () => setMode(true));
+            btnTpl.addEventListener('click', () => setMode(false));
+
+            promptInput?.addEventListener('input', () => {
+                updateCounters();
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            fallbackInput?.addEventListener('input', () => {
+                updateCounters();
+                if (staticInput && staticInput.value !== fallbackInput.value) {
+                    staticInput.value = fallbackInput.value;
+                    staticInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                updatePreviewFromTemplate();
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            staticInput?.addEventListener('input', () => {
+                updateCounters();
+                if (fallbackInput && fallbackInput.value !== staticInput.value) {
+                    fallbackInput.value = staticInput.value;
+                    fallbackInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                updatePreviewFromTemplate();
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            cooldownInput?.addEventListener('input', () => {
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            extraNum?.addEventListener('input', () => {
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            extraToggle?.addEventListener('change', () => {
+                flushActiveAlertDetail();
+                updateStatusBadge('event_alerts', true, true);
+            });
+
+            if (btnTestAi) {
+                btnTestAi.addEventListener('click', async () => {
+                    const rawPrompt = (promptInput?.value || '').trim();
+                    if (!rawPrompt) {
+                        alert('Please enter an AI prompt first before testing.');
+                        return;
+                    }
+                    const interpolated = interpolate(rawPrompt, spec.sample);
+                    btnTestAi.disabled = true;
+                    btnTestAi.innerHTML = '✨ Generating...';
+                    if (previewTag) {
+                        previewTag.style.display = 'inline-block';
+                        previewTag.textContent = '⏳ GENERATING...';
+                        previewTag.className = 'mock-chat-tag pending';
+                    }
+                    previewText.textContent = 'Generating real AI response from Gemini...';
+
+                    try {
+                        const res = await fetch(`/gemini/${encodeURIComponent(interpolated)}`);
+                        if (!res.ok) {
+                            const errText = await res.text();
+                            throw new Error(errText || 'Failed to generate AI response');
+                        }
+                        const aiAnswer = await res.text();
+                        previewText.textContent = aiAnswer;
+                        if (previewTag) {
+                            previewTag.textContent = '✨ AI TEST RESULT';
+                            previewTag.className = 'mock-chat-tag ai-tested';
+                        }
+                    } catch (err) {
+                        previewText.textContent = `[AI Test Error: ${err.message}]`;
+                        if (previewTag) {
+                            previewTag.textContent = '⚠️ AI ERROR';
+                            previewTag.className = 'mock-chat-tag error';
+                        }
+                    } finally {
+                        btnTestAi.disabled = false;
+                        btnTestAi.innerHTML = '✨ Test AI Reply';
+                    }
+                });
+            }
+
+            detailEl.querySelectorAll('.var-pill').forEach(pill => {
+                pill.addEventListener('click', () => {
+                    const block = pill.closest('.field-block');
+                    const target = block ? block.querySelector('.table-input') : promptInput;
+                    insertTokenAtCursor(target || promptInput, pill.dataset.var);
+                    updateCounters();
+                    if (target === fallbackInput || target === staticInput) updatePreviewFromTemplate();
+                    flushActiveAlertDetail();
+                    updateStatusBadge('event_alerts', true, true);
+                });
+            });
+
+            els.alertsDetailPanel.appendChild(detailEl);
+        }
+
+        function collectAlertsFromForm() {
+            flushActiveAlertDetail();
+            return structuredClone(state.config?.event_alerts || {});
+        }
+
+        function updateErrorsGateVisibility() {
+            if (!els.errorsGateOverlay || !els.errorsContentWrapper) return;
+            if (state.errorsUnlocked) {
+                els.errorsGateOverlay.style.display = 'none';
+                els.errorsContentWrapper.style.display = 'block';
+            } else {
+                els.errorsGateOverlay.style.display = 'flex';
+                els.errorsContentWrapper.style.display = 'none';
+            }
+        }
+
+        // --- 2-PANEL MASTER-DETAIL ERRORS LOGIC ---
+        function renderErrorsMasterDetail() {
+            updateErrorsGateVisibility();
+            if (!state.errorsUnlocked) return;
+            if (!state.config?.error_messages) state.config.error_messages = {};
+            if (!state.selectedErrorGroup || !ERROR_GROUPS.some(g => g.id === state.selectedErrorGroup)) {
+                state.selectedErrorGroup = ERROR_GROUPS[0].id;
+            }
+            renderErrorsNav();
+            renderErrorsDetail(state.selectedErrorGroup);
+        }
+
+        function renderErrorsNav() {
+            if (!els.errorsNavList) return;
+            els.errorsNavList.innerHTML = '';
+
+            ERROR_GROUPS.forEach(group => {
+                const navItem = document.createElement('div');
+                navItem.className = `errors-nav-item ${state.selectedErrorGroup === group.id ? 'active' : ''}`;
+                navItem.dataset.id = group.id;
+
+                navItem.innerHTML = `
+                    <div class="errors-nav-left">
+                        <span class="errors-nav-icon">${group.icon}</span>
+                        <span class="errors-nav-title">${escapeHtml(group.name)}</span>
+                    </div>
+                    <span class="errors-nav-count">${group.keys.length}</span>
+                `;
+
+                navItem.addEventListener('click', () => {
+                    if (state.selectedErrorGroup !== group.id) {
+                        selectErrorGroup(group.id);
+                    }
+                });
+
+                els.errorsNavList.appendChild(navItem);
+            });
+        }
+
+        function selectErrorGroup(groupId) {
+            state.selectedErrorGroup = groupId;
+            if (els.errorsNavList) {
+                els.errorsNavList.querySelectorAll('.errors-nav-item').forEach(item => {
+                    item.classList.toggle('active', item.dataset.id === groupId);
+                });
+            }
+            renderErrorsDetail(groupId);
+        }
+
+        function renderErrorsDetail(groupId) {
+            if (!els.errorsDetailPanel) return;
+            els.errorsDetailPanel.innerHTML = '';
+
+            const group = ERROR_GROUPS.find(g => g.id === groupId) || ERROR_GROUPS[0];
+            if (!group) return;
+
+            const errors = state.config?.error_messages || {};
+
+            const detailEl = document.createElement('div');
+            detailEl.className = 'errors-detail-content';
+
+            detailEl.innerHTML = `
+                <div class="errors-detail-header">
+                    <div class="errors-detail-title-group">
+                        <strong class="errors-detail-title">${group.icon} ${escapeHtml(group.name)}</strong>
+                        <span class="errors-detail-desc">${escapeHtml(group.desc)}</span>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-reset-group" title="Reset all errors in this category to factory default">↺ Reset Category</button>
+                </div>
+                <div class="errors-items-list"></div>
+            `;
+
+            const itemsContainer = detailEl.querySelector('.errors-items-list');
+            const btnResetGroup = detailEl.querySelector('.btn-reset-group');
+
+            btnResetGroup.addEventListener('click', () => {
+                group.keys.forEach(k => {
+                    const defVal = FACTORY_ERRORS[k.key] || '';
+                    state.config.error_messages[k.key] = defVal;
+                });
+                renderErrorsDetail(groupId);
+                updateStatusBadge('error_messages', true, true);
+            });
+
+            group.keys.forEach(item => {
+                const curVal = errors[item.key] !== undefined ? errors[item.key] : (FACTORY_ERRORS[item.key] || '');
+                const card = document.createElement('div');
+                card.className = 'error-item-card';
+                card.dataset.key = item.key;
+
+                const pillsHtml = (item.vars || []).map(v => 
+                    `<button type="button" class="var-pill" data-var="{${v}}">+ {${v}}</button>`
+                ).join('');
+
+                card.innerHTML = `
+                    <div class="error-item-header">
+                        <div class="error-key-group">
+                            <span class="error-key-badge">${escapeHtml(item.key)}</span>
+                            <span class="error-desc">${escapeHtml(item.desc)}</span>
+                        </div>
+                        <button type="button" class="btn-item-reset" data-key="${item.key}" title="Reset to factory default">↺ Reset</button>
+                    </div>
+                    <div class="error-input-block">
+                        <div class="highlight-input-wrapper multiline">
+                            <div class="highlight-backdrop" aria-hidden="true"></div>
+                            <textarea class="table-input code-font highlight-textarea error-msg-input" rows="1" maxlength="450" placeholder="Chat fallback message..." spellcheck="false" autocomplete="off">${escapeHtml(curVal)}</textarea>
+                        </div>
+                        <div class="var-pills-row" style="margin-top: 2px;">
+                            <div class="pills-group">${pillsHtml}</div>
+                            <span class="char-counter error-counter">${curVal.length} / 450 chars</span>
+                        </div>
+                    </div>
+                `;
+
+                const input = card.querySelector('.error-msg-input');
+                const btnReset = card.querySelector('.btn-item-reset');
+                const counter = card.querySelector('.error-counter');
+
+                attachInputSyntaxHighlighter(input, item.vars || []);
+
+                const updateCount = () => {
+                    if (counter && input) {
+                        const len = input.value.length;
+                        counter.textContent = `${len} / 450 chars`;
+                        counter.classList.toggle('warning', len > 400);
+                        counter.classList.toggle('error', len > 450);
+                    }
+                };
+
+                input.addEventListener('input', () => {
+                    updateCount();
+                    state.config.error_messages[item.key] = input.value;
+                    updateStatusBadge('error_messages', true, true);
+                });
+
+                btnReset.addEventListener('click', () => {
+                    const defaultVal = FACTORY_ERRORS[item.key] || '';
+                    input.value = defaultVal;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    state.config.error_messages[item.key] = defaultVal;
+                    updateCount();
+                    updateStatusBadge('error_messages', true, true);
+                });
+
+                card.querySelectorAll('.var-pill').forEach(pill => {
+                    pill.addEventListener('click', () => {
+                        insertTokenAtCursor(input, pill.dataset.var);
+                        state.config.error_messages[item.key] = input.value;
+                        updateCount();
+                        updateStatusBadge('error_messages', true, true);
+                    });
+                });
+
+                updateCount();
+                itemsContainer.appendChild(card);
+            });
+
+            els.errorsDetailPanel.appendChild(detailEl);
+        }
+
+        function collectErrorsFromForm() {
+            return structuredClone(state.config?.error_messages || {});
+        }
+
+        async function saveConfig(type) {
+            if (!els.modalSaveNotice) return;
+            els.modalSaveNotice.className = 'modal-save-notice';
+            els.modalSaveNotice.textContent = 'Saving...';
+
+            let payload;
+            try {
+                if (type === 'system_instructions') {
+                    payload = els.personaTextarea?.value || '';
+                } else if (type === 'custom_commands') {
+                    payload = collectCommandsFromTable();
+                } else if (type === 'event_alerts') {
+                    payload = collectAlertsFromForm();
+                } else if (type === 'error_messages') {
+                    payload = collectErrorsFromForm();
+                }
+            } catch (err) {
+                els.modalSaveNotice.className = 'modal-save-notice error';
+                els.modalSaveNotice.textContent = `Error preparing data: ${err.message}`;
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/config/${type}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ value: payload })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.message || data.error || 'Save failed');
+                }
+                els.modalSaveNotice.textContent = `✓ ${type.replace('_', ' ')} saved successfully.`;
+                updateStatusBadge(type, data.override);
+                setTimeout(() => {
+                    if (els.modalSaveNotice && els.modalSaveNotice.textContent.includes('✓')) {
+                        els.modalSaveNotice.textContent = '';
+                    }
+                }, 3000);
+            } catch (err) {
+                els.modalSaveNotice.className = 'modal-save-notice error';
+                els.modalSaveNotice.textContent = `Failed to save: ${err.message}`;
+            }
+        }
+
+        async function resetConfig(type) {
+            const labelMap = {
+                system_instructions: 'Persona',
+                custom_commands: 'Commands',
+                event_alerts: 'Alerts',
+                error_messages: 'Errors'
+            };
+            const label = labelMap[type] || type.replace('_', ' ');
+            if (!confirm(`Reset all ${label} to factory default presets? This will overwrite your current ${label.toLowerCase()} configuration.`)) return;
+            if (!els.modalSaveNotice) return;
+            els.modalSaveNotice.className = 'modal-save-notice';
+            els.modalSaveNotice.textContent = `Resetting ${label}...`;
+
+            try {
+                const res = await fetch(`/api/config/${type}/reset`, { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.message || data.error || 'Reset failed');
+                }
+                els.modalSaveNotice.textContent = `✓ Reverted ${label} to factory default.`;
+                if (!state.config) state.config = {};
+                state.config[type] = data.value;
+                if (!state.config.overrides) state.config.overrides = {};
+                state.config.overrides[type] = data.override;
+                renderConfigForm();
+                setTimeout(() => {
+                    if (els.modalSaveNotice && els.modalSaveNotice.textContent.includes('✓')) {
+                        els.modalSaveNotice.textContent = '';
+                    }
+                }, 3000);
+            } catch (err) {
+                els.modalSaveNotice.className = 'modal-save-notice error';
+                els.modalSaveNotice.textContent = `Reset failed: ${err.message}`;
             }
         }
 
@@ -146,11 +2028,9 @@
 
             // Ensure we have 3P emote maps for this channel (async, cached)
             ensureEmotesLoaded(channel).then(() => {
-                // Rerender once emote maps arrive (so old text tokens turn into images)
                 if (state.activeChannel === channel) renderChat();
             }).catch(() => { /* non-fatal */ });
 
-            // Check if we have data, if not fetch it
             if (!state.chatData[channel]) {
                 fetchChat(channel);
             } else {
@@ -209,13 +2089,11 @@
 
         function renderChat() {
             const msgs = state.chatData[state.activeChannel] || [];
-            // Optimize: only render last 200 to keep DOM light
             const visibleMsgs = msgs.slice(-200);
 
             els.chatLog.innerHTML = visibleMsgs.map(msg => {
                 const date = new Date(msg.timestamp);
                 const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
-
                 const rendered = renderMessageHtml(msg.message, state.activeChannel, msg.meta, state.emoteMapsByChannel);
 
                 return `
@@ -234,15 +2112,12 @@
             if (!state.chatData[channel]) state.chatData[channel] = [];
             state.chatData[channel].push(msg);
 
-            // Limit buffer
             if (state.chatData[channel].length > 1000) state.chatData[channel].shift();
 
             if (state.activeChannel === channel) {
                 const isScrolledBottom = els.chatLog.scrollHeight - els.chatLog.scrollTop === els.chatLog.clientHeight;
-
                 const date = new Date(msg.timestamp);
                 const timeStr = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
-
                 const rendered = renderMessageHtml(msg.message, channel, msg.meta, state.emoteMapsByChannel);
 
                 const html = `
@@ -290,7 +2165,6 @@
             const pageItems = filtered.slice(start, start + state.mediaPerPage);
 
             els.gallery.innerHTML = pageItems.map(item => createMediaCard(item)).join('');
-            
             renderPagination(totalPages, filtered.length);
             observeImages();
         }
@@ -411,7 +2285,7 @@
             state.socket = new WebSocket(wsUrl);
 
             state.socket.onopen = () => console.log("WS Connected");
-            state.socket.onclose = () => setTimeout(connectWS, 3000); // Reconnect
+            state.socket.onclose = () => setTimeout(connectWS, 3000);
             state.socket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 if (data.type === 'chat') {
@@ -423,6 +2297,10 @@
                     if (state.activeChannel === data.channel) renderChat();
                 } else if (data.type === 'auth:broadcaster' && data.channel) {
                     updateChannelAuthStatus(data.channel, data.authorized);
+                } else if (data.type === 'config:updated') {
+                    if (window.__VIEWER__ && window.__VIEWER__.isAdmin) {
+                        loadConfig();
+                    }
                 }
             };
         }
@@ -436,7 +2314,6 @@
 
         // --- HELPERS ---
         function getUsernameColor(username) {
-            // Simple hash for consistent colors
             let hash = 0;
             for (let i = 0; i < username.length; i++) {
                 hash = username.charCodeAt(i) + ((hash << 5) - hash);

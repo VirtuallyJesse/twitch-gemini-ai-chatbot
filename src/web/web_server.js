@@ -7,8 +7,21 @@
 import express from 'express';
 import expressWs from 'express-ws';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { renderAuthMismatchHtml } from '../twitch/twitch_transport.js';
+import {
+    COOKIE_NAME,
+    STATE_COOKIE,
+    SESSION_TTL_MS,
+    deriveSessionSecret,
+    createSessionToken,
+    verifySessionToken,
+    parseCookies,
+    serializeCookie,
+    clearCookieHeader
+} from './session.js';
+import { CONFIG_TYPES } from '../utils/bot_config.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_VIEWS_DIR = path.resolve(moduleDir, '../../views');
@@ -24,6 +37,14 @@ export class WebServer {
     #emotePool;
     #mediaPipeline;
     #errorHandler;
+    #configStore;
+    #chatRouter;
+    #adminUsernames;
+    #clientId;
+    #clientSecret;
+    #sessionSecret;
+    #sessionTtlMs;
+    #isAdminLogin;
     #botUsername;
     #externalUrl;
     #keepAliveIntervalMs;
@@ -54,6 +75,13 @@ export class WebServer {
             emotePool = null,
             mediaPipeline = null,
             errorHandler = null,
+            configStore = null,
+            chatRouter = null,
+            adminUsernames = [],
+            clientId = '',
+            clientSecret = '',
+            sessionSecret = null,
+            sessionTtlMs = SESSION_TTL_MS,
             port = 3000,
             host,
             botUsername = '',
@@ -75,6 +103,13 @@ export class WebServer {
         this.#emotePool = emotePool;
         this.#mediaPipeline = mediaPipeline;
         this.#errorHandler = errorHandler;
+        this.#configStore = configStore;
+        this.#chatRouter = chatRouter;
+        this.#adminUsernames = (adminUsernames || []).map((s) => String(s).toLowerCase()).filter(Boolean);
+        this.#clientId = String(clientId || '').trim();
+        this.#clientSecret = String(clientSecret || '').trim();
+        this.#sessionSecret = sessionSecret || deriveSessionSecret(this.#clientSecret);
+        this.#sessionTtlMs = Number(sessionTtlMs) || SESSION_TTL_MS;
         this.#botUsername = String(botUsername || '');
         this.#externalUrl = String(externalUrl || '').trim();
         this.#keepAliveIntervalMs = Number(keepAliveIntervalMs) || DEFAULT_KEEP_ALIVE_MS;
@@ -82,6 +117,12 @@ export class WebServer {
         this.#fetchImpl = fetchImpl;
         this.#host = host;
         this.#preferredPort = port ?? 3000;
+
+        this.#isAdminLogin = (login) => {
+            const name = String(login || '').toLowerCase();
+            if (!name) return false;
+            return name === String(this.#botUsername).toLowerCase() || this.#adminUsernames.includes(name);
+        };
 
         const app = express();
         this.#wsInstance = expressWs(app);
@@ -374,6 +415,89 @@ export class WebServer {
 </html>`;
     }
 
+    #viewerFrom(req) {
+        const cookies = parseCookies(req.headers.cookie);
+        const token = cookies[COOKIE_NAME];
+        const payload = verifySessionToken(token, this.#sessionSecret);
+        if (!payload) return null;
+        return { ...payload, isAdmin: this.#isAdminLogin(payload.login) };
+    }
+
+    #requireAdmin(req, res) {
+        const viewer = this.#viewerFrom(req);
+        if (!viewer) {
+            res.status(401).json({ error: 'unauthorized' });
+            return null;
+        }
+        if (!viewer.isAdmin) {
+            res.status(403).json({ error: 'forbidden' });
+            return null;
+        }
+        return viewer;
+    }
+
+    async #applyConfig(type, value) {
+        if (type === 'system_instructions') {
+            this.#chatRouter?.reloadSystemInstructions(value);
+            this.#aiEngine?.reloadFileContext?.(value);
+        } else if (type === 'custom_commands') {
+            this.#chatRouter?.reloadCustomCommands(value);
+        } else if (type === 'event_alerts') {
+            this.#chatRouter?.reloadEventAlerts(value);
+        } else if (type === 'error_messages') {
+            this.#errorHandler?.reload?.(value);
+        }
+        this.broadcast({ type: 'config:updated', key: type });
+    }
+
+    async #exchangeDashboardUser(code, redirectUri) {
+        const tokenParams = new URLSearchParams({
+            client_id: this.#clientId,
+            client_secret: this.#clientSecret,
+            code,
+            grant_type: 'authorization_code',
+            redirect_uri: redirectUri
+        });
+
+        const tokenRes = await this.#fetchImpl('https://id.twitch.tv/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: tokenParams.toString()
+        });
+
+        if (!tokenRes.ok) {
+            const text = await tokenRes.text();
+            throw new Error(`Twitch OAuth token exchange failed (${tokenRes.status}): ${text}`);
+        }
+
+        const tokenData = await tokenRes.json();
+        const accessToken = tokenData.access_token;
+        if (!accessToken) throw new Error('Missing access_token from Twitch OAuth response');
+
+        const userRes = await this.#fetchImpl('https://api.twitch.tv/helix/users', {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Client-Id': this.#clientId
+            }
+        });
+
+        if (!userRes.ok) {
+            const text = await userRes.text();
+            throw new Error(`Twitch Helix /users failed (${userRes.status}): ${text}`);
+        }
+
+        const userData = await userRes.json();
+        const user = userData.data?.[0];
+        if (!user) throw new Error('No user data returned from Twitch Helix');
+
+        return {
+            id: user.id,
+            login: user.login,
+            display_name: user.display_name,
+            profile_image_url: user.profile_image_url
+        };
+    }
+
     #mountRoutes() {
         this.#mountWebSocket();
 
@@ -383,6 +507,29 @@ export class WebServer {
 
         this.#app.get('/healthz', (_req, res) => {
             res.type('text/plain').set('Cache-Control', 'no-store').send('OK');
+        });
+
+        this.#app.get('/auth/dashboard', (req, res) => {
+            try {
+                if (!this.#clientId) {
+                    res.status(500).send('TWITCH_CLIENT_ID is not configured.');
+                    return;
+                }
+                const nonce = crypto.randomBytes(16).toString('hex');
+                res.append('Set-Cookie', serializeCookie(STATE_COOKIE, nonce, {
+                    maxAge: 600,
+                    httpOnly: true,
+                    sameSite: 'Lax',
+                    path: '/',
+                    secure: req.secure
+                }));
+                const redirectUri = this.#redirectUri(req);
+                const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${encodeURIComponent(this.#clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=&state=dashboard:${nonce}`;
+                res.redirect(authUrl);
+            } catch (error) {
+                console.error('[Auth] Failed to build dashboard auth URL:', error);
+                res.status(500).send('Failed to start Twitch dashboard authorization.');
+            }
         });
 
         this.#app.get('/auth/login', (req, res) => {
@@ -425,6 +572,36 @@ export class WebServer {
                 return;
             }
             const redirectUri = this.#redirectUri(req);
+
+            if (state && String(state).startsWith('dashboard:')) {
+                const nonce = String(state).slice('dashboard:'.length);
+                const cookies = parseCookies(req.headers.cookie);
+                const got = cookies[STATE_COOKIE];
+                res.append('Set-Cookie', clearCookieHeader(STATE_COOKIE, { secure: req.secure }));
+                if (!got || got !== nonce) {
+                    return res.status(400).send('Invalid login state.');
+                }
+                try {
+                    const user = await this.#exchangeDashboardUser(String(code), redirectUri);
+                    const token = createSessionToken({
+                        login: user.login,
+                        userId: user.id,
+                        displayName: user.display_name,
+                        profileImageUrl: user.profile_image_url
+                    }, this.#sessionSecret, { ttlMs: this.#sessionTtlMs });
+                    res.append('Set-Cookie', serializeCookie(COOKIE_NAME, token, {
+                        httpOnly: true,
+                        sameSite: 'Lax',
+                        path: '/',
+                        maxAge: this.#sessionTtlMs / 1000,
+                        secure: req.secure
+                    }));
+                    return res.redirect(303, '/');
+                } catch (authError) {
+                    console.error('[Auth] Dashboard callback failed:', authError);
+                    return res.status(500).send('Twitch dashboard authentication failed. Please try again.');
+                }
+            }
 
             if (state && String(state).startsWith('broadcaster:')) {
                 const channel = String(state).slice('broadcaster:'.length);
@@ -493,6 +670,78 @@ export class WebServer {
                 res.status(500).send(
                     this.#errorHandler?.format?.(authError) || 'Twitch authorization failed. Please try again.'
                 );
+            }
+        });
+
+        this.#app.all(['/auth/logout', '/api/auth/logout'], (req, res) => {
+            res.append('Set-Cookie', clearCookieHeader(COOKIE_NAME, { secure: req.secure }));
+            if (req.method === 'GET') {
+                return res.redirect(303, '/');
+            }
+            res.json({ ok: true });
+        });
+
+        this.#app.get('/api/me', (req, res) => {
+            const viewer = this.#viewerFrom(req);
+            if (!viewer) {
+                return res.json({ authenticated: false });
+            }
+            res.json({
+                authenticated: true,
+                login: viewer.login,
+                displayName: viewer.displayName,
+                profileImageUrl: viewer.profileImageUrl,
+                isAdmin: viewer.isAdmin
+            });
+        });
+
+        this.#app.get('/api/config', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            if (!this.#configStore) {
+                return res.status(503).json({ error: 'config_unavailable' });
+            }
+            res.json(await this.#configStore.getAll());
+        });
+
+        this.#app.post('/api/config/:type', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            const type = req.params.type;
+            if (!CONFIG_TYPES.includes(type)) {
+                return res.status(404).json({ error: 'unknown_type' });
+            }
+            if (!this.#configStore) {
+                return res.status(503).json({ error: 'config_unavailable' });
+            }
+            try {
+                const payload = req.body?.value !== undefined ? req.body.value : req.body;
+                const { value, override } = await this.#configStore.set(type, payload);
+                await this.#applyConfig(type, value);
+                res.json({ type, value, override });
+            } catch (err) {
+                if (err.code === 'INVALID_CONFIG') {
+                    return res.status(400).json({ error: 'invalid_config', message: err.message });
+                }
+                console.error(`[WebServer] Config save failed for ${type}:`, err);
+                res.status(500).json({ error: 'internal_error' });
+            }
+        });
+
+        this.#app.post('/api/config/:type/reset', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            const type = req.params.type;
+            if (!CONFIG_TYPES.includes(type)) {
+                return res.status(404).json({ error: 'unknown_type' });
+            }
+            if (!this.#configStore) {
+                return res.status(503).json({ error: 'config_unavailable' });
+            }
+            try {
+                const { value, override } = await this.#configStore.reset(type);
+                await this.#applyConfig(type, value);
+                res.json({ type, value, override });
+            } catch (err) {
+                console.error(`[WebServer] Config reset failed for ${type}:`, err);
+                res.status(500).json({ error: 'internal_error' });
             }
         });
 
@@ -568,7 +817,8 @@ export class WebServer {
                 storageConfigured: Boolean(this.#storage.configured),
                 twitchAuthorized: true,
                 twitchConnected: Boolean(this.#transport.connected),
-                twitchAuthUrl: '/auth/login'
+                twitchAuthUrl: '/auth/login',
+                viewer: this.#viewerFrom(req)
             });
         });
 
