@@ -1,0 +1,30 @@
+<!-- Tab 2: Custom Commands -->
+<div class="tab-pane" id="pane-custom_commands" style="display: none;">
+    <div class="pane-header">
+        <span class="pane-status" id="status-custom_commands"><span class="status-dot">●</span> Factory Preset</span>
+        <div class="pane-actions">
+            <button class="btn btn-secondary" id="btn-add-command">+ Add Command</button>
+            <button class="btn btn-secondary btn-reset" data-type="custom_commands" title="Restore factory default commands preset">↺ Restore Defaults</button>
+            <button class="btn btn-primary btn-save" data-type="custom_commands">Save Commands</button>
+        </div>
+    </div>
+    <div class="pane-toolbar">
+        <input type="text" class="table-input search-input" id="search-commands" placeholder="🔍 Filter commands by name, alias, or response..." autocomplete="off">
+    </div>
+    <div class="commands-table-container">
+        <table class="commands-table" id="commands-table">
+            <thead>
+                <tr>
+                    <th style="width: 22%;">Command</th>
+                    <th style="width: 22%;">Aliases</th>
+                    <th style="width: 36%;">Response</th>
+                    <th style="width: 14%;">Permission</th>
+                    <th style="width: 6%; text-align: center;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="commands-tbody">
+                <!-- Command rows injected here -->
+            </tbody>
+        </table>
+    </div>
+</div>

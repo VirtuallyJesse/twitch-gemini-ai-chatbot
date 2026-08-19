@@ -1,0 +1,7 @@
+<% if (!storageConfigured) { %>
+<div class="critical-banner">
+    🚨 <strong>Upstash Redis is REQUIRED</strong> — Authorization token refreshing and chat persistence will not work without it.
+    Set <code>UPSTASH_REDIS_URL</code> in your environment variables to enable the bot.
+    <a href="https://upstash.com" target="_blank" rel="noopener">Get a free database →</a>
+</div>
+<% } %>

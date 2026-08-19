@@ -1,4 +1,4 @@
-// public/web_emotes.js
+// public/js/utils/web_emotes.js
 // Client-side helpers for HTML rendering of Twitch chat messages, links, and cached emote assets.
 
 /**
