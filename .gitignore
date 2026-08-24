@@ -31,6 +31,7 @@ test/
 public/dist/
 public/media/
 dev_mock.js
+src/utils/dev_fixtures.js
 
 # Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
 .grunt
