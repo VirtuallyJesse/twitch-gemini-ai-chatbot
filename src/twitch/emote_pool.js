@@ -72,6 +72,7 @@ export class EmotePool {
   #sevenTv = null;
   #bttv = null;
   #pollTimer = null;
+  #persistTimers = new Map();
   #disposed = false;
   #activeSync = null;
   #pendingSync = null;
@@ -95,6 +96,7 @@ export class EmotePool {
       random: options.random || Math.random,
       pollMs: Number(options.pollMs ?? 10 * 60 * 1000),
       restFallbackMs: Number(options.restFallbackMs ?? 30 * 60 * 1000),
+      persistDebounceMs: Number(options.persistDebounceMs ?? 5_000),
       cachePrefix: options.cachePrefix || 'emotes:cache:'
     };
   }
@@ -213,6 +215,8 @@ export class EmotePool {
       this.#timer.clearInterval(this.#pollTimer);
       this.#pollTimer = null;
     }
+    for (const timer of this.#persistTimers.values()) this.#timer.clearTimeout(timer);
+    this.#persistTimers.clear();
     this.#sevenTv?.dispose();
     this.#bttv?.dispose();
     this.#sevenTv = this.#bttv = null;
@@ -481,7 +485,7 @@ export class EmotePool {
     if (!this.#storage) return;
     const state = this.#channels.get(key);
     if (!state) return;
-    await this.#storage.setJson(this.#cfg.cachePrefix + key.slice(1), {
+    return await this.#storage.setJson(this.#cfg.cachePrefix + key.slice(1), {
       updatedAt: Date.now(),
       tokens: state.view.tokens,
       pool: state.view.pool,
@@ -495,6 +499,23 @@ export class EmotePool {
         ffz: Object.fromEntries(state.channelAssets.ffz)
       }
     });
+  }
+
+  #schedulePersist(key, retry = true) {
+    const active = this.#persistTimers.get(key);
+    if (active) this.#timer.clearTimeout(active);
+    const timer = this.#timer.setTimeout(async () => {
+      this.#persistTimers.delete(key);
+      try {
+        const persisted = await this.#persist(key);
+        if (persisted === false) throw new Error('storage unavailable');
+      } catch (e) {
+        console.error(`[Emotes] cache write failed: ${e.message || e}`);
+        if (retry && !this.#disposed) this.#schedulePersist(key, false);
+      }
+    }, this.#cfg.persistDebounceMs);
+    timer?.unref?.();
+    this.#persistTimers.set(key, timer);
   }
 
   async #persistGlobals() {
@@ -631,7 +652,8 @@ export class EmotePool {
     }
     if (!changed) return;
     state.lastDeltaAt['7tv'] = Date.now();
-    this.#rebuild(key);
+    this.#rebuild(key, { persist: false });
+    this.#schedulePersist(key);
   }
 
   #applyBttvEvent(name, data) {
@@ -657,7 +679,8 @@ export class EmotePool {
       return;
     }
     state.lastDeltaAt.bttv = Date.now();
-    this.#rebuild(key);
+    this.#rebuild(key, { persist: false });
+    this.#schedulePersist(key);
   }
 
   async #pollFfz() {

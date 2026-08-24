@@ -10,8 +10,13 @@ const DEFAULT_MAX_CHAT_ENTRIES = 10000;
 const DEFAULT_MAX_MEDIA_ENTRIES = 10000;
 export const MAX_CHAT_PAGE_SIZE = 500;
 const DEFAULT_CHAT_READ_LIMIT = MAX_CHAT_PAGE_SIZE;
+const DEFAULT_CHAT_FLUSH_INTERVAL_MS = 10_000;
 const TOKENS_KEY = 'twitch:tokens';
 const MEDIA_KEY = 'media_log';
+const defaultTimers = {
+    setInterval: (...args) => setInterval(...args),
+    clearInterval: (...args) => clearInterval(...args)
+};
 
 function normalizeChannel(channel) {
     return String(channel || '').replace(/^#/, '').toLowerCase();
@@ -87,17 +92,22 @@ redis.call('DEL', KEYS[2])
 return {'MIGRATED', tostring(last)}
 `;
 
-const ADD_CHAT_LUA = `
-local entry = cjson.decode(ARGV[1])
+const ADD_CHAT_BATCH_LUA = `
+local entries = cjson.decode(ARGV[1])
 local last = tonumber(redis.call('GET', KEYS[2])) or 0
-local requested = tonumber(entry.order) or 0
-if requested <= last then requested = last + 1 end
-entry.order = requested
-local encoded = cjson.encode(entry)
-redis.call('ZADD', KEYS[1], requested, encoded)
-redis.call('SET', KEYS[2], requested)
+local stored = {}
+for _, entry in ipairs(entries) do
+  local requested = tonumber(entry.order) or 0
+  if requested <= last then requested = last + 1 end
+  last = requested
+  entry.order = requested
+  local encoded = cjson.encode(entry)
+  redis.call('ZADD', KEYS[1], requested, encoded)
+  table.insert(stored, encoded)
+end
+if #entries > 0 then redis.call('SET', KEYS[2], last) end
 redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -tonumber(ARGV[2]) - 1)
-return encoded
+return cjson.encode(stored)
 `;
 
 function nextEntryOrder(list, now = Date.now()) {
@@ -238,8 +248,10 @@ export class MemoryStorageAdapter {
     async setJson(key, value) {
         try {
             this.kv.set(String(key), JSON.stringify(value));
+            return true;
         } catch (error) {
             console.error('[Storage] Memory write failed:', error.message);
+            return false;
         }
     }
 
@@ -262,19 +274,32 @@ export class MemoryStorageAdapter {
         }
     }
 
+    async getValues(keys) {
+        try {
+            return (keys || []).map((key) => this.kv.has(String(key)) ? this.kv.get(String(key)) : null);
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return (keys || []).map(() => null);
+        }
+    }
+
     async setValue(key, value) {
         try {
             this.kv.set(String(key), String(value));
+            return true;
         } catch (error) {
             console.error('[Storage] Memory write failed:', error.message);
+            return false;
         }
     }
 
     async deleteValue(key) {
         try {
             this.kv.delete(String(key));
+            return true;
         } catch (error) {
             console.error('[Storage] Memory delete failed:', error.message);
+            return false;
         }
     }
 
@@ -294,6 +319,10 @@ export class MemoryStorageAdapter {
             return null;
         }
     }
+
+    async flushChatMessages() {}
+
+    async dispose() {}
 
     #upgradeChat(channel) {
         if (this.migratedChat.has(channel)) return this.chat.get(channel) || [];
@@ -422,6 +451,8 @@ export class UpstashRedisAdapter {
         restUrl,
         restToken,
         fetchImpl,
+        timerImpl = defaultTimers,
+        chatFlushIntervalMs = DEFAULT_CHAT_FLUSH_INTERVAL_MS,
         maxChatEntries = DEFAULT_MAX_CHAT_ENTRIES,
         maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES,
         cursorSecret
@@ -430,12 +461,22 @@ export class UpstashRedisAdapter {
         this.restUrl = connection?.restUrl || restUrl || null;
         this.token = connection?.restToken || restToken || null;
         this.fetchImpl = fetchImpl || globalThis.fetch;
+        this.timer = timerImpl;
+        this.chatFlushIntervalMs = Math.max(1, Number(chatFlushIntervalMs) || DEFAULT_CHAT_FLUSH_INTERVAL_MS);
         this.maxChatEntries = maxChatEntries;
         this.maxMediaEntries = maxMediaEntries;
         this.cursorCodec = createCursorCodec(cursorSecret);
         this.migratedChat = new Set();
+        this.chatQueues = new Map();
+        this.chatFlushInFlight = null;
+        this.disposed = false;
         this.configured = true;
         this.isPersistent = true;
+        this.chatFlushTimer = this.timer.setInterval(
+            () => this.flushChatMessages(),
+            this.chatFlushIntervalMs
+        );
+        this.chatFlushTimer?.unref?.();
     }
 
     async request(endpoint, payload) {
@@ -462,18 +503,69 @@ export class UpstashRedisAdapter {
 
     async addChatMessage(channel, entry) {
         try {
+            if (this.disposed) return null;
             const normalized = normalizeChannel(channel);
-            if (!await this.#ensureChatMigrated(normalized)) return null;
             const candidate = withChatMetadata(entry, Date.now() * 1000);
-            const data = await this.request('/', [
-                'EVAL', ADD_CHAT_LUA, 2,
-                chatEntriesKey(normalized), chatOrderKey(normalized),
-                JSON.stringify(candidate), this.maxChatEntries
-            ]);
-            return safeJsonParse(data?.result);
+            const queue = this.chatQueues.get(normalized) || [];
+            queue.push(candidate);
+            this.chatQueues.set(normalized, queue);
+            return candidate;
         } catch (error) {
             console.error('[Storage] API Error:', error.message);
             return null;
+        }
+    }
+
+    async flushChatMessages() {
+        if (this.chatFlushInFlight) return this.chatFlushInFlight;
+        const run = this.#flushChatQueues();
+        this.chatFlushInFlight = run;
+        try {
+            await run;
+        } finally {
+            if (this.chatFlushInFlight === run) this.chatFlushInFlight = null;
+        }
+    }
+
+    async #flushChatQueues() {
+        const batches = [];
+        for (const [channel, entries] of this.chatQueues) {
+            if (entries.length === 0) continue;
+            batches.push([channel, entries]);
+            this.chatQueues.set(channel, []);
+        }
+
+        await Promise.all(batches.map(async ([channel, entries]) => {
+            try {
+                const migrated = await this.#ensureChatMigrated(channel);
+                const data = migrated && await this.request('/', [
+                    'EVAL', ADD_CHAT_BATCH_LUA, 2,
+                    chatEntriesKey(channel), chatOrderKey(channel),
+                    JSON.stringify(entries), this.maxChatEntries
+                ]);
+                if (data && data.result != null) {
+                    if ((this.chatQueues.get(channel) || []).length === 0) this.chatQueues.delete(channel);
+                    return;
+                }
+            } catch (error) {
+                console.error(`[Storage] Chat batch serialization failed for #${channel}:`, error.message);
+            }
+            const pending = this.chatQueues.get(channel) || [];
+            this.chatQueues.set(channel, [...entries, ...pending]);
+            console.error(`[Storage] Chat batch flush failed for #${channel}; ${entries.length} entries retained.`);
+        }));
+    }
+
+    async dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        if (this.chatFlushTimer) {
+            this.timer.clearInterval(this.chatFlushTimer);
+            this.chatFlushTimer = null;
+        }
+        if (this.chatFlushInFlight) await this.chatFlushInFlight;
+        if ([...this.chatQueues.values()].some((entries) => entries.length > 0)) {
+            await this.flushChatMessages();
         }
     }
 
@@ -600,9 +692,11 @@ export class UpstashRedisAdapter {
 
     async setJson(key, value) {
         try {
-            await this.request('/', ['SET', String(key), JSON.stringify(value)]);
+            const data = await this.request('/', ['SET', String(key), JSON.stringify(value)]);
+            return data !== null;
         } catch (error) {
             console.error('[Storage] API Error:', error.message);
+            return false;
         }
     }
 
@@ -628,19 +722,40 @@ export class UpstashRedisAdapter {
         }
     }
 
-    async setValue(key, value) {
+    async getValues(keys) {
+        const list = Array.isArray(keys) ? keys : [];
+        if (list.length === 0) return [];
         try {
-            await this.request('/', ['SET', String(key), String(value)]);
+            const data = await this.request('/pipeline', list.map((key) => ['GET', String(key)]));
+            if (!Array.isArray(data)) return list.map(() => null);
+            return list.map((_, index) => {
+                const result = data[index]?.result;
+                if (result == null) return null;
+                return typeof result === 'string' ? result : JSON.stringify(result);
+            });
         } catch (error) {
             console.error('[Storage] API Error:', error.message);
+            return list.map(() => null);
+        }
+    }
+
+    async setValue(key, value) {
+        try {
+            const data = await this.request('/', ['SET', String(key), String(value)]);
+            return data !== null;
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return false;
         }
     }
 
     async deleteValue(key) {
         try {
-            await this.request('/', ['DEL', String(key)]);
+            const data = await this.request('/', ['DEL', String(key)]);
+            return data !== null;
         } catch (error) {
             console.error('[Storage] API Error:', error.message);
+            return false;
         }
     }
 
@@ -675,6 +790,8 @@ export class Storage {
         const connection = resolveRedisConnection(config);
         const shared = {
             fetchImpl: config.fetchImpl,
+            timerImpl: config.timerImpl,
+            chatFlushIntervalMs: config.chatFlushIntervalMs,
             maxChatEntries: config.maxChatEntries,
             maxMediaEntries: config.maxMediaEntries,
             cursorSecret: config.cursorSecret
@@ -699,6 +816,14 @@ export class Storage {
 
     addChatMessage(channel, entry) {
         return this.adapter.addChatMessage(channel, entry);
+    }
+
+    flushChatMessages() {
+        return this.adapter.flushChatMessages();
+    }
+
+    dispose() {
+        return this.adapter.dispose();
     }
 
     getChatLog(channel, limit) {
@@ -747,6 +872,10 @@ export class Storage {
 
     getValue(key) {
         return this.adapter.getValue(key);
+    }
+
+    getValues(keys) {
+        return this.adapter.getValues(keys);
     }
 
     setValue(key, value) {

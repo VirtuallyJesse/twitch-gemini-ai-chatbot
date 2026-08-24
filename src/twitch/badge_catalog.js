@@ -28,7 +28,7 @@ function fingerprint(badges) {
 }
 
 function emptyEntry() {
-    return { fetchedAt: 0, fingerprint: '', badges: {} };
+    return { fetchedAt: 0, fingerprint: '', badges: {}, persisted: false };
 }
 
 function hydrateEntry(payload) {
@@ -38,7 +38,8 @@ function hydrateEntry(payload) {
     return {
         fetchedAt: Number(payload.fetched_at) || 0,
         fingerprint: String(payload.fingerprint || ''),
-        badges: payload.badges
+        badges: payload.badges,
+        persisted: true
     };
 }
 
@@ -215,9 +216,16 @@ export class BadgeCatalog {
 
     async #storeGlobal(badges) {
         const nextFingerprint = fingerprint(badges);
-        const changed = nextFingerprint !== this.#global.fingerprint;
-        this.#global = { fetchedAt: this.#now(), fingerprint: nextFingerprint, badges };
-        await this.#persist(GLOBAL_STORAGE_KEY, this.#global);
+        const current = this.#global;
+        const changed = nextFingerprint !== current.fingerprint;
+        const entry = {
+            fetchedAt: this.#now(),
+            fingerprint: nextFingerprint,
+            badges,
+            persisted: !changed && current.persisted
+        };
+        this.#global = entry;
+        if (!entry.persisted) entry.persisted = await this.#persist(GLOBAL_STORAGE_KEY, entry);
         return changed;
     }
 
@@ -225,21 +233,30 @@ export class BadgeCatalog {
         const nextFingerprint = fingerprint(badges);
         const current = this.#channels.get(channel) || emptyEntry();
         const changed = nextFingerprint !== current.fingerprint;
-        const entry = { fetchedAt: this.#now(), fingerprint: nextFingerprint, badges };
+        const entry = {
+            fetchedAt: this.#now(),
+            fingerprint: nextFingerprint,
+            badges,
+            persisted: !changed && current.persisted
+        };
         this.#channels.set(channel, entry);
-        await this.#persist(channelStorageKey(broadcasterId), entry);
+        if (!entry.persisted) {
+            entry.persisted = await this.#persist(channelStorageKey(broadcasterId), entry);
+        }
         return changed;
     }
 
     async #persist(key, entry) {
         try {
-            await this.#storage.setJson(key, {
+            const result = await this.#storage.setJson(key, {
                 fetched_at: entry.fetchedAt,
                 fingerprint: entry.fingerprint,
                 badges: entry.badges
             });
+            return result !== false;
         } catch (error) {
             console.warn(`[Badges] Failed to persist ${key}:`, error.message);
+            return false;
         }
     }
 

@@ -219,3 +219,30 @@ transport.start().then((result) => {
         console.log(`[Twitch] Bot authorized and connected to chat.\n`);
     }
 }).catch((error) => console.error('[Startup] Twitch bootstrap failed:', error));
+
+let shutdownPromise = null;
+async function shutdown(signal) {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(`[Shutdown] ${signal} received; draining runtime state.`);
+    shutdownPromise = (async () => {
+        emotes.dispose();
+        const stopped = await Promise.allSettled([transport.stop(), server.stop()]);
+        for (const result of stopped) {
+            if (result.status === 'rejected') {
+                console.error('[Shutdown] Runtime stop failed:', result.reason?.message || result.reason);
+            }
+        }
+        await storage.dispose();
+        process.exitCode = 0;
+    })();
+    return shutdownPromise;
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+        shutdown(signal).catch((error) => {
+            console.error('[Shutdown] Failed:', error?.message || error);
+            process.exitCode = 1;
+        });
+    });
+}

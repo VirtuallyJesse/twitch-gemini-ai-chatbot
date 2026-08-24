@@ -569,25 +569,21 @@ export class ConfigStore {
     constructor({ storage, defaults = null } = {}) {
         this.storage = storage || null;
         this.defaults = defaults || FACTORY;
+        this.cache = new Map();
+        this.hydration = null;
     }
 
     async get(type) {
-        const fallback = structuredClone(this.defaults[type]);
-        const raw = await this.#read(REDIS_KEY(type));
-        if (raw == null || raw === '') return { value: fallback, override: false };
-        try {
-            const parsed = type === 'system_instructions' ? String(raw) : JSON.parse(raw);
-            return { value: sanitizeConfig(type, parsed), override: true };
-        } catch {
-            return { value: fallback, override: false }; // corrupt override -> factory fallback, never crash boot
-        }
+        await this.#ensureHydrated();
+        return this.#publicEntry(this.cache.get(type));
     }
 
     async getAll() {
+        await this.#ensureHydrated();
         const overrides = {};
         const out = {};
         for (const type of CONFIG_TYPES) {
-            const { value, override } = await this.get(type);
+            const { value, override } = this.#publicEntry(this.cache.get(type));
             out[type] = value;
             overrides[type] = override;
         }
@@ -601,46 +597,95 @@ export class ConfigStore {
      * e.g. so env seeds migrate in exactly once for modal-owned lists.
      */
     async storedDocHas(type, key) {
-        const raw = await this.#read(REDIS_KEY(type));
-        if (raw == null || raw === '') return false;
-        try {
-            return key in JSON.parse(raw);
-        } catch {
-            return false;
-        }
+        await this.#ensureHydrated();
+        const document = this.cache.get(type)?.document;
+        return Boolean(document && typeof document === 'object' && key in document);
     }
 
     async set(type, raw, context = {}) {
+        await this.#ensureHydrated();
         const value = sanitizeConfig(type, raw, context);
         const stored = type === 'system_instructions' ? value : JSON.stringify(value);
-        await this.#write(REDIS_KEY(type), stored);
-        return { value, override: true };
+        this.cache.set(type, {
+            value,
+            override: true,
+            document: type === 'system_instructions' ? null : value
+        });
+        this.#backgroundPersist(`write ${type}`, this.#write(REDIS_KEY(type), stored));
+        return { value: structuredClone(value), override: true };
     }
 
     async reset(type, context = {}) {
+        await this.#ensureHydrated();
         // Validate the factory-restored value BEFORE deleting so a colliding
         // reset can't destroy the stored override.
         const value = sanitizeConfig(type, structuredClone(this.defaults[type]), context);
-        await this.#del(REDIS_KEY(type));
-        return { value, override: false };
+        this.cache.set(type, { value, override: false, document: null });
+        this.#backgroundPersist(`reset ${type}`, this.#del(REDIS_KEY(type)));
+        return { value: structuredClone(value), override: false };
     }
 
-    async #read(key) {
+    async #ensureHydrated() {
+        if (this.cache.size === CONFIG_TYPES.length) return;
+        this.hydration ??= this.#hydrate();
+        await this.hydration;
+    }
+
+    async #hydrate() {
+        const keys = CONFIG_TYPES.map(REDIS_KEY);
+        let values;
         try {
-            return await this.storage?.getValue?.(key) ?? null;
+            if (this.storage?.getValues) {
+                values = await this.storage.getValues(keys);
+            } else {
+                values = await Promise.all(keys.map((key) => this.storage?.getValue?.(key) ?? null));
+            }
         } catch {
-            return null;
+            values = keys.map(() => null);
         }
+        for (let index = 0; index < CONFIG_TYPES.length; index++) {
+            const type = CONFIG_TYPES[index];
+            this.cache.set(type, this.#parseEntry(type, values?.[index]));
+        }
+    }
+
+    #parseEntry(type, raw) {
+        const fallback = structuredClone(this.defaults[type]);
+        if (raw == null || raw === '') return { value: fallback, override: false, document: null };
+        try {
+            const parsed = type === 'system_instructions' ? String(raw) : JSON.parse(raw);
+            return {
+                value: sanitizeConfig(type, parsed),
+                override: true,
+                document: type === 'system_instructions' ? null : parsed
+            };
+        } catch {
+            return { value: fallback, override: false, document: null };
+        }
+    }
+
+    #publicEntry(entry) {
+        return { value: structuredClone(entry.value), override: entry.override };
+    }
+
+    #backgroundPersist(label, pending) {
+        Promise.resolve(pending)
+            .then((success) => {
+                if (success === false) console.error(`[Config] Failed to ${label}: storage unavailable`);
+            })
+            .catch((error) => {
+                console.error(`[Config] Failed to ${label}:`, error?.message || error);
+            });
     }
 
     async #write(key, value) {
         if (!this.storage?.setValue) return;
-        await this.storage.setValue(key, value);
+        return await this.storage.setValue(key, value);
     }
 
     async #del(key) {
         if (!this.storage?.deleteValue) return;
-        await this.storage.deleteValue(key);
+        return await this.storage.deleteValue(key);
     }
 }
 
