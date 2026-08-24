@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Hash,
   ArrowDown,
@@ -25,7 +25,12 @@ import { stringToColor } from '../lib/color';
 import { ChatBadge } from './Badges';
 import Emote from './Emote';
 import type { ChatChannelHistory } from '../lib/chatHistory';
-import { captureChatAnchor, restoreChatAnchor, type ChatScrollAnchor } from '../lib/chatScroll';
+import {
+  captureChatAnchor,
+  chatViewportNeedsFill,
+  restoreChatAnchor,
+  type ChatScrollAnchor,
+} from '../lib/chatScroll';
 
 /* ------------------------------ tokens ------------------------------ */
 
@@ -260,7 +265,7 @@ export default function ChatPanel({
   const prevChannelRef = useRef(activeChannel);
   const pendingPrependRef = useRef<{
     channel: string;
-    entryCount: number;
+    firstEntryId: string | null;
     anchor: ChatScrollAnchor;
   } | null>(null);
   const highlightBots = useBotHighlight();
@@ -269,6 +274,7 @@ export default function ChatPanel({
   const isLinked = channelStatuses[activeNorm]?.authorized ?? channelStatuses[`#${activeNorm}`]?.authorized ?? false;
   const entries: LogEntry[] = logs[activeNorm] || logs[`#${activeNorm}`] || [];
   const history = histories[activeNorm];
+  const canRevealCached = Boolean(history && history.visibleCount < history.entries.length);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -283,34 +289,62 @@ export default function ChatPanel({
       setAtBottom(true);
       return;
     }
-    if (pending?.channel === activeNorm && entries.length > pending.entryCount) {
-      restoreChatAnchor(el, pending.anchor);
-      pendingPrependRef.current = null;
-      setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
-      return;
+    if (pending?.channel === activeNorm) {
+      if ((entries[0]?.id || null) !== pending.firstEntryId) {
+        restoreChatAnchor(el, pending.anchor);
+        pendingPrependRef.current = null;
+        setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
+        return;
+      }
+      if (el.scrollHeight !== pending.anchor.height) {
+        pendingPrependRef.current = { ...pending, anchor: captureChatAnchor(el) };
+      }
     }
     if (!pending && atBottom) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [activeChannel, activeNorm, entries.length, atBottom]);
+  }, [activeChannel, activeNorm, entries, atBottom]);
 
   useEffect(() => {
     const pending = pendingPrependRef.current;
-    if (pending?.channel === activeNorm && history?.loading === null && entries.length <= pending.entryCount) {
+    if (
+      pending?.channel === activeNorm && history?.loading === null &&
+      (entries[0]?.id || null) === pending.firstEntryId
+    ) {
       pendingPrependRef.current = null;
     }
-  }, [activeNorm, entries.length, history?.loading]);
+  }, [activeNorm, entries, history?.loading]);
 
-  const loadOlder = () => {
+  const loadOlder = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || !history?.hydrated || !history.hasMore || history.loading || pendingPrependRef.current) return;
+    if (
+      !el || !history?.hydrated || history.loading || pendingPrependRef.current ||
+      (!canRevealCached && !history.hasMore)
+    ) return;
     pendingPrependRef.current = {
       channel: activeNorm,
-      entryCount: entries.length,
+      firstEntryId: entries[0]?.id || null,
       anchor: captureChatAnchor(el),
     };
     onLoadOlder(activeNorm);
-  };
+  }, [activeNorm, canRevealCached, entries, history, onLoadOlder]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && history?.hydrated && canRevealCached && chatViewportNeedsFill(el)) {
+      loadOlder();
+    }
+  }, [activeNorm, canRevealCached, entries.length, history?.hydrated, loadOlder]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (canRevealCached && chatViewportNeedsFill(el)) loadOlder();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [canRevealCached, loadOlder]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -358,8 +392,6 @@ export default function ChatPanel({
           const chanNorm = normChannel(chan);
           const isActive = chanNorm === activeNorm;
           const chanLinked = channelStatuses[chanNorm]?.authorized ?? channelStatuses[`#${chanNorm}`]?.authorized ?? false;
-          const chanEntries = logs[chanNorm] || logs[`#${chanNorm}`] || [];
-
           return (
             <button
               key={chan}
@@ -374,9 +406,6 @@ export default function ChatPanel({
                 <Hash size={11} className={isActive ? 'text-accent' : 'text-faint'} strokeWidth={2.4} />
               )}
               {chanNorm}
-              {chanEntries.length > 0 && (
-                <span className="font-mono text-[9.5px] text-faint">{chanEntries.length}</span>
-              )}
               {isActive && <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-t bg-accent" />}
             </button>
           );
@@ -416,7 +445,7 @@ export default function ChatPanel({
               </span>
             </div>
           )}
-          {history?.hydrated && !history.hasMore && entries.length > 0 && (
+          {history?.hydrated && !history.hasMore && !canRevealCached && entries.length > 0 && (
             <div className="py-2 text-center font-mono text-[9.5px] uppercase tracking-[0.12em] text-faint">
               Beginning of retained history
             </div>

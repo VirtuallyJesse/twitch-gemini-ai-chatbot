@@ -25,6 +25,8 @@ import {
   chatLogs,
   createChatHistoryModel,
   failChatPage,
+  revealOlderChatEntries,
+  resetVisibleChatEntries,
   resolveChatPage,
   restartChatHydration,
   syncChatChannels,
@@ -110,6 +112,17 @@ export default function App() {
   }, [commitChatHistory]);
 
   const logs = useMemo(() => chatLogs(chatHistory), [chatHistory]);
+
+  const handleRevealOlderChat = useCallback((channelValue: string) => {
+    const channel = normChannel(channelValue);
+    const current = chatHistoryRef.current;
+    const revealed = revealOlderChatEntries(current, channel);
+    if (revealed !== current) {
+      commitChatHistory(revealed);
+      return;
+    }
+    void requestChatPage(channel, 'older');
+  }, [commitChatHistory, requestChatPage]);
 
   // Dynamic document title based on bot account
   useEffect(() => {
@@ -283,6 +296,9 @@ export default function App() {
   // Channel history hydrates in the effect above; presentation metadata can load independently.
   const handleSelectChannel = (chan: string) => {
     const norm = normChannel(chan);
+    if (norm !== activeChannel) {
+      commitChatHistory(resetVisibleChatEntries(chatHistoryRef.current, norm));
+    }
     setActiveChannel(norm);
     if (!chatHistoryRef.current.channels[norm]?.hydrated) {
       api.getEmotes(norm).then((emotes) => {
@@ -341,7 +357,7 @@ export default function App() {
           channelStatuses={channelStatuses}
           logs={logs}
           histories={chatHistory.channels}
-          onLoadOlder={(channel) => void requestChatPage(channel, 'older')}
+          onLoadOlder={handleRevealOlderChat}
           viewer={viewer}
           onOpenSettings={() => setSettingsOpen(true)}
           onLogout={handleLogout}

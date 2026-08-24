@@ -8,8 +8,8 @@ import crypto from 'crypto';
 
 const DEFAULT_MAX_CHAT_ENTRIES = 10000;
 const DEFAULT_MAX_MEDIA_ENTRIES = 10000;
-const DEFAULT_CHAT_READ_LIMIT = 200;
 export const MAX_CHAT_PAGE_SIZE = 500;
+const DEFAULT_CHAT_READ_LIMIT = MAX_CHAT_PAGE_SIZE;
 const TOKENS_KEY = 'twitch:tokens';
 const MEDIA_KEY = 'media_log';
 

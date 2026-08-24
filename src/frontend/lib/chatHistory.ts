@@ -1,6 +1,10 @@
 import { normChannel } from './channel.ts';
 import type { ChatHistoryPage, LogEntry } from './types.ts';
 
+export const INITIAL_VISIBLE_CHAT_ENTRIES = 50;
+export const CHAT_REVEAL_STEP = 50;
+const MAX_RETAINED_CHAT_ENTRIES = 10_000;
+
 export type ChatRequestMode = 'hydrate' | 'older';
 
 export interface ChatPageRequest {
@@ -12,6 +16,7 @@ export interface ChatPageRequest {
 
 export interface ChatChannelHistory {
   entries: LogEntry[];
+  visibleCount: number;
   hydrated: boolean;
   cursor: string | null;
   hasMore: boolean;
@@ -33,6 +38,7 @@ export function createChatHistoryModel(): ChatHistoryModel {
 function newChannel(epoch: number): ChatChannelHistory {
   return {
     entries: [],
+    visibleCount: 0,
     hydrated: false,
     cursor: null,
     hasMore: true,
@@ -66,7 +72,13 @@ function beginRequest(
 ): { model: ChatHistoryModel; request: ChatPageRequest | null } {
   const channel = normChannel(channelValue);
   const state = model.channels[channel];
-  if (!state || state.loading || (mode === 'hydrate' ? state.hydrated : !state.hydrated || !state.hasMore)) {
+  if (
+    !state || state.loading ||
+    (mode === 'hydrate' && state.hydrated) ||
+    (mode === 'older' && (
+      !state.hydrated || !state.hasMore || state.visibleCount < state.entries.length
+    ))
+  ) {
     return { model, request: null };
   }
   const request: ChatPageRequest = {
@@ -107,7 +119,9 @@ function mergeEntries(existing: readonly LogEntry[], incoming: readonly LogEntry
   const byId = new Map<string, LogEntry>();
   for (const entry of existing) byId.set(entry.id, entry);
   for (const entry of incoming) byId.set(entry.id, entry);
-  return [...byId.values()].sort((a, b) => a.order - b.order);
+  return [...byId.values()]
+    .sort((a, b) => a.order - b.order)
+    .slice(-MAX_RETAINED_CHAT_ENTRIES);
 }
 
 export function resolveChatPage(
@@ -118,13 +132,17 @@ export function resolveChatPage(
   if (!request) return model;
   const state = model.channels[request.channel];
   if (!isCurrentRequest(state, request)) return model;
+  const entries = mergeEntries(state.entries, page.entries);
   return {
     ...model,
     channels: {
       ...model.channels,
       [request.channel]: {
         ...state,
-        entries: mergeEntries(state.entries, page.entries),
+        entries,
+        visibleCount: request.mode === 'hydrate'
+          ? Math.min(entries.length, Math.max(INITIAL_VISIBLE_CHAT_ENTRIES, state.visibleCount))
+          : Math.min(entries.length, state.visibleCount + CHAT_REVEAL_STEP),
         hydrated: true,
         cursor: page.nextCursor,
         hasMore: page.hasMore,
@@ -161,11 +179,54 @@ export function appendLiveChatEntry(
   const channel = normChannel(channelValue);
   const state = model.channels[channel];
   if (!state || !entry?.id) return model;
+  const isNewEntry = !state.entries.some((existing) => existing.id === entry.id);
+  const entries = mergeEntries(state.entries, [entry]);
   return {
     ...model,
     channels: {
       ...model.channels,
-      [channel]: { ...state, entries: mergeEntries(state.entries, [entry]) },
+      [channel]: {
+        ...state,
+        entries,
+        visibleCount: Math.min(entries.length, state.visibleCount + (isNewEntry ? 1 : 0)),
+      },
+    },
+  };
+}
+
+export function revealOlderChatEntries(
+  model: ChatHistoryModel,
+  channelValue: string
+): ChatHistoryModel {
+  const channel = normChannel(channelValue);
+  const state = model.channels[channel];
+  if (!state || state.visibleCount >= state.entries.length) return model;
+  return {
+    ...model,
+    channels: {
+      ...model.channels,
+      [channel]: {
+        ...state,
+        visibleCount: Math.min(state.entries.length, state.visibleCount + CHAT_REVEAL_STEP),
+      },
+    },
+  };
+}
+
+export function resetVisibleChatEntries(
+  model: ChatHistoryModel,
+  channelValue: string
+): ChatHistoryModel {
+  const channel = normChannel(channelValue);
+  const state = model.channels[channel];
+  if (!state) return model;
+  const visibleCount = Math.min(INITIAL_VISIBLE_CHAT_ENTRIES, state.entries.length);
+  if (state.visibleCount === visibleCount) return model;
+  return {
+    ...model,
+    channels: {
+      ...model.channels,
+      [channel]: { ...state, visibleCount },
     },
   };
 }
@@ -180,6 +241,7 @@ export function restartChatHydration(model: ChatHistoryModel, channelValue: stri
       [channel]: {
         ...newChannel(model.nextEpoch),
         entries: state.entries,
+        visibleCount: state.visibleCount,
       },
     },
     nextEpoch: model.nextEpoch + 1,
@@ -188,6 +250,9 @@ export function restartChatHydration(model: ChatHistoryModel, channelValue: stri
 
 export function chatLogs(model: ChatHistoryModel): Record<string, LogEntry[]> {
   return Object.fromEntries(
-    Object.entries(model.channels).map(([channel, state]) => [channel, state.entries])
+    Object.entries(model.channels).map(([channel, state]) => [
+      channel,
+      state.entries.slice(-state.visibleCount),
+    ])
   );
 }

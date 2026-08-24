@@ -1231,7 +1231,7 @@ export class WebServer {
             ) {
                 return res.status(400).json({ error: 'INVALID_PAGINATION' });
             }
-            const requestedLimit = rawLimit === undefined ? 200 : Number(rawLimit);
+            const requestedLimit = rawLimit === undefined ? MAX_CHAT_PAGE_SIZE : Number(rawLimit);
             if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
                 return res.status(400).json({ error: 'INVALID_PAGINATION' });
             }
