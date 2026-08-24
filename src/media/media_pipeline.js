@@ -1,4 +1,5 @@
 import ErrorHandler from '../utils/error_handler.js';
+import { normalizeBadgeKinds } from '../utils/badges.js';
 
 const MEDIA_TYPE_HARNESS = [
     { key: 'image', noun: 'an image', bullet: 'Generating images' },
@@ -37,21 +38,6 @@ function resolveUsername(user) {
     if (!user) return 'someone';
     if (typeof user === 'string') return user;
     return user['display-name'] || user.username || user.name || 'someone';
-}
-
-function extractBadgeKinds(user) {
-    if (!user || typeof user !== 'object') return [];
-    if (Array.isArray(user.badges)) return user.badges;
-    const badgesObj = user.tags?.badges || user.badges;
-    if (!badgesObj || typeof badgesObj !== 'object') return [];
-    const kinds = [];
-    if (badgesObj.broadcaster) kinds.push('broadcaster');
-    if (badgesObj.moderator || badgesObj.mod) kinds.push('mod');
-    if (badgesObj.vip) kinds.push('vip');
-    if (badgesObj.subscriber || badgesObj.sub) kinds.push('sub');
-    if (badgesObj.bits) kinds.push('bits');
-    if (badgesObj.bot || badgesObj.verified_bot) kinds.push('bot');
-    return kinds;
 }
 
 function byteLength(value) {
@@ -366,7 +352,7 @@ export class MediaPipeline {
             const timestamp = this.now();
             const userId = typeof user === 'object' ? (user['user-id'] || user.userId || user.id || null) : null;
             const avatarUrl = typeof user === 'object' ? (user.profileImageUrl || user.avatarUrl || null) : null;
-            const badges = extractBadgeKinds(user);
+            const badges = normalizeBadgeKinds(user);
             const mediaEntry = {
                 id: this.idFactory(),
                 timestamp,

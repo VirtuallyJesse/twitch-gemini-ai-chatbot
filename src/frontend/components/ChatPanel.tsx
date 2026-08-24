@@ -118,7 +118,7 @@ export function MsgRow({
   highlightBots: boolean;
 }) {
   const isBot = botUsername ? entry.user.toLowerCase() === botUsername.toLowerCase() : false;
-  const badges: BadgeKind[] = entry.badges || (isBot ? (['bot'] as BadgeKind[]) : []);
+  const badges: BadgeKind[] = entry.badges?.length ? entry.badges : (isBot ? ['bot'] : []);
   const userColor = entry.color || stringToColor(entry.user);
 
   const body = (

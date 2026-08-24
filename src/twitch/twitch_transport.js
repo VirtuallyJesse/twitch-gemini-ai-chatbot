@@ -8,6 +8,7 @@
 
 import tmi from 'tmi.js';
 import { EventSubClient } from './eventsub_client.js';
+import { normalizeBadgeKinds } from '../utils/badges.js';
 
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
@@ -761,11 +762,15 @@ class MessageBufferStore {
         this.#now = now;
     }
 
-    append(channel, username, message, meta = null) {
+    append(channel, username, message, meta = null, identity = {}) {
         const key = channelKey(channel);
         if (!this.#buffers.has(key)) this.#buffers.set(key, []);
         const buffer = this.#buffers.get(key);
         const entry = { username, message, timestamp: this.#now(), meta: meta && typeof meta === 'object' ? meta : null };
+        const badges = normalizeBadgeKinds(identity?.badges);
+        const color = typeof identity?.color === 'string' ? identity.color.trim() : '';
+        if (badges.length > 0) entry.badges = badges;
+        if (color) entry.color = color;
         buffer.push(entry);
         if (buffer.length > this.#maxBufferSize) buffer.shift();
         return entry;
@@ -922,7 +927,7 @@ export class TwitchTransport {
         for (const chunk of chunks) {
             if (sent > 0) await delay(this.#chunkDelayMs);
             await this.#sendChunk(channel, chunk);
-            this.logMessage(channel, this.#botUsername, chunk);
+            this.logMessage(channel, this.#botUsername, chunk, null, { badges: ['bot'] });
             sent++;
         }
         return { sent };
@@ -988,8 +993,8 @@ export class TwitchTransport {
     }
 
     /** Appends to the channel history buffer (post-emote-processing text) and emits onLogEntry. */
-    logMessage(channel, username, message, meta = null) {
-        const entry = this.#buffers.append(channel, username, message, meta);
+    logMessage(channel, username, message, meta = null, identity = {}) {
+        const entry = this.#buffers.append(channel, username, message, meta, identity);
         for (const handler of this.#logHandlers) {
             try {
                 handler(channelKey(channel), entry);

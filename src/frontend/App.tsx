@@ -11,35 +11,14 @@ import type {
 import { api } from './lib/api';
 import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
-import { clockHM, timeAgo } from './lib/time';
+import { timeAgo } from './lib/time';
 import { channelLabel, normChannel } from './lib/channel';
 import { createGalleryAvatarHydrator } from './lib/avatars';
+import { formatRawChatEntry } from './lib/chatLogs';
 import Sidebar from './components/Sidebar';
 import GalleryToolbar, { type Filter } from './components/GalleryToolbar';
 import MediaGrid from './components/MediaGrid';
 import SettingsModal from './components/SettingsModal';
-
-function formatRawChatEntry(e: RawChatEntry, fallbackIdx: number | string): LogEntry {
-  if (e.event || e.kind === 'event') {
-    return {
-      kind: 'event',
-      id: e.id || `e-${fallbackIdx}`,
-      time: e.time || clockHM(new Date(e.timestamp || Date.now())),
-      event: e.event || 'system',
-      text: e.text || e.message || '',
-    };
-  }
-  return {
-    kind: 'msg',
-    id: e.id || `m-${fallbackIdx}`,
-    time: e.time || clockHM(new Date(e.timestamp || Date.now())),
-    user: e.username || e.user || 'chatter',
-    text: e.message || e.text || '',
-    color: e.color,
-    badges: e.badges,
-    meta: e.meta || null,
-  };
-}
 
 function normalizeMediaEntry(raw: RawMediaEntry): MediaItem {
   const isAudio = raw.mediaType === 'tts' || raw.mediaType === 'music';
