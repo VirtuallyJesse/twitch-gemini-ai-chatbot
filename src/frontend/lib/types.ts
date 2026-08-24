@@ -25,6 +25,7 @@ export interface MediaItem {
   src?: string;
   prompt: string;
   author: string;
+  userId?: string | null;
   channel: string;
   timestamp?: number | string;
   minutesAgo: number;

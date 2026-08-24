@@ -9,6 +9,7 @@ import type {
 } from './types';
 import { normChannel } from './channel';
 import type { EmoteProvider } from './emotes';
+import type { AvatarIdentity, AvatarLookupResult } from './avatars';
 
 class ApiClient {
   private async request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -89,12 +90,18 @@ class ApiClient {
     return this.request<PollinationsCatalog>('/api/models/pollinations');
   }
 
-  async getAvatars(logins: string[]): Promise<Record<string, string>> {
-    if (!logins.length) return {};
-    const res = await this.request<{ avatars: Record<string, string> }>(
-      `/api/users/avatars?logins=${encodeURIComponent(logins.join(','))}`
-    );
-    return res.avatars || {};
+  async getAvatars(
+    identities: readonly AvatarIdentity[],
+    signal?: AbortSignal
+  ): Promise<{ results: AvatarLookupResult[] }> {
+    if (identities.length === 0) return { results: [] };
+    if (identities.length > 100) throw new Error('AVATAR_LOOKUP_LIMIT_EXCEEDED');
+    return this.request<{ results: AvatarLookupResult[] }>('/api/users/avatars', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identities }),
+      signal,
+    });
   }
 
   async testAlertReply(params: {

@@ -12,9 +12,10 @@ const GAP = 2;
 interface Props {
   items: MediaItem[];
   resetKey?: string;
+  onItemsExposed?: (items: readonly MediaItem[]) => void;
 }
 
-export default function MediaGrid({ items, resetKey }: Props) {
+export default function MediaGrid({ items, resetKey, onItemsExposed }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef(0);
@@ -84,11 +85,17 @@ export default function MediaGrid({ items, resetKey }: Props) {
   }, [loaded, items, hasMore, requestMore]);
 
   /* ---------------- virtualization math ---------------- */
-  const visible = items.slice(0, Math.min(loaded, items.length));
+  const visible = useMemo(
+    () => items.slice(0, Math.min(loaded, items.length)),
+    [items, loaded]
+  );
+  useEffect(() => {
+    onItemsExposed?.(visible);
+  }, [onItemsExposed, visible]);
   const cols = size.w >= 1080 ? 4 : size.w >= 620 ? 3 : 2;
   /* tints derive from the rendered deck (filtered/searched view); appends via
      infinite scroll preserve the prefix, so earlier tiles never recolor */
-  const tints = useMemo(() => assignAudioTints(visible, cols), [items, loaded, cols]);
+  const tints = useMemo(() => assignAudioTints(visible, cols), [visible, cols]);
   const tile = size.w > 0 ? (size.w - (cols - 1) * GAP) / cols : 0;
   const rowH = tile + GAP;
   const totalRows = Math.ceil(visible.length / cols);

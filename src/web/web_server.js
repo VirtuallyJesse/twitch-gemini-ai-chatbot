@@ -1082,44 +1082,100 @@ export class WebServer {
             res.json(this.#emotePool?.getEmoteMap?.(req.params.channel) || {});
         });
 
-        this.#app.get('/api/users/avatars', async (req, res) => {
-            const rawLogins = req.query.logins || req.query.login || '';
-            const logins = String(rawLogins).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-            if (logins.length === 0) {
-                return res.json({ avatars: {} });
+        this.#app.post('/api/users/avatars', async (req, res) => {
+            const rawIdentities = req.body?.identities;
+            if (!Array.isArray(rawIdentities)) {
+                return res.status(400).json({ error: 'INVALID_AVATAR_LOOKUP' });
+            }
+            if (rawIdentities.length > HELIX_LOOKUP_BATCH) {
+                return res.status(400).json({ error: 'AVATAR_LOOKUP_LIMIT_EXCEEDED' });
             }
 
-            const avatars = {};
-            const toFetch = [];
-            for (const login of logins) {
-                if (this.#avatarCache.has(login)) {
-                    avatars[login] = this.#avatarCache.get(login);
+            const valid = [];
+            const results = [];
+            const seen = new Set();
+            for (const raw of rawIdentities) {
+                const key = typeof raw?.key === 'string' ? raw.key : '';
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+
+                const userId = String(raw?.userId || '').trim();
+                const login = String(raw?.login || '').trim().toLowerCase();
+                if (/^\d+$/.test(userId) && key === `id:${userId}`) {
+                    valid.push({ key, userId });
+                } else if (/^[a-z0-9_]{1,25}$/.test(login) && key === `login:${login}`) {
+                    valid.push({ key, login });
                 } else {
-                    toFetch.push(login);
+                    results.push({ key, status: 'invalid' });
                 }
             }
 
-            if (toFetch.length > 0 && this.#transport?.helix?.request) {
-                try {
-                    // Helix caps /users at 100 lookups per call; overflow would 400 the whole batch.
-                    const batch = toFetch.slice(0, HELIX_LOOKUP_BATCH);
-                    const data = await this.#transport.helix.request('/users', { query: { login: batch } });
-                    for (const user of data?.data || []) {
-                        if (user.login && user.profile_image_url) {
-                            const l = user.login.toLowerCase();
-                            avatars[l] = user.profile_image_url;
-                            while (this.#avatarCache.size >= AVATAR_CACHE_MAX) {
-                                this.#avatarCache.delete(this.#avatarCache.keys().next().value);
-                            }
-                            this.#avatarCache.set(l, user.profile_image_url);
-                        }
+            const toFetch = [];
+            for (const identity of valid) {
+                const avatarUrl = this.#avatarCache.get(identity.key);
+                if (avatarUrl) {
+                    results.push({ key: identity.key, status: 'resolved', avatarUrl });
+                } else {
+                    toFetch.push(identity);
+                }
+            }
+
+            if (toFetch.length === 0) return res.json({ results });
+            if (!this.#transport?.helix?.request) {
+                if (this.#isDevMock) {
+                    results.push(...toFetch.map(({ key }) => ({ key, status: 'unavailable' })));
+                    return res.json({ results });
+                }
+                return res.status(503).json({ error: 'AVATAR_LOOKUP_UNAVAILABLE' });
+            }
+
+            try {
+                const ids = toFetch.flatMap((identity) => identity.userId ? [identity.userId] : []);
+                const logins = toFetch.flatMap((identity) => identity.login ? [identity.login] : []);
+                const data = await this.#transport.helix.request('/users', {
+                    query: { id: ids, login: logins },
+                    useAppToken: true
+                });
+                const usersById = new Map();
+                const usersByLogin = new Map();
+                for (const user of data?.data || []) {
+                    if (user.id) usersById.set(String(user.id), user);
+                    if (user.login) usersByLogin.set(String(user.login).toLowerCase(), user);
+                }
+                const cacheAvatar = (key, avatarUrl) => {
+                    if (!key) return;
+                    while (this.#avatarCache.size >= AVATAR_CACHE_MAX) {
+                        this.#avatarCache.delete(this.#avatarCache.keys().next().value);
                     }
-                } catch (err) {
-                    console.warn('[WebServer] Failed to fetch avatars from Helix:', err.message);
-                }
-            }
+                    this.#avatarCache.set(key, avatarUrl);
+                };
 
-            res.json({ avatars });
+                for (const identity of toFetch) {
+                    const user = identity.userId
+                        ? usersById.get(identity.userId)
+                        : usersByLogin.get(identity.login);
+                    const avatarUrl = user?.profile_image_url;
+                    if (!avatarUrl) {
+                        results.push({ key: identity.key, status: 'unavailable' });
+                        continue;
+                    }
+
+                    cacheAvatar(identity.key, avatarUrl);
+                    cacheAvatar(user.id ? `id:${user.id}` : '', avatarUrl);
+                    cacheAvatar(user.login ? `login:${String(user.login).toLowerCase()}` : '', avatarUrl);
+                    results.push({
+                        key: identity.key,
+                        status: 'resolved',
+                        avatarUrl,
+                        userId: String(user.id || ''),
+                        login: String(user.login || '').toLowerCase()
+                    });
+                }
+                return res.json({ results });
+            } catch (err) {
+                console.warn('[WebServer] Failed to fetch avatars from Helix:', err.message);
+                return res.status(503).json({ error: 'AVATAR_LOOKUP_UNAVAILABLE' });
+            }
         });
 
         this.#app.get('/api/chat/:channel', async (req, res) => {
