@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { AudioLines, Play, Pause, VolumeX } from 'lucide-react';
 import type { MediaItem } from '../lib/types';
+import { AUDIO_TINT_HUES } from '../lib/audioTint';
 import { fmtSecs } from '../lib/time';
 import { claimPlayback } from '../lib/mediaBus';
 import TileCaption from './TileCaption';
 import SourceLink from './SourceLink';
 
-/* category tints — voice clips, sound effects, and music keep their own
-   flat background wash; chrome (pills, edges) stays uniform with the
-   image/video tiles */
-const KIND_HUE = { Music: '#a273ff', Voice: '#5fc9e8', SFX: '#ffb454' } as const;
-
+/* flat wash mixing — base wash for the card body, stronger mix for the
+   progress bars; chrome (pills, edges) stays uniform with image/video tiles */
 function tint(hue: string, amount: number, base = '#141518'): string {
   const h = parseInt(hue.slice(1), 16);
   const b = parseInt(base.slice(1), 16);
@@ -65,9 +63,16 @@ function usePeaks(src: string): number[] | null {
   return peaks;
 }
 
-export default function AudioCard({ item, index }: { item: MediaItem; index?: number }) {
-  const kind = item.audioKind || (item.prompt?.toLowerCase().includes('voice') ? 'Voice' : 'Music');
-  const hue = KIND_HUE[kind] || KIND_HUE.Music;
+export default function AudioCard({
+  item,
+  index,
+  tintIndex,
+}: {
+  item: MediaItem;
+  index?: number;
+  tintIndex: number;
+}) {
+  const hue = AUDIO_TINT_HUES[tintIndex];
   const src = item.src || '';
   const peaks = usePeaks(src);
 

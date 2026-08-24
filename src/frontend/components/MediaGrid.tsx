@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, CheckCircle2, Loader2 } from 'lucide-react';
 import type { MediaItem } from '../lib/types';
+import { assignAudioTints } from '../lib/audioTint';
 import MediaTile from './MediaTile';
 import AudioCard from './AudioCard';
 
@@ -85,6 +86,9 @@ export default function MediaGrid({ items, resetKey }: Props) {
   /* ---------------- virtualization math ---------------- */
   const visible = items.slice(0, Math.min(loaded, items.length));
   const cols = size.w >= 1080 ? 4 : size.w >= 620 ? 3 : 2;
+  /* tints derive from the rendered deck (filtered/searched view); appends via
+     infinite scroll preserve the prefix, so earlier tiles never recolor */
+  const tints = useMemo(() => assignAudioTints(visible, cols), [items, loaded, cols]);
   const tile = size.w > 0 ? (size.w - (cols - 1) * GAP) / cols : 0;
   const rowH = tile + GAP;
   const totalRows = Math.ceil(visible.length / cols);
@@ -123,7 +127,7 @@ export default function MediaGrid({ items, resetKey }: Props) {
             return (
               <div key={item.id} style={style}>
                 {item.type === 'audio' ? (
-                  <AudioCard item={item} index={col} />
+                  <AudioCard item={item} index={col} tintIndex={tints[idx]} />
                 ) : (
                   <MediaTile item={item} index={col} />
                 )}
