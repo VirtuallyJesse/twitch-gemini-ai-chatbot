@@ -179,7 +179,7 @@ export function renderAuthMismatchHtml({ expected, actual, retryUrl, isBroadcast
 }
 
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
-const channelKey = (channel) => `#${cleanName(channel)}`;
+export const channelKey = (channel) => `#${cleanName(channel)}`;
 const delay = (ms) => (ms > 0 ? new Promise(resolve => setTimeout(resolve, ms)) : Promise.resolve());
 
 async function readBody(response) {

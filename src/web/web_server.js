@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { renderAuthMismatchHtml } from '../twitch/twitch_transport.js';
+import { renderAuthMismatchHtml, channelKey } from '../twitch/twitch_transport.js';
 import {
     COOKIE_NAME,
     STATE_COOKIE,
@@ -631,11 +631,18 @@ export class WebServer {
     async #applyConfig(type, value) {
         if (type === 'bot_settings') {
             // Ticket-10 contract: a saved list — even empty — wins, so presence
-            // of the key (not truthiness) gates the live sync below.
+            // of the key (not truthiness) gates the live sync below. Provider
+            // traffic only happens when the effective channel set changed;
+            // unrelated saves and cosmetic reorders stay quota-frugal.
             if (Array.isArray(value?.channels) && typeof this.#transport?.syncChannels === 'function') {
-                await this.#transport.syncChannels(value.channels);
-                if (this.#emotePool?.sync && this.#transport?.channels) {
-                    await this.#emotePool.sync(this.#transport.channels, this.#transport.channelIdMap);
+                const desired = new Set(value.channels.map(channelKey).filter(k => k && k !== '#'));
+                const current = new Set((this.#transport.channels || []).map(channelKey));
+                const changed = desired.size !== current.size || [...desired].some(k => !current.has(k));
+                if (changed) {
+                    await this.#transport.syncChannels(value.channels);
+                    if (this.#emotePool?.sync && this.#transport?.channels) {
+                        await this.#emotePool.sync(this.#transport.channels, this.#transport.channelIdMap);
+                    }
                 }
             }
             if (Array.isArray(value?.ignored_usernames) && typeof this.#transport?.setIgnoredUsernames === 'function') {

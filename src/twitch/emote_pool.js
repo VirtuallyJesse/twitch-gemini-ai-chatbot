@@ -73,6 +73,9 @@ export class EmotePool {
   #bttv = null;
   #pollTimer = null;
   #disposed = false;
+  #activeSync = null;
+  #pendingSync = null;
+  #trailingSync = null;
 
   constructor(options = {}) {
     this.#storage = options.storage || null;
@@ -98,41 +101,110 @@ export class EmotePool {
 
   /* ── Lifecycle & Storage Hydration ───────────────────────── */
 
+  /**
+   * Public synchronization seam for startup, channel changes, reconnects,
+   * and dashboard saves. Bursts collapse onto the active run: later requests
+   * overwrite the desired state and join at most one trailing refresh, which
+   * is skipped entirely when it matches what was just fetched. Warm pools
+   * resolve on cached state while their REST refresh continues in flight,
+   * covered by the active-sync window so provider work never overlaps.
+   */
   async sync(channels = [], channelIdMap = {}) {
-    if (this.#disposed) return this.stats();
+    return this.#requestSync({ channels, channelIdMap }, false);
+  }
 
+  #requestSync({ channels, channelIdMap }, waitForRefresh) {
+    if (this.#disposed) return Promise.resolve(this.stats());
+
+    if (this.#activeSync) {
+      this.#pendingSync = { channels, channelIdMap };
+      this.#trailingSync ??= this.#activeSync.restDone.then(() => this.#drainTrailingSync());
+      return this.#trailingSync;
+    }
+
+    let settleSession;
+    const session = { restDone: new Promise(resolve => { settleSession = resolve; }) };
+    this.#activeSync = session;
+    const run = (async () => {
+      try {
+        const wanted = this.#normalizeWanted(channels);
+        for (const key of [...this.#channels.keys()]) {
+          if (!wanted.has(key)) this.#dropChannel(key);
+        }
+        for (const [key, label] of wanted) {
+          if (!this.#channels.has(key)) this.#channels.set(key, this.#emptyState(label));
+          else this.#channels.get(key).label = label;
+          const login = key.slice(1);
+          const id = channelIdMap?.[login] ?? channelIdMap?.[key] ?? null;
+          if (id) {
+            this.#channels.get(key).twitchId = String(id);
+            this.#twitchIdToChannel.set(String(id), key);
+          }
+        }
+
+        await this.#hydrateFromCache();
+        for (const key of this.#channels.keys()) this.#rebuild(key, { persist: false, emit: false });
+
+        this.#ensureListeners();
+        this.#resubscribe();
+        this.#ensurePoller();
+
+        // A fresh state still shows provider globals in its view, so only the
+        // awaited cold path (or an explicit trailing pass) guarantees that
+        // channel data has landed before resolving.
+        const rest = this.#refreshRest({ reason: 'sync' });
+        rest
+          .catch(e => console.error(`[Emotes] background refresh failed: ${e.message || e}`))
+          .then(() => {
+            if (this.#activeSync === session) this.#activeSync = null;
+            settleSession();
+          });
+
+        if (waitForRefresh || this.#isCold()) await rest;
+        return this.stats();
+      } catch (err) {
+        if (this.#activeSync === session) this.#activeSync = null;
+        settleSession();
+        throw err;
+      }
+    })();
+    return run;
+  }
+
+  /** Latest-wins follow-up pass after an active run settles. */
+  #drainTrailingSync() {
+    const queued = this.#pendingSync;
+    this.#pendingSync = null;
+    this.#trailingSync = null;
+    if (!queued || this.#disposed) return Promise.resolve(this.stats());
+    if (this.#matchesCurrentState(queued)) {
+      console.log('[Emotes] sync coalesced: channel state unchanged');
+      return Promise.resolve(this.stats());
+    }
+    return this.#requestSync(queued, true);
+  }
+
+  #normalizeWanted(channels) {
     const wanted = new Map();
     for (const ch of channels) {
       const key = channelKey(ch);
       if (!key) continue;
       wanted.set(key, ch);
     }
-    for (const key of [...this.#channels.keys()]) {
-      if (!wanted.has(key)) this.#dropChannel(key);
-    }
-    for (const [key, label] of wanted) {
-      if (!this.#channels.has(key)) this.#channels.set(key, this.#emptyState(label));
-      else this.#channels.get(key).label = label;
+    return wanted;
+  }
+
+  #matchesCurrentState({ channels, channelIdMap }) {
+    const wanted = this.#normalizeWanted(channels);
+    if (wanted.size !== this.#channels.size) return false;
+    for (const [key] of wanted) {
+      const state = this.#channels.get(key);
+      if (!state) return false;
       const login = key.slice(1);
       const id = channelIdMap?.[login] ?? channelIdMap?.[key] ?? null;
-      if (id) {
-        this.#channels.get(key).twitchId = String(id);
-        this.#twitchIdToChannel.set(String(id), key);
-      }
+      if ((id ? String(id) : null) !== (state.twitchId ? String(state.twitchId) : null)) return false;
     }
-
-    await this.#hydrateFromCache();
-    for (const key of this.#channels.keys()) this.#rebuild(key, { persist: false, emit: false });
-
-    this.#ensureListeners();
-    this.#resubscribe();
-    this.#ensurePoller();
-
-    const rest = this.#refreshRest({ reason: 'sync' });
-    if (this.#isCold()) await rest;
-    else rest.catch(e => console.error(`[Emotes] background refresh failed: ${e.message || e}`));
-
-    return this.stats();
+    return true;
   }
 
   dispose() {
@@ -450,6 +522,12 @@ export class EmotePool {
 
   async #refreshRest({ providers = PLATFORMS, reason = 'sync' } = {}) {
     const ids = [...new Set([...this.#channels.values()].map(s => s.twitchId).filter(Boolean))];
+    // Snapshot of what this fetch actually asked for. Response handlers must
+    // never touch channels added afterwards — their IDs were not in the request.
+    const targets = new Set(
+      [...this.#channels]
+        .filter(([key, state]) => state.twitchId && ids.includes(String(state.twitchId)))
+    );
     const opts = { timeoutMs: this.#cfg.timeoutMs };
     const startedAt = Date.now();
     const jobs = [];
@@ -468,8 +546,8 @@ export class EmotePool {
       jobs.push(this.#guard(`${provider.name} channel`, () => provider.fetchChannel(ids, opts), new Map())
         .then(map => {
           const byId = map instanceof Map ? map : new Map();
-          for (const [key, state] of this.#channels) {
-            if (!state.twitchId) continue;
+          for (const [key, state] of targets) {
+            if (this.#channels.get(key) !== state) continue;
             if (state.lastDeltaAt[p] > startedAt) continue; // Live update was newer
             const parsed = this.#readChannelFetch(byId.get(String(state.twitchId)), p);
             if (p === '7tv' && parsed.emoteSetId) {
