@@ -33,8 +33,33 @@ function chatMigrationKey(channel) {
     return `chat:v2:${normalizeChannel(channel)}:migrated`;
 }
 
+// TODO(after 2026-12): Delete the v1 repair branch below. It is intentional
+// migration dead weight only until deployed channels have advanced to v2.
 const MIGRATE_CHAT_LUA = `
-if redis.call('GET', KEYS[1]) then return {'READY'} end
+local migrationVersion = redis.call('GET', KEYS[1])
+if migrationVersion == '2' then return {'READY'} end
+
+if migrationVersion then
+  local indexed = redis.call('ZRANGE', KEYS[3], 0, -1, 'WITHSCORES')
+  local repaired = 0
+  for index = 1, #indexed, 2 do
+    local raw = indexed[index]
+    local score = tonumber(indexed[index + 1])
+    local ok, entry = pcall(cjson.decode, raw)
+    if not ok or type(entry) ~= 'table' or not score then
+      return {'ERROR', 'INVALID_CHAT_ENTRY'}
+    end
+    if type(entry.order) ~= 'number' or entry.order ~= score then
+      entry.order = score
+      redis.call('ZREM', KEYS[3], raw)
+      redis.call('ZADD', KEYS[3], score, cjson.encode(entry))
+      repaired = repaired + 1
+    end
+  end
+  redis.call('SET', KEYS[1], '2')
+  return {'REPAIRED', tostring(repaired)}
+end
+
 local rows = redis.call('LRANGE', KEYS[2], 0, -1)
 local last = 0
 local upgraded = {}
@@ -46,6 +71,7 @@ for _, raw in ipairs(rows) do
   local requested = tonumber(entry.order) or 0
   if requested <= last then requested = last + 1 end
   last = requested
+  entry.order = last
   if type(entry.id) ~= 'string' or entry.id == '' then
     entry.id = ARGV[1] .. ':' .. tostring(last)
   end
@@ -56,7 +82,7 @@ for _, item in ipairs(upgraded) do
 end
 redis.call('ZREMRANGEBYRANK', KEYS[3], 0, -tonumber(ARGV[2]) - 1)
 redis.call('SET', KEYS[4], last)
-redis.call('SET', KEYS[1], '1')
+redis.call('SET', KEYS[1], '2')
 redis.call('DEL', KEYS[2])
 return {'MIGRATED', tostring(last)}
 `;
