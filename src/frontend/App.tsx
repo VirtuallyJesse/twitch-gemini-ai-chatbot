@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MessageSquareText, LayoutGrid } from 'lucide-react';
 import type {
   BotStatus,
@@ -13,6 +13,7 @@ import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
 import { clockHM, timeAgo } from './lib/time';
 import { channelLabel, normChannel } from './lib/channel';
+import { missingAvatarLogins, mergeAvatars } from './lib/avatars';
 import Sidebar from './components/Sidebar';
 import GalleryToolbar, { type Filter } from './components/GalleryToolbar';
 import MediaGrid from './components/MediaGrid';
@@ -236,6 +237,33 @@ export default function App() {
       window.removeEventListener('message', handleWindowMessage);
     };
   }, []);
+
+  // Gallery avatar hydration: batched Helix lookup, once per login per session
+  const avatarCacheRef = useRef<Record<string, string>>({});
+  const avatarInflightRef = useRef<Set<string>>(new Set());
+  const avatarSettledRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = missingAvatarLogins(mediaList, avatarCacheRef.current).filter(
+      (login) => !avatarSettledRef.current.has(login) && !avatarInflightRef.current.has(login)
+    );
+    if (pending.length === 0) return;
+
+    for (const login of pending) avatarInflightRef.current.add(login);
+    api.getAvatars(pending)
+      .then((avatars) => {
+        Object.assign(avatarCacheRef.current, avatars);
+        if (Object.keys(avatars).length > 0) {
+          setMediaList((prev) => mergeAvatars(prev, avatars));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        for (const login of pending) {
+          avatarInflightRef.current.delete(login);
+          avatarSettledRef.current.add(login);
+        }
+      });
+  }, [mediaList]);
 
   // When active channel changes, fetch its logs and emotes if not loaded
   const handleSelectChannel = (chan: string) => {
