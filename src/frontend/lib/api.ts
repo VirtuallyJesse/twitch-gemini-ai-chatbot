@@ -4,7 +4,7 @@ import type {
   ChannelBadgeCatalog,
   ConfigDomain,
   PollinationsCatalog,
-  RawChatEntry,
+  RawChatHistoryPage,
   RawMediaEntry,
   ViewerInfo,
 } from './types';
@@ -53,8 +53,9 @@ class ApiClient {
     return this.request<Record<string, { authorized?: boolean }>>('/api/channel-status');
   }
 
-  async getChatLog(channel: string): Promise<RawChatEntry[]> {
-    return this.request<RawChatEntry[]>(`/api/chat/${normChannel(channel)}`);
+  async getChatPage(channel: string, cursor: string | null = null): Promise<RawChatHistoryPage> {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request<RawChatHistoryPage>(`/api/chat/${normChannel(channel)}${query}`);
   }
 
   async getMedia(): Promise<RawMediaEntry[]> {

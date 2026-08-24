@@ -27,6 +27,7 @@ export function createAlertPreviewMessage({
     entry: {
       kind: 'msg',
       id: `preview-msg-${alertKey}`,
+      order: 1,
       user: botUsername,
       text,
       time: '18:04',

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Hash,
   ArrowDown,
@@ -24,6 +24,8 @@ import { normChannel, channelLabel } from '../lib/channel';
 import { stringToColor } from '../lib/color';
 import { ChatBadge } from './Badges';
 import Emote from './Emote';
+import type { ChatChannelHistory } from '../lib/chatHistory';
+import { captureChatAnchor, restoreChatAnchor, type ChatScrollAnchor } from '../lib/chatScroll';
 
 /* ------------------------------ tokens ------------------------------ */
 
@@ -234,6 +236,8 @@ interface Props {
   onSelectChannel: (c: string) => void;
   channelStatuses: Record<string, { authorized?: boolean }>;
   logs: Record<string, LogEntry[]>;
+  histories: Record<string, ChatChannelHistory>;
+  onLoadOlder: (channel: string) => void;
   botUsername?: string;
   botAuthorized?: boolean;
   onOpenSettings?: () => void;
@@ -245,6 +249,8 @@ export default function ChatPanel({
   onSelectChannel,
   channelStatuses,
   logs,
+  histories,
+  onLoadOlder,
   botUsername,
   botAuthorized = true,
   onOpenSettings,
@@ -252,28 +258,65 @@ export default function ChatPanel({
   const [atBottom, setAtBottom] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevChannelRef = useRef(activeChannel);
+  const pendingPrependRef = useRef<{
+    channel: string;
+    entryCount: number;
+    anchor: ChatScrollAnchor;
+  } | null>(null);
   const highlightBots = useBotHighlight();
 
   const activeNorm = normChannel(activeChannel);
   const isLinked = channelStatuses[activeNorm]?.authorized ?? channelStatuses[`#${activeNorm}`]?.authorized ?? false;
   const entries: LogEntry[] = logs[activeNorm] || logs[`#${activeNorm}`] || [];
+  const history = histories[activeNorm];
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const channelChanged = prevChannelRef.current !== activeChannel;
     prevChannelRef.current = activeChannel;
+    const pending = pendingPrependRef.current;
 
-    if (channelChanged || atBottom) {
+    if (channelChanged) {
+      pendingPrependRef.current = null;
       el.scrollTop = el.scrollHeight;
       setAtBottom(true);
+      return;
     }
-  }, [activeChannel, entries.length, atBottom]);
+    if (pending?.channel === activeNorm && entries.length > pending.entryCount) {
+      restoreChatAnchor(el, pending.anchor);
+      pendingPrependRef.current = null;
+      setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
+      return;
+    }
+    if (!pending && atBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [activeChannel, activeNorm, entries.length, atBottom]);
+
+  useEffect(() => {
+    const pending = pendingPrependRef.current;
+    if (pending?.channel === activeNorm && history?.loading === null && entries.length <= pending.entryCount) {
+      pendingPrependRef.current = null;
+    }
+  }, [activeNorm, entries.length, history?.loading]);
+
+  const loadOlder = () => {
+    const el = scrollRef.current;
+    if (!el || !history?.hydrated || !history.hasMore || history.loading || pendingPrependRef.current) return;
+    pendingPrependRef.current = {
+      channel: activeNorm,
+      entryCount: entries.length,
+      anchor: captureChatAnchor(el),
+    };
+    onLoadOlder(activeNorm);
+  };
 
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
+    if (el.scrollTop < 80) loadOlder();
   };
 
   const jumpToLatest = () => {
@@ -355,8 +398,36 @@ export default function ChatPanel({
       {/* log */}
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full overflow-x-hidden overflow-y-auto px-2.5 py-2">
+          {history?.loading === 'older' && (
+            <div className="sticky top-1 z-10 flex h-0 justify-center" role="status">
+              <span className="flex items-center gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1 text-[10.5px] text-faint shadow-md">
+                <Loader2 size={11} className="animate-spin" />
+                Loading older messages…
+              </span>
+            </div>
+          )}
+          {history?.error && history.hydrated && (
+            <div className="sticky top-1 z-10 flex h-0 justify-center">
+              <span className="flex items-center gap-2 rounded-full border border-rose-400/30 bg-raised px-2.5 py-1 text-[10.5px] text-rose-300 shadow-md">
+                History couldn’t load.
+                <button onClick={loadOlder} className="cursor-pointer font-semibold text-accent hover:underline">
+                  Retry
+                </button>
+              </span>
+            </div>
+          )}
+          {history?.hydrated && !history.hasMore && entries.length > 0 && (
+            <div className="py-2 text-center font-mono text-[9.5px] uppercase tracking-[0.12em] text-faint">
+              Beginning of retained history
+            </div>
+          )}
           {channels.length === 0 ? (
             <NoChannels onOpenSettings={onOpenSettings} />
+          ) : history?.loading === 'hydrate' && entries.length === 0 ? (
+            <div className="flex items-center justify-center gap-2 px-6 py-14 text-[12px] text-muted" role="status">
+              <Loader2 size={14} className="animate-spin" />
+              Loading chat…
+            </div>
           ) : entries.length === 0 ? (
             <div className="flex flex-col items-center gap-2.5 px-6 py-14 text-center">
               <Ghost size={22} className="text-faint" />

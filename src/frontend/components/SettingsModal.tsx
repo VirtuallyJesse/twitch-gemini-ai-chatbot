@@ -1445,6 +1445,7 @@ export default function SettingsModal({
                                   entry={{
                                     kind: 'event',
                                     id: `preview-event-${selectedAlertKey}`,
+                                    order: 1,
                                     event: sample.event,
                                     text: sample.eventText,
                                     time: '18:03',

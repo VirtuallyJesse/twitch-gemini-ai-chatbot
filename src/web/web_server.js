@@ -23,6 +23,7 @@ import {
     clearCookieHeader
 } from './session.js';
 import { CONFIG_TYPES, collectExactTriggers } from '../utils/bot_config.js';
+import { MAX_CHAT_PAGE_SIZE } from '../utils/storage.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PUBLIC_DIR = path.resolve(moduleDir, '../../public');
@@ -95,6 +96,7 @@ export class WebServer {
     #badgesUnsub = null;
     #prevOnMediaSaved = undefined;
     #avatarCache = new Map();
+    #liveChatOrders = new Map();
 
     constructor(options = {}) {
         const {
@@ -353,8 +355,19 @@ export class WebServer {
         if (this.#transport?.onLogEntry) {
             const unsub = this.#transport.onLogEntry((channel, entry) => {
                 if (!this.#live) return;
-                this.broadcast({ type: 'chat', channel, entry });
-                this.#storage.addChatMessage(channel, entry).catch((err) => {
+                const normalized = String(channel || '').replace(/^#/, '').toLowerCase();
+                const previous = this.#liveChatOrders.get(normalized) || 0;
+                const requested = Number.isSafeInteger(entry?.order) && entry.order > previous
+                    ? entry.order
+                    : Math.max(previous + 1, Date.now() * 1000);
+                this.#liveChatOrders.set(normalized, requested);
+                const liveEntry = {
+                    ...entry,
+                    id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+                    order: requested
+                };
+                this.broadcast({ type: 'chat', channel, entry: liveEntry });
+                this.#storage.addChatMessage(channel, liveEntry).catch((err) => {
                     console.error('Failed to save chat to storage:', err.message);
                 });
             });
@@ -1203,9 +1216,37 @@ export class WebServer {
         this.#app.get('/api/chat/:channel', async (req, res) => {
             let channel = req.params.channel;
             if (!channel.startsWith('#')) channel = '#' + channel;
+            const rawLimit = req.query.limit;
+            const rawCursor = req.query.cursor;
+            if (
+                (rawLimit !== undefined && (typeof rawLimit !== 'string' || !/^\d+$/.test(rawLimit))) ||
+                (rawCursor !== undefined && (typeof rawCursor !== 'string' || rawCursor.length === 0))
+            ) {
+                return res.status(400).json({ error: 'INVALID_PAGINATION' });
+            }
+            const requestedLimit = rawLimit === undefined ? 200 : Number(rawLimit);
+            if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
+                return res.status(400).json({ error: 'INVALID_PAGINATION' });
+            }
 
-            const buffer = await this.#storage.getChatLog(channel);
-            res.json(buffer);
+            const page = await this.#storage.getChatLogPage(channel, {
+                limit: Math.min(requestedLimit, MAX_CHAT_PAGE_SIZE),
+                cursor: rawCursor || null
+            });
+            if (!page?.ok) {
+                if (page?.error === 'INVALID_CURSOR' || page?.error === 'INVALID_LIMIT') {
+                    return res.status(400).json({ error: page.error });
+                }
+                if (page?.error === 'STALE_CURSOR') {
+                    return res.status(409).json({ error: page.error });
+                }
+                return res.status(503).json({ error: 'CHAT_HISTORY_UNAVAILABLE' });
+            }
+            return res.json({
+                entries: page.entries,
+                nextCursor: page.nextCursor,
+                hasMore: page.hasMore
+            });
         });
 
         this.#app.get('/api/media', async (_req, res) => {

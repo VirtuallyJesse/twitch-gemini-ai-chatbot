@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageSquareText, LayoutGrid } from 'lucide-react';
 import type {
   BadgeDictionaries,
@@ -18,6 +18,18 @@ import { timeAgo } from './lib/time';
 import { normChannel } from './lib/channel';
 import { createGalleryAvatarHydrator } from './lib/avatars';
 import { formatRawChatEntry } from './lib/chatLogs';
+import {
+  appendLiveChatEntry,
+  beginChatHydration,
+  beginOlderChatPage,
+  chatLogs,
+  createChatHistoryModel,
+  failChatPage,
+  resolveChatPage,
+  restartChatHydration,
+  syncChatChannels,
+  type ChatRequestMode,
+} from './lib/chatHistory';
 import { normalizeMediaEntry } from './lib/media';
 import Sidebar from './components/Sidebar';
 import GalleryToolbar, { type Filter } from './components/GalleryToolbar';
@@ -51,13 +63,53 @@ export default function App() {
   const [channels, setChannels] = useState<string[]>([]);
   const [activeChannel, setActiveChannel] = useState<string>('');
   const [channelStatuses, setChannelStatuses] = useState<Record<string, { authorized?: boolean }>>({});
-  const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
+  const [chatHistory, setChatHistory] = useState(createChatHistoryModel);
+  const chatHistoryRef = useRef(chatHistory);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [avatarHydrator] = useState(() => createGalleryAvatarHydrator({
     lookup: (identities, signal) => api.getAvatars(identities, signal),
     commit: setMediaList,
   }));
+
+  const commitChatHistory = useCallback((next: typeof chatHistory) => {
+    chatHistoryRef.current = next;
+    setChatHistory(next);
+  }, []);
+
+  const syncConfiguredChannels = useCallback((nextChannels: readonly string[]) => {
+    commitChatHistory(syncChatChannels(chatHistoryRef.current, nextChannels));
+  }, [commitChatHistory]);
+
+  const requestChatPage = useCallback(async (channelValue: string, mode: ChatRequestMode) => {
+    const channel = normChannel(channelValue);
+    const started = mode === 'hydrate'
+      ? beginChatHydration(chatHistoryRef.current, channel)
+      : beginOlderChatPage(chatHistoryRef.current, channel);
+    if (!started.request) return;
+    commitChatHistory(started.model);
+    try {
+      const rawPage = await api.getChatPage(channel, started.request.cursor);
+      const entries = rawPage.entries
+        .map((entry) => formatRawChatEntry(entry))
+        .filter((entry): entry is LogEntry => entry !== null);
+      commitChatHistory(resolveChatPage(chatHistoryRef.current, started.request, {
+        entries,
+        nextCursor: rawPage.nextCursor,
+        hasMore: rawPage.hasMore,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'CHAT_HISTORY_UNAVAILABLE';
+      if (message === 'STALE_CURSOR' || message === 'INVALID_CURSOR') {
+        commitChatHistory(restartChatHydration(chatHistoryRef.current, channel));
+        queueMicrotask(() => void requestChatPage(channel, 'hydrate'));
+        return;
+      }
+      commitChatHistory(failChatPage(chatHistoryRef.current, started.request, message));
+    }
+  }, [commitChatHistory]);
+
+  const logs = useMemo(() => chatLogs(chatHistory), [chatHistory]);
 
   // Dynamic document title based on bot account
   useEffect(() => {
@@ -72,6 +124,15 @@ export default function App() {
 
   // Initial Data Hydration
   useEffect(() => {
+    let configuredChannelsReady = false;
+    const pendingChatEvents: Array<{ channel: string; entry: RawChatEntry }> = [];
+    const acceptLiveChat = (data: { channel: string; entry: RawChatEntry }) => {
+      const chan = normChannel(data.channel);
+      const entry = formatRawChatEntry(data.entry);
+      if (!entry) return;
+      commitChatHistory(appendLiveChatEntry(chatHistoryRef.current, chan, entry));
+    };
+
     // Connect WebSocket
     wsClient.connect();
     const unsubStatus = wsClient.onStatus((s) => setWsConnected(s === 'connected'));
@@ -89,17 +150,12 @@ export default function App() {
 
       if (cRes.status === 'fulfilled') {
         const chanList = cRes.value.map(normChannel);
+        syncConfiguredChannels(chanList);
         setChannels(chanList);
         const first = chanList[0] || '';
         setActiveChannel(first);
 
         if (first) {
-          // Fetch first channel's chat log & emotes
-          api.getChatLog(first).then((entries) => {
-            const formatted: LogEntry[] = (entries || []).map((e, idx) => formatRawChatEntry(e, idx));
-            setLogs((prev) => ({ ...prev, [first]: formatted }));
-          });
-
           api.getEmotes(first).then((emotes) => {
             if (emotes) registerChannelEmotes(first, emotes);
           });
@@ -107,6 +163,8 @@ export default function App() {
 
         void hydrateBadgeCatalogs(chanList, (channel) => api.getBadges(channel));
       }
+      configuredChannelsReady = true;
+      for (const pending of pendingChatEvents.splice(0)) acceptLiveChat(pending);
 
       if (csRes.status === 'fulfilled') setChannelStatuses(csRes.value);
 
@@ -119,13 +177,12 @@ export default function App() {
     // Real-time WebSocket Listeners
     const unsubChat = wsClient.on<{ channel: string; entry: RawChatEntry }>('chat', (data) => {
       if (!data?.channel || !data?.entry) return;
-      const chan = normChannel(data.channel);
-      const entry = formatRawChatEntry(data.entry, Date.now());
-
-      setLogs((prev) => ({
-        ...prev,
-        [chan]: [...(prev[chan] || []), entry],
-      }));
+      if (!configuredChannelsReady) {
+        pendingChatEvents.push(data);
+        if (pendingChatEvents.length > 200) pendingChatEvents.shift();
+        return;
+      }
+      acceptLiveChat(data);
     });
 
     const unsubMedia = wsClient.on<{ entry: RawMediaEntry }>('media', (data) => {
@@ -168,6 +225,7 @@ export default function App() {
           ([cRes, csRes, sRes]) => {
             if (cRes.status === 'fulfilled' && Array.isArray(cRes.value)) {
               const chanList = cRes.value.map(normChannel);
+              syncConfiguredChannels(chanList);
               setChannels(chanList);
               setActiveChannel((prev) => (chanList.includes(prev) ? prev : chanList[0] || ''));
               void hydrateBadgeCatalogs(chanList, (channel) => api.getBadges(channel));
@@ -210,21 +268,23 @@ export default function App() {
       unsubConfig();
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, []);
+  }, [commitChatHistory, syncConfiguredChannels]);
+
+  useEffect(() => {
+    if (activeChannel && channels.includes(activeChannel)) {
+      void requestChatPage(activeChannel, 'hydrate');
+    }
+  }, [activeChannel, channels, requestChatPage]);
 
   const hydrateExposedMedia = useCallback((exposed: readonly MediaItem[]) => {
     void avatarHydrator.hydrate(exposed);
   }, [avatarHydrator]);
 
-  // When active channel changes, fetch its logs and emotes if not loaded
+  // Channel history hydrates in the effect above; presentation metadata can load independently.
   const handleSelectChannel = (chan: string) => {
     const norm = normChannel(chan);
     setActiveChannel(norm);
-    if (!logs[norm]) {
-      api.getChatLog(norm).then((entries) => {
-        const formatted: LogEntry[] = (entries || []).map((e, idx) => formatRawChatEntry(e, idx));
-        setLogs((prev) => ({ ...prev, [norm]: formatted }));
-      });
+    if (!chatHistoryRef.current.channels[norm]?.hydrated) {
       api.getEmotes(norm).then((emotes) => {
         if (emotes) registerChannelEmotes(norm, emotes);
       });
@@ -280,6 +340,8 @@ export default function App() {
           onSelectChannel={handleSelectChannel}
           channelStatuses={channelStatuses}
           logs={logs}
+          histories={chatHistory.channels}
+          onLoadOlder={(channel) => void requestChatPage(channel, 'older')}
           viewer={viewer}
           onOpenSettings={() => setSettingsOpen(true)}
           onLogout={handleLogout}
@@ -338,6 +400,7 @@ export default function App() {
         channelStatuses={channelStatuses}
         onChannelsChange={(newChans) => {
           const cleaned = newChans.map(normChannel);
+          syncConfiguredChannels(cleaned);
           setChannels(cleaned);
           setActiveChannel((prev) => (cleaned.includes(prev) ? prev : cleaned[0] || ''));
           api.getChannelStatuses().then((cs) => cs && setChannelStatuses(cs));

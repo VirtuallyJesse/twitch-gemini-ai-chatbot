@@ -4,9 +4,12 @@
 // and MemoryStorageAdapter (full-fidelity in-memory store).
 // All configuration crosses the constructor; this module reads zero process.env variables.
 
+import crypto from 'crypto';
+
 const DEFAULT_MAX_CHAT_ENTRIES = 10000;
 const DEFAULT_MAX_MEDIA_ENTRIES = 10000;
 const DEFAULT_CHAT_READ_LIMIT = 200;
+export const MAX_CHAT_PAGE_SIZE = 500;
 const TOKENS_KEY = 'twitch:tokens';
 const MEDIA_KEY = 'media_log';
 
@@ -16,6 +19,118 @@ function normalizeChannel(channel) {
 
 function chatKey(channel) {
     return `chat:${normalizeChannel(channel)}`;
+}
+
+function chatEntriesKey(channel) {
+    return `chat:v2:${normalizeChannel(channel)}:entries`;
+}
+
+function chatOrderKey(channel) {
+    return `chat:v2:${normalizeChannel(channel)}:order`;
+}
+
+function chatMigrationKey(channel) {
+    return `chat:v2:${normalizeChannel(channel)}:migrated`;
+}
+
+const MIGRATE_CHAT_LUA = `
+if redis.call('GET', KEYS[1]) then return {'READY'} end
+local rows = redis.call('LRANGE', KEYS[2], 0, -1)
+local last = 0
+local upgraded = {}
+for _, raw in ipairs(rows) do
+  local ok, entry = pcall(cjson.decode, raw)
+  if not ok or type(entry) ~= 'table' then
+    return {'ERROR', 'INVALID_CHAT_ENTRY'}
+  end
+  local requested = tonumber(entry.order) or 0
+  if requested <= last then requested = last + 1 end
+  last = requested
+  if type(entry.id) ~= 'string' or entry.id == '' then
+    entry.id = ARGV[1] .. ':' .. tostring(last)
+  end
+  table.insert(upgraded, {last, cjson.encode(entry)})
+end
+for _, item in ipairs(upgraded) do
+  redis.call('ZADD', KEYS[3], item[1], item[2])
+end
+redis.call('ZREMRANGEBYRANK', KEYS[3], 0, -tonumber(ARGV[2]) - 1)
+redis.call('SET', KEYS[4], last)
+redis.call('SET', KEYS[1], '1')
+redis.call('DEL', KEYS[2])
+return {'MIGRATED', tostring(last)}
+`;
+
+const ADD_CHAT_LUA = `
+local entry = cjson.decode(ARGV[1])
+local last = tonumber(redis.call('GET', KEYS[2])) or 0
+local requested = tonumber(entry.order) or 0
+if requested <= last then requested = last + 1 end
+entry.order = requested
+local encoded = cjson.encode(entry)
+redis.call('ZADD', KEYS[1], requested, encoded)
+redis.call('SET', KEYS[2], requested)
+redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -tonumber(ARGV[2]) - 1)
+return encoded
+`;
+
+function nextEntryOrder(list, now = Date.now()) {
+    const previous = Number(list.at(-1)?.order) || 0;
+    return Math.max(previous + 1, now * 1000);
+}
+
+function withChatMetadata(entry, fallbackOrder, minimumOrder = 0) {
+    const requested = Number.isSafeInteger(entry?.order) && entry.order > 0
+        ? entry.order
+        : fallbackOrder;
+    return {
+        ...entry,
+        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+        order: requested > minimumOrder ? requested : Math.max(fallbackOrder, minimumOrder + 1)
+    };
+}
+
+function timestampOrder(timestamp) {
+    const numeric = Number(timestamp);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric * 1000;
+    const parsed = Date.parse(String(timestamp || ''));
+    return Number.isFinite(parsed) ? parsed * 1000 : 1;
+}
+
+function createCursorCodec(secret) {
+    if (typeof secret !== 'string' || !secret.trim()) {
+        throw new TypeError('cursorSecret is required');
+    }
+    const key = secret;
+    return {
+        encode(payload) {
+            const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+            const signature = crypto.createHmac('sha256', key).update(body).digest('base64url');
+            return `${body}.${signature}`;
+        },
+        decode(cursor) {
+            if (typeof cursor !== 'string') return null;
+            const [body, signature, extra] = cursor.split('.');
+            if (!body || !signature || extra) return null;
+            const expected = crypto.createHmac('sha256', key).update(body).digest();
+            let actual;
+            try {
+                actual = Buffer.from(signature, 'base64url');
+            } catch {
+                return null;
+            }
+            if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
+            try {
+                return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+            } catch {
+                return null;
+            }
+        }
+    };
+}
+
+function validatePageLimit(limit) {
+    return Number.isInteger(limit) && limit > 0 && limit <= MAX_CHAT_PAGE_SIZE;
 }
 
 function broadcasterKey(channel) {
@@ -79,11 +194,14 @@ function resolveRedisConnection({ redisUrl, restUrl, restToken } = {}) {
 export class MemoryStorageAdapter {
     constructor({
         maxChatEntries = DEFAULT_MAX_CHAT_ENTRIES,
-        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES
+        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES,
+        cursorSecret
     } = {}) {
         this.maxChatEntries = maxChatEntries;
         this.maxMediaEntries = maxMediaEntries;
         this.chat = new Map();
+        this.migratedChat = new Set();
+        this.cursorCodec = createCursorCodec(cursorSecret);
         this.media = [];
         this.tokens = null;
         this.kv = new Map();
@@ -138,17 +256,72 @@ export class MemoryStorageAdapter {
         try {
             const key = normalizeChannel(channel);
             const list = this.chat.get(key) || [];
-            list.push(entry);
+            const previous = Number(list.at(-1)?.order) || 0;
+            const stored = withChatMetadata(entry, nextEntryOrder(list), previous);
+            list.push(stored);
             if (list.length > this.maxChatEntries) list.shift();
             this.chat.set(key, list);
+            this.migratedChat.add(key);
+            return stored;
         } catch (error) {
             console.error('[Storage] Memory write failed:', error.message);
+            return null;
+        }
+    }
+
+    #upgradeChat(channel) {
+        if (this.migratedChat.has(channel)) return this.chat.get(channel) || [];
+        const source = this.chat.get(channel) || [];
+        let lastOrder = 0;
+        const upgraded = source.map((entry) => {
+            const fallback = Math.max(lastOrder + 1, timestampOrder(entry?.timestamp));
+            const stored = withChatMetadata(entry, fallback, lastOrder);
+            lastOrder = stored.order;
+            return stored;
+        });
+        this.chat.set(channel, upgraded);
+        this.migratedChat.add(channel);
+        return upgraded;
+    }
+
+    async getChatLogPage(channel, { limit = DEFAULT_CHAT_READ_LIMIT, cursor = null } = {}) {
+        try {
+            if (!validatePageLimit(limit)) return { ok: false, error: 'INVALID_LIMIT' };
+            const key = normalizeChannel(channel);
+            const list = this.#upgradeChat(key);
+            let before = Number.POSITIVE_INFINITY;
+            let floor = Number(list[0]?.order) || null;
+
+            if (cursor != null) {
+                const decoded = this.cursorCodec.decode(cursor);
+                if (
+                    !decoded || decoded.v !== 1 || decoded.channel !== key ||
+                    !Number.isSafeInteger(decoded.before) || !Number.isSafeInteger(decoded.floor)
+                ) {
+                    return { ok: false, error: 'INVALID_CURSOR' };
+                }
+                if (floor == null) return { ok: false, error: 'STALE_CURSOR' };
+                if (floor != null && floor > decoded.floor) return { ok: false, error: 'STALE_CURSOR' };
+                before = decoded.before;
+                floor = decoded.floor;
+            }
+
+            const eligible = list.filter((entry) => entry.order < before);
+            const entries = eligible.slice(-limit);
+            const hasMore = eligible.length > entries.length;
+            const nextCursor = hasMore
+                ? this.cursorCodec.encode({ v: 1, channel: key, before: entries[0].order, floor })
+                : null;
+            return { ok: true, entries, nextCursor, hasMore };
+        } catch (error) {
+            console.error('[Storage] Memory read failed:', error.message);
+            return { ok: false, error: 'HISTORY_UNAVAILABLE' };
         }
     }
 
     async getChatLog(channel, limit = DEFAULT_CHAT_READ_LIMIT) {
         try {
-            const list = this.chat.get(normalizeChannel(channel)) || [];
+            const list = this.#upgradeChat(normalizeChannel(channel));
             return list.slice(-limit);
         } catch (error) {
             console.error('[Storage] Memory read failed:', error.message);
@@ -224,7 +397,8 @@ export class UpstashRedisAdapter {
         restToken,
         fetchImpl,
         maxChatEntries = DEFAULT_MAX_CHAT_ENTRIES,
-        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES
+        maxMediaEntries = DEFAULT_MAX_MEDIA_ENTRIES,
+        cursorSecret
     } = {}) {
         const connection = resolveRedisConnection({ redisUrl, restUrl, restToken });
         this.restUrl = connection?.restUrl || restUrl || null;
@@ -232,6 +406,8 @@ export class UpstashRedisAdapter {
         this.fetchImpl = fetchImpl || globalThis.fetch;
         this.maxChatEntries = maxChatEntries;
         this.maxMediaEntries = maxMediaEntries;
+        this.cursorCodec = createCursorCodec(cursorSecret);
+        this.migratedChat = new Set();
         this.configured = true;
         this.isPersistent = true;
     }
@@ -260,24 +436,97 @@ export class UpstashRedisAdapter {
 
     async addChatMessage(channel, entry) {
         try {
-            const key = chatKey(channel);
-            await this.request('/pipeline', [
-                ['RPUSH', key, JSON.stringify(entry)],
-                ['LTRIM', key, -this.maxChatEntries, -1]
+            const normalized = normalizeChannel(channel);
+            if (!await this.#ensureChatMigrated(normalized)) return null;
+            const candidate = withChatMetadata(entry, Date.now() * 1000);
+            const data = await this.request('/', [
+                'EVAL', ADD_CHAT_LUA, 2,
+                chatEntriesKey(normalized), chatOrderKey(normalized),
+                JSON.stringify(candidate), this.maxChatEntries
             ]);
+            return safeJsonParse(data?.result);
         } catch (error) {
             console.error('[Storage] API Error:', error.message);
+            return null;
+        }
+    }
+
+    async #ensureChatMigrated(channel) {
+        if (this.migratedChat.has(channel)) return true;
+        const data = await this.request('/', [
+            'EVAL', MIGRATE_CHAT_LUA, 4,
+            chatMigrationKey(channel), chatKey(channel), chatEntriesKey(channel), chatOrderKey(channel),
+            `legacy:${channel}`, this.maxChatEntries
+        ]);
+        if (!data || !Array.isArray(data.result) || data.result[0] === 'ERROR') return false;
+        this.migratedChat.add(channel);
+        return true;
+    }
+
+    async getChatLogPage(channel, { limit = DEFAULT_CHAT_READ_LIMIT, cursor = null } = {}) {
+        try {
+            if (!validatePageLimit(limit)) return { ok: false, error: 'INVALID_LIMIT' };
+            const normalized = normalizeChannel(channel);
+            if (!await this.#ensureChatMigrated(normalized)) {
+                return { ok: false, error: 'HISTORY_UNAVAILABLE' };
+            }
+
+            let decoded = null;
+            if (cursor != null) {
+                decoded = this.cursorCodec.decode(cursor);
+                if (
+                    !decoded || decoded.v !== 1 || decoded.channel !== normalized ||
+                    !Number.isSafeInteger(decoded.before) || !Number.isSafeInteger(decoded.floor)
+                ) {
+                    return { ok: false, error: 'INVALID_CURSOR' };
+                }
+            }
+
+            const pageCommand = decoded
+                ? ['ZREVRANGEBYSCORE', chatEntriesKey(normalized), `(${decoded.before}`, '-inf', 'LIMIT', 0, limit]
+                : ['ZRANGE', chatEntriesKey(normalized), -limit, -1];
+            const data = await this.request('/pipeline', [
+                pageCommand,
+                ['ZRANGE', chatEntriesKey(normalized), 0, 0]
+            ]);
+            if (!Array.isArray(data)) return { ok: false, error: 'HISTORY_UNAVAILABLE' };
+
+            const pageResult = data[0]?.result;
+            const oldestResult = data[1]?.result;
+            if (!Array.isArray(pageResult) || !Array.isArray(oldestResult)) {
+                return { ok: false, error: 'HISTORY_UNAVAILABLE' };
+            }
+            const entries = parseStoredList(pageResult);
+            const oldestEntries = parseStoredList(oldestResult);
+            if (entries.length !== pageResult.length || oldestEntries.length !== oldestResult.length) {
+                return { ok: false, error: 'HISTORY_UNAVAILABLE' };
+            }
+            if (decoded) entries.reverse();
+            const currentFloor = Number(oldestEntries[0]?.order) || null;
+            if (decoded && currentFloor == null) return { ok: false, error: 'STALE_CURSOR' };
+            if (decoded && currentFloor != null && currentFloor > decoded.floor) {
+                return { ok: false, error: 'STALE_CURSOR' };
+            }
+            const floor = decoded?.floor ?? currentFloor;
+            const hasMore = entries.length > 0 && floor != null && entries[0].order > floor;
+            const nextCursor = hasMore
+                ? this.cursorCodec.encode({
+                    v: 1,
+                    channel: normalized,
+                    before: entries[0].order,
+                    floor
+                })
+                : null;
+            return { ok: true, entries, nextCursor, hasMore };
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return { ok: false, error: 'HISTORY_UNAVAILABLE' };
         }
     }
 
     async getChatLog(channel, limit = DEFAULT_CHAT_READ_LIMIT) {
-        try {
-            const data = await this.request('/', ['LRANGE', chatKey(channel), -limit, -1]);
-            return parseStoredList(data?.result);
-        } catch (error) {
-            console.error('[Storage] API Error:', error.message);
-            return [];
-        }
+        const page = await this.getChatLogPage(channel, { limit: Math.min(limit, MAX_CHAT_PAGE_SIZE) });
+        return page.ok ? page.entries : [];
     }
 
     async addMediaEntry(entry) {
@@ -401,7 +650,8 @@ export class Storage {
         const shared = {
             fetchImpl: config.fetchImpl,
             maxChatEntries: config.maxChatEntries,
-            maxMediaEntries: config.maxMediaEntries
+            maxMediaEntries: config.maxMediaEntries,
+            cursorSecret: config.cursorSecret
         };
 
         if (connection) {
@@ -427,6 +677,10 @@ export class Storage {
 
     getChatLog(channel, limit) {
         return this.adapter.getChatLog(channel, limit);
+    }
+
+    getChatLogPage(channel, options) {
+        return this.adapter.getChatLogPage(channel, options);
     }
 
     addMediaEntry(entry) {

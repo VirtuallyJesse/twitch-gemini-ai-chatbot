@@ -2,6 +2,7 @@ import { Bot, Settings2, LogIn, LogOut } from 'lucide-react';
 import type { LogEntry, ViewerInfo } from '../lib/types';
 import ChatPanel from './ChatPanel';
 import Avatar from './Avatar';
+import type { ChatChannelHistory } from '../lib/chatHistory';
 
 interface Props {
   botUsername?: string;
@@ -13,6 +14,8 @@ interface Props {
   onSelectChannel: (c: string) => void;
   channelStatuses: Record<string, { authorized?: boolean }>;
   logs: Record<string, LogEntry[]>;
+  histories: Record<string, ChatChannelHistory>;
+  onLoadOlder: (channel: string) => void;
   viewer: ViewerInfo | null;
   onOpenSettings: () => void;
   onLogout: () => void;
@@ -28,6 +31,8 @@ export default function Sidebar({
   onSelectChannel,
   channelStatuses,
   logs,
+  histories,
+  onLoadOlder,
   viewer,
   onOpenSettings,
   onLogout,
@@ -84,6 +89,8 @@ export default function Sidebar({
           onSelectChannel={onSelectChannel}
           channelStatuses={channelStatuses}
           logs={logs}
+          histories={histories}
+          onLoadOlder={onLoadOlder}
           botUsername={cleanUsername}
           botAuthorized={botAuthorized}
           onOpenSettings={onOpenSettings}

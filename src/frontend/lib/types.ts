@@ -38,6 +38,7 @@ export type LogEntry =
   | {
       kind: 'msg';
       id: string;
+      order: number;
       time: string;
       user: string;
       text: string;
@@ -48,8 +49,14 @@ export type LogEntry =
         [key: string]: unknown;
       } | null;
     }
-  | { kind: 'event'; id: string; time: string; event: ChatEventKind; text: string }
-  | { kind: 'sep'; id: string; label: string };
+  | { kind: 'event'; id: string; order: number; time: string; event: ChatEventKind; text: string }
+  | { kind: 'sep'; id: string; order: number; label: string };
+
+export interface ChatHistoryPage {
+  entries: LogEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
 
 export interface MediaItem {
   id: string;
@@ -83,6 +90,7 @@ export interface RawMediaEntry {
 
 export interface RawChatEntry {
   id?: string;
+  order?: number;
   kind?: string;
   event?: ChatEventKind;
   text?: string;
@@ -97,6 +105,12 @@ export interface RawChatEntry {
     twitchEmotesByName?: Record<string, string>;
     [key: string]: unknown;
   } | null;
+}
+
+export interface RawChatHistoryPage {
+  entries: RawChatEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 export interface ChannelInfo {

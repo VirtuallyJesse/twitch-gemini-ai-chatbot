@@ -20,7 +20,8 @@ const csv = (v) => String(v || '').split(',').map((s) => s.trim().toLowerCase())
 const storage = new Storage({
     redisUrl: env.UPSTASH_REDIS_URL,
     restUrl: env.UPSTASH_REDIS_REST_URL,
-    restToken: env.UPSTASH_REDIS_REST_TOKEN
+    restToken: env.UPSTASH_REDIS_REST_TOKEN,
+    cursorSecret: env.TWITCH_CLIENT_SECRET
 });
 
 const configStore = new ConfigStore({ storage, defaults: createFactoryDefaults(env) });
