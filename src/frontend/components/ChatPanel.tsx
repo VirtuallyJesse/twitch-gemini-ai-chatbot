@@ -45,7 +45,7 @@ function TokenView({ tok }: { tok: Token }) {
           href={tok.href}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:decoration-accent"
+          className="break-all text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:decoration-accent"
         >
           {tok.v}
         </a>
@@ -354,7 +354,7 @@ export default function ChatPanel({
 
       {/* log */}
       <div className="relative min-h-0 flex-1">
-        <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full overflow-y-auto px-2.5 py-2">
+        <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full overflow-x-hidden overflow-y-auto px-2.5 py-2">
           {channels.length === 0 ? (
             <NoChannels onOpenSettings={onOpenSettings} />
           ) : entries.length === 0 ? (
