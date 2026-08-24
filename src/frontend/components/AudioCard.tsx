@@ -72,7 +72,7 @@ export default function AudioCard({
   index?: number;
   tintIndex: number;
 }) {
-  const hue = AUDIO_TINT_HUES[tintIndex];
+  const hue = AUDIO_TINT_HUES[tintIndex] ?? AUDIO_TINT_HUES[0];
   const src = item.src || '';
   const peaks = usePeaks(src);
 
