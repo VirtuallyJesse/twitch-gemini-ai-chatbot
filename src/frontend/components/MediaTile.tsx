@@ -8,7 +8,7 @@ import SourceLink from './SourceLink';
 
 function Fallback({ video }: { video?: boolean }) {
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[#0c0d0f]">
+    <div className="pointer-events-none flex h-full w-full select-none flex-col items-center justify-center gap-2 bg-[#0c0d0f]">
       {video ? <VideoOff size={18} className="text-faint" /> : <ImageOff size={18} className="text-faint" />}
       <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-faint">Source unavailable</span>
     </div>

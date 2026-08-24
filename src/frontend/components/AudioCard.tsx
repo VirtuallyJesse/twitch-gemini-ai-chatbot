@@ -187,7 +187,7 @@ export default function AudioCard({
       {src && <SourceLink href={src} label="audio" />}
 
       {error || !src ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+        <div className="pointer-events-none absolute inset-0 flex select-none flex-col items-center justify-center gap-2">
           <VolumeX size={18} className="text-faint" />
           <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-faint">Source unavailable</span>
         </div>
