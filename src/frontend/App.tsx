@@ -12,37 +12,14 @@ import { api } from './lib/api';
 import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
 import { timeAgo } from './lib/time';
-import { channelLabel, normChannel } from './lib/channel';
+import { normChannel } from './lib/channel';
 import { createGalleryAvatarHydrator } from './lib/avatars';
 import { formatRawChatEntry } from './lib/chatLogs';
+import { normalizeMediaEntry } from './lib/media';
 import Sidebar from './components/Sidebar';
 import GalleryToolbar, { type Filter } from './components/GalleryToolbar';
 import MediaGrid from './components/MediaGrid';
 import SettingsModal from './components/SettingsModal';
-
-function normalizeMediaEntry(raw: RawMediaEntry): MediaItem {
-  const isAudio = raw.mediaType === 'tts' || raw.mediaType === 'music';
-  const type = isAudio ? 'audio' : raw.mediaType === 'video' ? 'video' : 'image';
-  const audioKind = raw.mediaType === 'tts' ? 'Voice' : raw.mediaType === 'music' ? 'Music' : undefined;
-
-  let ts = typeof raw.timestamp === 'number' ? raw.timestamp : Date.parse(String(raw.timestamp)) || Date.now();
-  const minAgo = Math.max(0, Math.floor((Date.now() - ts) / 60000));
-
-  return {
-    id: raw.id || `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    type,
-    src: raw.mediaUrl,
-    prompt: raw.prompt || '',
-    author: raw.username || 'someone',
-    userId: raw.userId,
-    channel: channelLabel(raw.channel || 'channel'),
-    timestamp: ts,
-    minutesAgo: minAgo,
-    audioKind,
-    avatarUrl: raw.avatarUrl,
-    badges: Array.isArray(raw.badges) ? raw.badges : [],
-  };
-}
 
 function haystack(m: MediaItem): string {
   return [

@@ -46,7 +46,7 @@ export interface RawMediaEntry {
   command?: string;
   prompt: string;
   mediaUrl: string;
-  mediaType: 'image' | 'video' | 'tts' | 'music';
+  mediaType: 'image' | 'video' | 'tts' | 'music' | 'audio';
 }
 
 export interface RawChatEntry {
