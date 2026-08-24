@@ -39,6 +39,21 @@ function resolveUsername(user) {
     return user['display-name'] || user.username || user.name || 'someone';
 }
 
+function extractBadgeKinds(user) {
+    if (!user || typeof user !== 'object') return [];
+    if (Array.isArray(user.badges)) return user.badges;
+    const badgesObj = user.tags?.badges || user.badges;
+    if (!badgesObj || typeof badgesObj !== 'object') return [];
+    const kinds = [];
+    if (badgesObj.broadcaster) kinds.push('broadcaster');
+    if (badgesObj.moderator || badgesObj.mod) kinds.push('mod');
+    if (badgesObj.vip) kinds.push('vip');
+    if (badgesObj.subscriber || badgesObj.sub) kinds.push('sub');
+    if (badgesObj.bits) kinds.push('bits');
+    if (badgesObj.bot || badgesObj.verified_bot) kinds.push('bot');
+    return kinds;
+}
+
 function byteLength(value) {
     return value?.byteLength ?? value?.length ?? 0;
 }
@@ -185,6 +200,16 @@ export class MediaPipeline {
         return this.#resolveProvider(mediaType) != null;
     }
 
+    /**
+     * Model/voice catalog from the active media provider for the dashboard's
+     * Commands tab; null when no provider is configured (POLLINATIONS_API_KEY
+     * absent) and the frontend falls back to its own defaults.
+     */
+    async catalog() {
+        const provider = this.#resolveProvider('image');
+        return (await provider?.catalog?.()) || null;
+    }
+
     getSupportedMediaTypes() {
         return MEDIA_TYPE_HARNESS.map(({ key }) => key).filter((key) => this.supports(key));
     }
@@ -289,7 +314,8 @@ export class MediaPipeline {
         user,
         prompt,
         mediaType,
-        command
+        command,
+        options = {}
     }) {
         const username = resolveUsername(user);
         const cleanPrompt = typeof prompt === 'string' ? prompt.trim() : '';
@@ -311,10 +337,15 @@ export class MediaPipeline {
                 throw new Error(`Unsupported media type: ${mediaType}`);
             }
 
-            const generated = await provider.generate({
+            const generateArgs = {
                 type: mediaType,
                 prompt: cleanPrompt
-            });
+            };
+            if (options && Object.keys(options).length > 0) {
+                generateArgs.options = options;
+            }
+
+            const generated = await provider.generate(generateArgs);
 
             if (!generated?.buffer || byteLength(generated.buffer) === 0) {
                 return {
@@ -333,16 +364,24 @@ export class MediaPipeline {
             });
 
             const timestamp = this.now();
+            const userId = typeof user === 'object' ? (user['user-id'] || user.userId || user.id || null) : null;
+            const avatarUrl = typeof user === 'object' ? (user.profileImageUrl || user.avatarUrl || null) : null;
+            const badges = extractBadgeKinds(user);
             const mediaEntry = {
                 id: this.idFactory(),
                 timestamp,
                 channel,
                 username,
+                userId,
+                avatarUrl,
                 command,
                 prompt: cleanPrompt,
                 mediaUrl,
                 mediaType
             };
+            if (badges.length > 0) {
+                mediaEntry.badges = badges;
+            }
 
             await this.#saveEntry(mediaEntry);
 

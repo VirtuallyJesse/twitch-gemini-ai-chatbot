@@ -86,6 +86,16 @@ export class TavilySearchProvider {
         return this.#disabledUntil > 0 && this.#now() >= this.#disabledUntil;
     }
 
+    /**
+     * Hot-reloads runtime search settings (credit depth).
+     * @param {{ searchDepth?: string }} [settings]
+     */
+    reloadSettings({ searchDepth } = {}) {
+        if (searchDepth === undefined || searchDepth === null) return;
+        const depth = String(searchDepth).toLowerCase();
+        this.#searchDepth = depth === 'advanced' ? 'advanced' : 'basic';
+    }
+
     async search(query, context = {}) {
         const q = String(query ?? '').trim();
         if (!q) return { error: 'Missing search query' };

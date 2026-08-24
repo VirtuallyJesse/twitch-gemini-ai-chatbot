@@ -4,107 +4,31 @@ services:
     runtime: node
     branch: main
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       # ═══════════════════════════════════════════════════════════════════
-      # REQUIRED: Twitch Bot Identity & App Credentials
+      # Bot identity & admin access
       # ═══════════════════════════════════════════════════════════════════
       - key: TWITCH_USERNAME
         value: "your-bot-username"
       - key: ADMIN_USERNAMES
         value: "your-streamer-username"
-      - key: JOIN_CHANNELS
-        value: "your-channel-1,your-channel-2"
       - key: TWITCH_CLIENT_ID
         value: "your-twitch-client-id"
       - key: TWITCH_CLIENT_SECRET
         value: "your-twitch-client-secret"
 
       # ═══════════════════════════════════════════════════════════════════
-      # REQUIRED: Core AI & Persistence
+      # API keys & persistence
       # ═══════════════════════════════════════════════════════════════════
       - key: GEMINI_API_KEY
-        value: "your-gemini-api-key(s)" # Comma-separated keys rotate automatically
+        value: "your-gemini-api-key(s)"    # Comma-separated keys rotate automatically
       - key: UPSTASH_REDIS_URL
         value: "your-upstash-redis-url"
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: AI Chat & Web Search
-      # ═══════════════════════════════════════════════════════════════════
-      - key: BOT_COMMAND_NAME
-        value: "!ask,@yourbotusername" # Trigger prefixes for AI chat
-      - key: MODEL_NAME
-        value: "gemini-3.7-flash"
-      - key: THINKING_LEVEL
-        value: "medium" # low | medium | high
-      - key: GEMINI_MAX_RESPONSE_LENGTH
-        value: "450"
-      - key: AI_HISTORY_LENGTH
-        value: "10"     # Number of recent dialogue turns to remember per channel
-      - key: CHAT_CONTEXT_LENGTH
-        value: "10"     # Number of ambient incoming chat messages injected into prompt
-      - key: SEARCH_GROUNDING
-        value: "off"    # off | tavily | google
       - key: TAVILY_API_KEY
-        value: "your-tavily-api-key"
-      - key: TAVILY_SEARCH_DEPTH
-        value: "basic"  # basic (1 credit) | advanced (2 credits)
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Twitch Helix Action Tools (Stream & Mod Actions)
-      # ═══════════════════════════════════════════════════════════════════
-      - key: ENABLE_HELIX_ACTIONS
-        value: "true"   # Enable stream metadata, timeouts, announcements, shoutouts, clips
-      - key: HELIX_CLIP_COOLDOWN_SECONDS
-        value: "30"     # Clip request cooldown & deduplication window in seconds
-      - key: HELIX_DEFAULT_TIMEOUT_SECONDS
-        value: "600"    # Default timeout duration in seconds (10 minutes)
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Media Generation (Pollinations & YouTube)
-      # ═══════════════════════════════════════════════════════════════════
-      - key: IMAGE_COMMAND_NAME
-        value: "!image"
-      - key: VIDEO_COMMAND_NAME
-        value: "!video"
-      - key: TTS_COMMAND_NAME
-        value: "!tts"
-      - key: MUSIC_COMMAND_NAME
-        value: "!song"
+        value: "your-tavily-api-key"       # Optional: enables live web search
       - key: POLLINATIONS_API_KEY
-        value: "your-pollinations-api-key"
-      - key: POLLINATIONS_IMAGE_MODEL
-        value: "gptimage"
-      - key: POLLINATIONS_VIDEO_MODEL
-        value: "seedance"
-      - key: POLLINATIONS_TTS_MODEL
-        value: "elevenlabs"
-      - key: POLLINATIONS_TTS_VOICE
-        value: "charlotte"
-      - key: POLLINATIONS_MUSIC_MODEL
-        value: "elevenmusic"
+        value: "your-pollinations-api-key" # Optional: enables !image !video !tts !song
       - key: YOUTUBE_API_KEY
-        value: "your-youtube-api-key"
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Emote Integration (7TV, BTTV, FFZ)
-      # ═══════════════════════════════════════════════════════════════════
-      - key: ENABLE_7TV_EMOTES
-        value: "true"
-      - key: ENABLE_BTTV_EMOTES
-        value: "true"
-      - key: ENABLE_FFZ_EMOTES
-        value: "true"
-      - key: ENABLE_EMOTE_APPENDING
-        value: "true"
-      - key: EMOTE_APPEND_EXCLUDE_PREFIXES
-        value: "!settitle"
-
-      # ═══════════════════════════════════════════════════════════════════
-      # OPTIONAL: Chat Moderation & Bot Filtering
-      # ═══════════════════════════════════════════════════════════════════
-      - key: COOLDOWN_DURATION
-        value: "1"      # Per-chatter cooldown in seconds
-      - key: IGNORED_USERNAMES
-        value: "StreamElements,Nightbot"
+        value: "your-youtube-api-key"      # Optional: adds YouTube titles/descriptions to prompts

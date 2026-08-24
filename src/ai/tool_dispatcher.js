@@ -21,18 +21,20 @@ export class ToolDispatcher {
     #searchMode;
     #fetchImpl;
     #defaultTimeoutMs;
+    #enableHelixActions;
 
     constructor({
         tools = [],
         searchProvider = null,
         searchMode = 'off',
+        enableHelixActions = true,
         fetchImpl = (...a) => globalThis.fetch(...a),
         defaultTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS
     } = {}) {
         this.#tools = Array.isArray(tools) ? tools.filter(Boolean) : [];
         this.#searchProvider = searchProvider || null;
-        const normalized = searchMode === 'tavily' ? 'custom' : searchMode;
-        this.#searchMode = normalized === 'google' || normalized === 'custom' ? normalized : 'off';
+        this.#applySearchMode(searchMode);
+        this.#enableHelixActions = enableHelixActions !== false;
         this.#fetchImpl = fetchImpl;
         this.#defaultTimeoutMs = Number(defaultTimeoutMs) > 0
             ? Number(defaultTimeoutMs)
@@ -43,6 +45,25 @@ export class ToolDispatcher {
 
     get searchMode() {
         return this.#searchMode;
+    }
+
+    get enableHelixActions() {
+        return this.#enableHelixActions;
+    }
+
+    setEnableHelixActions(enabled) {
+        this.#enableHelixActions = Boolean(enabled);
+    }
+
+    reloadSearchMode(searchMode, searchProvider = this.#searchProvider) {
+        this.#searchProvider = searchProvider || null;
+        this.#applySearchMode(searchMode);
+        this.#validateToolDeclarations();
+    }
+
+    #applySearchMode(searchMode) {
+        const normalized = searchMode === 'tavily' ? 'custom' : searchMode;
+        this.#searchMode = normalized === 'google' || normalized === 'custom' ? normalized : 'off';
     }
 
     #validateToolDeclarations() {
@@ -132,12 +153,14 @@ export class ToolDispatcher {
         const searchTool = this.#customSearchTool();
         if (searchTool) decls.push(this.#toDeclaration(searchTool));
 
-        for (const tool of this.#tools) {
-            if (!tool?.name) continue;
-            if (this.#searchMode === 'google' && SEARCH_TOOL_NAMES.has(tool.name)) continue;
-            if (searchTool && tool.name === searchTool.name) continue;
-            if (!this.#allowedForCaller(tool, caller)) continue;
-            decls.push(this.#toDeclaration(tool));
+        if (this.#enableHelixActions) {
+            for (const tool of this.#tools) {
+                if (!tool?.name) continue;
+                if (this.#searchMode === 'google' && SEARCH_TOOL_NAMES.has(tool.name)) continue;
+                if (searchTool && tool.name === searchTool.name) continue;
+                if (!this.#allowedForCaller(tool, caller)) continue;
+                decls.push(this.#toDeclaration(tool));
+            }
         }
         return decls;
     }

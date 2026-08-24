@@ -180,6 +180,7 @@ class BroadcasterSession {
     #reconnectTimer = null;
     #reconnectAttempt = 0;
     #hadLiveSession = false;
+    #halted = false;
 
     constructor({
         broadcasterUserId,
@@ -221,6 +222,21 @@ class BroadcasterSession {
 
     setDesired(item) {
         this.#desired = item;
+    }
+
+    /**
+     * Permanently stops this session: closes the socket and halts its
+     * reconnection loop. Twitch deletes websocket-transport subscriptions
+     * once their socket drops, so no Helix DELETE round-trip is needed.
+     */
+    stop() {
+        this.#halted = true;
+        this.teardown();
+    }
+
+    /** True when either the owner (client-wide) or this session is stopped. */
+    #reconnectHalted() {
+        return this.#halted || this.#isStopped();
     }
 
     async ensureConnected() {
@@ -285,7 +301,7 @@ class BroadcasterSession {
                 this.#socket = null;
                 this.#sessionId = null;
             }
-            if (!this.#isStopped()) this.#scheduleReconnect();
+            if (!this.#reconnectHalted()) this.#scheduleReconnect();
         }, this.#welcomeTimeoutMs);
         this.#welcomeTimer?.unref?.();
 
@@ -373,7 +389,7 @@ class BroadcasterSession {
         } catch (err) {
             console.warn('[EventSub] Reconnect URL resume failed, falling back to clean reconnect:', err.message);
             this.#cleanupSocket(oldSocket);
-            if (!this.#isStopped()) this.#scheduleReconnect(0, false);
+            if (!this.#reconnectHalted()) this.#scheduleReconnect(0, false);
         }
     }
 
@@ -390,7 +406,7 @@ class BroadcasterSession {
             this.#connectResolve = null;
             this.#connectPromise = null;
         }
-        if (!this.#isStopped()) {
+        if (!this.#reconnectHalted()) {
             this.#scheduleReconnect(undefined, false);
         }
     }
@@ -410,7 +426,7 @@ class BroadcasterSession {
             this.#cleanupSocket(this.#socket);
             this.#socket = null;
             this.#sessionId = null;
-            if (!this.#isStopped()) this.#scheduleReconnect(0, false);
+            if (!this.#reconnectHalted()) this.#scheduleReconnect(0, false);
         }, timeoutMs);
         this.#keepaliveTimer?.unref?.();
     }
@@ -424,7 +440,7 @@ class BroadcasterSession {
             this.#clearTimeoutFn(this.#reconnectTimer);
             this.#reconnectTimer = null;
         }
-        if (this.#isStopped()) return;
+        if (this.#reconnectHalted()) return;
 
         let waitMs = delayMs;
         if (waitMs === undefined) {
@@ -434,7 +450,7 @@ class BroadcasterSession {
 
         this.#reconnectTimer = this.#setTimeoutFn(async () => {
             this.#reconnectTimer = null;
-            if (this.#isStopped()) return;
+            if (this.#reconnectHalted()) return;
             try {
                 await this.#openSocket(this.#wsUrl, { isResume });
             } catch (err) {
@@ -583,6 +599,16 @@ export class EventSubClient {
         await session.ensureConnected();
         if (this.#stopped) return;
         await session.applySubscriptions();
+    }
+
+    /** Forgets a broadcaster: closes its session socket and stops reconnects. */
+    unsubscribeChannel(broadcasterUserId) {
+        const id = String(broadcasterUserId ?? '');
+        if (!id) return;
+        const session = this.#sessions.get(id);
+        if (!session) return;
+        this.#sessions.delete(id);
+        session.stop();
     }
 
     #createSession(broadcasterUserId) {

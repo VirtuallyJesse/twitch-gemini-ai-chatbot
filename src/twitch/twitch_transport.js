@@ -51,37 +51,126 @@ export class AuthMismatchError extends Error {
 }
 
 export function renderAuthMismatchHtml({ expected, actual, retryUrl, isBroadcaster = false }) {
+    const cleanExpected = String(expected || '').replace(/^[#@]/, '');
+    const cleanActual = String(actual || '').replace(/^[#@]/, '');
     const title = isBroadcaster ? 'Broadcaster Authorization Mismatch' : 'Account Authorization Mismatch';
     const explanation = isBroadcaster
-        ? `You attempted to link stream management for channel <strong>#${expected}</strong>, but you authorized with Twitch account <strong>@${actual}</strong>.`
-        : `This bot is configured to run as <strong>@${expected}</strong>, but you authorized with Twitch account <strong>@${actual}</strong>.`;
+        ? `You attempted to link stream management for channel <strong>#${cleanExpected}</strong>, but you authorized with Twitch account <strong>${cleanActual}</strong>.`
+        : `This bot is configured to run as <strong>${cleanExpected}</strong>, but you authorized with Twitch account <strong>${cleanActual}</strong>.`;
     const actionText = isBroadcaster
-        ? `To fix this, log into Twitch as <strong>@${expected}</strong> in your browser (or switch accounts) and try again.`
-        : `To fix this, log into Twitch as <strong>@${expected}</strong> (or open the authorization link in an <strong>Incognito / Private window</strong>) and try again.`;
+        ? `Log into Twitch as <strong>${cleanExpected}</strong> in your browser (or switch accounts) and try again.`
+        : `Log into Twitch as <strong>${cleanExpected}</strong> (or open the authorization link in an <strong>Incognito / Private window</strong>) and try again.`;
     const buttonText = isBroadcaster
-        ? `Retry Authorization for #${expected}`
-        : `Retry Authorization with @${expected}`;
+        ? `Retry Authorization for #${cleanExpected}`
+        : `Retry Authorization with ${cleanExpected}`;
 
     return `<!doctype html>
 <html>
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${title}</title>
     <style>
-        body { font-family: sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; line-height: 1.6; }
-        .error-card { border: 1px solid #f87171; background: #fef2f2; border-radius: 8px; padding: 24px; color: #991b1b; }
-        h1 { color: #b91c1c; margin-top: 0; font-size: 20px; display: flex; align-items: center; gap: 8px; }
-        .button { display: inline-block; background: #9147ff; color: white; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; margin-top: 14px; }
-        .button:hover { background: #772ce8; }
-        code { background: #fee2e2; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 14px; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #101113;
+            color: #9da2ab;
+            line-height: 1.55;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            background: #18191c;
+            border: 1px solid #2d3039;
+            border-radius: 12px;
+            padding: 28px;
+            max-width: 520px;
+            width: 100%;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .icon-wrap {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            background: rgba(251, 191, 36, 0.1);
+            border: 1px solid rgba(251, 191, 36, 0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fbbf24;
+            flex-shrink: 0;
+        }
+        h1 {
+            color: #e8eaed;
+            font-size: 16px;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+        p {
+            font-size: 13px;
+            margin-bottom: 12px;
+            color: #9da2ab;
+        }
+        strong {
+            color: #a273ff;
+            background: #222429;
+            padding: 1px 5px;
+            border-radius: 4px;
+            border: 1px solid #2d3039;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .actions {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #a273ff;
+            color: #101113;
+            text-decoration: none;
+            padding: 9px 18px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            transition: filter 0.15s ease;
+        }
+        .button:hover {
+            filter: brightness(1.15);
+        }
     </style>
 </head>
 <body>
-    <div class="error-card">
-        <h1>⚠️ ${title}</h1>
+    <div class="card">
+        <div class="header">
+            <div class="icon-wrap">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+            </div>
+            <h1>${title}</h1>
+        </div>
         <p>${explanation}</p>
         <p>${actionText}</p>
-        <a class="button" href="${retryUrl}">${buttonText}</a>
+        <div class="actions">
+            <a class="button" href="${retryUrl}">${buttonText}</a>
+        </div>
     </div>
 </body>
 </html>`;
@@ -621,10 +710,35 @@ class IrcBridge {
         });
     }
 
-    get connected() { return this.#connected; }
+    get connected() {
+        return this.#connected || this.#client?.readyState?.() === 'OPEN';
+    }
 
     async connect() {
         await this.#client.connect(); // identity password provider resolves the user token during auth
+        this.#connected = true;
+    }
+
+    async join(channel) {
+        if (typeof this.#client?.join === 'function') {
+            try {
+                console.log(`[TwitchTransport] Joining IRC channel: ${channel}`);
+                await this.#client.join(channel);
+            } catch (err) {
+                console.error(`[TwitchTransport] IRC join failed for ${channel}:`, err.message || err);
+            }
+        }
+    }
+
+    async part(channel) {
+        if (typeof this.#client?.part === 'function') {
+            try {
+                console.log(`[TwitchTransport] Parting IRC channel: ${channel}`);
+                await this.#client.part(channel);
+            } catch (err) {
+                console.error(`[TwitchTransport] IRC part failed for ${channel}:`, err.message || err);
+            }
+        }
     }
 
     async disconnect() {
@@ -886,7 +1000,49 @@ export class TwitchTransport {
         return entry;
     }
 
-    /* ── getters ───────────────────────────────────────────── */
+    /* ── getters & dynamic setters ──────────────────────────── */
+
+    setIgnoredUsernames(usernames) {
+        this.#ignored = new Set((usernames || []).map(cleanName).filter(Boolean));
+    }
+
+    /**
+     * Hot-reloads the active channel list: diffs additions/removals, resolves Helix IDs,
+     * joins/parts IRC chat, and updates EventSub subscriptions.
+     * @param {string[]} channels
+     */
+    async syncChannels(channels) {
+        const nextKeys = (channels || []).map(channelKey).filter(k => k && k !== '#');
+        const oldKeys = new Set(this.#channels);
+        const toAdd = nextKeys.filter(k => !oldKeys.has(k));
+        const toRemove = this.#channels.filter(k => !nextKeys.includes(k));
+
+        this.#channels = nextKeys;
+
+        if (toAdd.length > 0) {
+            const logins = toAdd.map(cleanName);
+            try {
+                const newIds = await this.#helix.resolveUserIds(logins);
+                Object.assign(this.#channelIdMap, newIds);
+            } catch (err) {
+                console.warn('[TwitchTransport] Failed to resolve IDs for added channels:', err.message);
+            }
+        }
+
+        for (const ch of toAdd) {
+            await this.#irc.join(ch);
+            if (this.#running) {
+                await this.#subscribeEventSubChannel(ch);
+            }
+        }
+
+        for (const ch of toRemove) {
+            await this.#irc.part(ch);
+            this.#unsubscribeEventSubChannel(ch);
+        }
+
+        return this.channels;
+    }
 
     get channels() { return [...this.#channels]; }
     get connected() { return this.#irc.connected; }
@@ -1014,6 +1170,20 @@ export class TwitchTransport {
     async #subscribeEventSubChannels() {
         for (const channel of this.#channels) {
             await this.#subscribeEventSubChannel(channel);
+        }
+    }
+
+    /** Drops a removed channel's EventSub session and its cached Helix ID. */
+    #unsubscribeEventSubChannel(channel) {
+        if (!this.#eventsub?.unsubscribeChannel) return;
+        const login = cleanName(channel);
+        const broadcasterId = this.#channelIdMap[login];
+        if (!broadcasterId) return;
+        try {
+            this.#eventsub.unsubscribeChannel(broadcasterId);
+            delete this.#channelIdMap[login];
+        } catch (err) {
+            console.error(`[TwitchTransport] EventSub unsubscribe failed for ${channel}:`, err.message);
         }
     }
 

@@ -42,6 +42,7 @@ export class AIEngine {
     #imageDownloader;
     #clientFor;
     #toolDispatcher;
+    #injectedSearchProvider;
 
     constructor({
         apiKeys,
@@ -52,6 +53,7 @@ export class AIEngine {
         searchGrounding = null,
         searchProvider = null,
         tools = [],
+        enableHelixActions = true,
         toolTimeoutMs = 3500,
         thinkingLevel = 'medium',
         youtubeApiKey = null,
@@ -72,13 +74,10 @@ export class AIEngine {
         this.fileContext = fileContext;
         this.historyLength = parseInt(historyLength, 10) || 5;
 
-        this.searchGrounding = ToolDispatcher.resolveSearchMode({
-            searchGrounding,
-            enableSearchGrounding,
-            searchProvider
-        });
-        this.enableSearchGrounding = this.searchGrounding === 'google';
-        this.searchProvider = this.searchGrounding === 'custom' ? searchProvider : null;
+        // The injected provider outlives mode switches: the modal owns the slot,
+        // so 'tavily' must resolve live even when the boot-time mode was off.
+        this.#injectedSearchProvider = searchProvider || null;
+        this.#applySearchMode({ searchGrounding, enableSearchGrounding });
 
         const level = String(thinkingLevel || 'medium').toLowerCase();
         this.thinkingLevel = ALLOWED_THINKING_LEVELS.has(level) ? level : 'medium';
@@ -103,6 +102,7 @@ export class AIEngine {
             tools,
             searchProvider: this.searchProvider,
             searchMode: this.searchGrounding,
+            enableHelixActions: enableHelixActions !== false,
             fetchImpl,
             defaultTimeoutMs: toolTimeoutMs
         });
@@ -155,6 +155,15 @@ export class AIEngine {
             this.histories.set(key, []);
         }
         return this.histories.get(key);
+    }
+
+    /**
+     * Clears conversation history for a given channel.
+     * @param {string|null} channel
+     */
+    clearHistory(channel) {
+        const key = channel || '__web__';
+        this.histories.delete(key);
     }
 
     #checkHistoryLength(channel) {
@@ -801,11 +810,60 @@ export class AIEngine {
     }
 
     /**
+     * Resolves the search-grounding slot (single-slot seam) and derives the
+     * google/custom flags from the retained injected provider.
+     * @param {object} params
+     */
+    #applySearchMode({ searchGrounding = null, enableSearchGrounding = false }) {
+        this.searchGrounding = ToolDispatcher.resolveSearchMode({
+            searchGrounding,
+            enableSearchGrounding,
+            searchProvider: this.#injectedSearchProvider
+        });
+        this.enableSearchGrounding = this.searchGrounding === 'google';
+        this.searchProvider = this.searchGrounding === 'custom' ? this.#injectedSearchProvider : null;
+    }
+
+    /**
      * Hot-reloads the default persona / system instructions context.
      * @param {string} next
      */
     reloadFileContext(next) {
         this.fileContext = String(next ?? '');
+    }
+
+    /**
+     * Hot-reloads runtime bot settings (model, thinking depth, search grounding, history length, etc.).
+     * @param {object} settings
+     */
+    reloadSettings({
+        modelName,
+        thinkingLevel,
+        searchGrounding,
+        historyLength,
+        enableHelixActions,
+        tavilySearchDepth
+    } = {}) {
+        if (modelName) this.modelName = String(modelName);
+        if (thinkingLevel) {
+            const level = String(thinkingLevel).toLowerCase();
+            this.thinkingLevel = ALLOWED_THINKING_LEVELS.has(level) ? level : 'medium';
+        }
+        if (searchGrounding !== undefined) {
+            this.#applySearchMode({ searchGrounding });
+            this.#toolDispatcher?.reloadSearchMode?.(this.searchGrounding, this.searchProvider);
+        }
+        if (tavilySearchDepth !== undefined) {
+            // Depth rides on the retained injected provider so a change made
+            // while grounding is off/google still lands when Tavily returns.
+            this.#injectedSearchProvider?.reloadSettings?.({ searchDepth: tavilySearchDepth });
+        }
+        if (historyLength !== undefined) {
+            this.historyLength = parseInt(historyLength, 10) || 5;
+        }
+        if (enableHelixActions !== undefined) {
+            this.#toolDispatcher?.setEnableHelixActions?.(enableHelixActions);
+        }
     }
 }
 

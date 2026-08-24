@@ -81,11 +81,6 @@ export class EmotePool {
     this.#wsImpl = options.wsImpl || null;
     this.#providers = options.providers || createDefaultProviders(this.#fetch);
     this.#cfg = {
-      enabled: {
-        '7tv': options.enable7tv ?? true,
-        bttv: options.enableBttv ?? true,
-        ffz: options.enableFfz ?? false
-      },
       globals: {
         '7tv': options.include7tvGlobals ?? false,
         bttv: options.includeBttvGlobals ?? false,
@@ -93,7 +88,6 @@ export class EmotePool {
       },
       timeoutMs: Number(options.timeoutMs ?? 10_000),
       appendEnabled: options.appendEnabled ?? true,
-      excludePrefixes: Array.isArray(options.excludePrefixes) ? options.excludePrefixes : [],
       spacing: options.spacing ?? true,
       random: options.random || Math.random,
       pollMs: Number(options.pollMs ?? 10 * 60 * 1000),
@@ -200,7 +194,7 @@ export class EmotePool {
     const view = this.#view(channel);
     out = this.#spaceEmotes(view, out);
 
-    if (appendEmote && this.#cfg.appendEnabled && !this.#isExcluded(out)) {
+    if (appendEmote && this.#cfg.appendEnabled) {
       const emote = this.#randomEmote(view);
       if (emote && (!maxLength || out.length + emote.length + 1 <= maxLength)) {
         out = `${out} ${emote}`;
@@ -288,12 +282,12 @@ export class EmotePool {
       }
     };
     // Collision precedence: FFZ global < BTTV global < 7TV global < FFZ channel < BTTV channel < 7TV channel
-    if (this.#cfg.enabled.ffz) write(this.#globals.ffz, this.#cfg.globals.ffz);
-    if (this.#cfg.enabled.bttv) write(this.#globals.bttv, this.#cfg.globals.bttv);
-    if (this.#cfg.enabled['7tv']) write(this.#globals['7tv'], this.#cfg.globals['7tv']);
-    if (this.#cfg.enabled.ffz) write(state.channelAssets.ffz, true);
-    if (this.#cfg.enabled.bttv) write(state.channelAssets.bttv, true);
-    if (this.#cfg.enabled['7tv']) write(state.channelAssets['7tv'], true);
+    write(this.#globals.ffz, this.#cfg.globals.ffz);
+    write(this.#globals.bttv, this.#cfg.globals.bttv);
+    write(this.#globals['7tv'], this.#cfg.globals['7tv']);
+    write(state.channelAssets.ffz, true);
+    write(state.channelAssets.bttv, true);
+    write(state.channelAssets['7tv'], true);
     return { assets, ingest, pool };
   }
 
@@ -318,12 +312,10 @@ export class EmotePool {
       Object.assign(unionAssets, state.assets);
     }
     for (const p of PLATFORMS) {
-      if (this.#cfg.enabled[p]) {
-        for (const [name, asset] of this.#globals[p]) {
-          unionIngest.add(name);
-          if (this.#cfg.globals[p]) unionPool.add(name);
-          if (!unionAssets[name]) unionAssets[name] = { url: asset.url || '', provider: asset.provider };
-        }
+      for (const [name, asset] of this.#globals[p]) {
+        unionIngest.add(name);
+        if (this.#cfg.globals[p]) unionPool.add(name);
+        if (!unionAssets[name]) unionAssets[name] = { url: asset.url || '', provider: asset.provider };
       }
     }
     this.#unionView = this.#compile(unionIngest, unionPool);
@@ -464,7 +456,7 @@ export class EmotePool {
 
     for (const p of providers) {
       const provider = this.#providers[p];
-      if (!provider || !this.#cfg.enabled[p]) continue;
+      if (!provider) continue;
 
       jobs.push(this.#guard(`${provider.name} global`, () => provider.fetchGlobal(opts), [])
         .then(list => {
@@ -591,7 +583,6 @@ export class EmotePool {
   }
 
   async #pollFfz() {
-    if (!this.#cfg.enabled.ffz) return;
     for (const [key, state] of this.#channels) {
       if (!state.twitchId) continue;
       try {
@@ -615,7 +606,7 @@ export class EmotePool {
 
   #ensureListeners() {
     if (!this.#wsImpl) return;
-    if (this.#cfg.enabled['7tv'] && !this.#sevenTv) {
+    if (!this.#sevenTv) {
       this.#sevenTv = new SevenTvEventListener({
         wsImpl: this.#wsImpl,
         timerImpl: this.#timer,
@@ -623,7 +614,7 @@ export class EmotePool {
         onDispatch: (d) => this.#applySevenTvDispatch(d)
       });
     }
-    if (this.#cfg.enabled.bttv && !this.#bttv) {
+    if (!this.#bttv) {
       this.#bttv = new BttvEventListener({
         wsImpl: this.#wsImpl,
         timerImpl: this.#timer,
@@ -658,8 +649,8 @@ export class EmotePool {
       const last = listener.lastMessageAt || listener.openedAt || 0;
       return last ? (now - last >= this.#cfg.restFallbackMs) : true;
     };
-    if (this.#cfg.enabled['7tv'] && isStale(this.#sevenTv)) stale.push('7tv');
-    if (this.#cfg.enabled.bttv && isStale(this.#bttv)) stale.push('bttv');
+    if (isStale(this.#sevenTv)) stale.push('7tv');
+    if (isStale(this.#bttv)) stale.push('bttv');
     if (stale.length) await this.#refreshRest({ providers: stale, reason: 'rest-fallback' });
   }
 
@@ -741,15 +732,20 @@ export class EmotePool {
     return spaced.replace(/ {2,}/g, ' ').trim();
   }
 
-  #isExcluded(reply) {
-    if (this.#cfg.excludePrefixes.length === 0) return false;
-    const lower = reply.toLowerCase();
-    return this.#cfg.excludePrefixes.some(p => lower.startsWith(p));
-  }
-
   #randomEmote(view) {
     if (view.pool.length === 0) return '';
     return view.pool[Math.floor(this.#cfg.random() * view.pool.length)] || '';
+  }
+
+  /**
+   * Hot-reloads runtime emote settings (auto-appending).
+   * @param {object} settings
+   */
+  reloadSettings({ appendEnabled } = {}) {
+    if (appendEnabled !== undefined) this.#cfg.appendEnabled = Boolean(appendEnabled);
+    for (const key of this.#channels.keys()) {
+      this.#rebuild(key, { persist: false, emit: true });
+    }
   }
 }
 

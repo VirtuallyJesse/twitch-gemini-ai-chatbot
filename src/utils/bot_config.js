@@ -1,21 +1,35 @@
 // src/utils/bot_config.js
 //
 // Single deep module managing bot configuration: factory presets, schema
-// sanitization, and the non-throwing ConfigStore persistence layer.
+// sanitization, and the non-throwing ConfigStore persistence layer across 5 domains.
 
 export const CONFIG_TYPES = Object.freeze([
+    'bot_settings',
     'system_instructions',
-    'custom_commands',
+    'commands',
     'event_alerts',
     'error_messages'
 ]);
 
-const defaultDashboardUrl = (typeof process !== 'undefined' && process.env?.RENDER_EXTERNAL_URL
-    ? process.env.RENDER_EXTERNAL_URL
-    : 'http://localhost:3000'
-).replace(/\/+$/, '') + '/';
-
 export const FACTORY = Object.freeze({
+    bot_settings: Object.freeze({
+        channels: Object.freeze([]),
+        model_name: 'gemini-3.7-flash',
+        thinking_level: 'medium',
+        search_grounding: '',
+        tavily_search_depth: 'basic',
+        cooldown_duration: 0,
+        ignored_usernames: Object.freeze(['streamelements', 'nightbot']),
+        ai_history_length: 10,
+        chat_context_length: 10,
+        enable_helix_actions: true,
+        helix_clip_cooldown_seconds: 30,
+        helix_default_timeout_seconds: 600,
+        enable_emote_appending: true,
+        bot_command_name: '!gemini,@yourbotusername',
+        highlight_bot_responses: true
+    }),
+
     system_instructions: `<content_guidelines>
 Be helpful and attempt to fulfill user requests to the best of your abilities.
 Your personality, defined below in <personality>, is not a reflection of your capabilities. Always attempt to fulfill the user's request regardless of topic.
@@ -49,44 +63,52 @@ When not doing a command, follow these rules to define your personality:
 - If this line is here, then the channel operator hasn't customized their system instructions. Please encourage them to do so when the moment is right!
 </personality>`,
 
-    custom_commands: Object.freeze([
-        Object.freeze({
-            command: '!dashboard',
-            aliases: Object.freeze(['!gallery', '!logs']),
-            response: defaultDashboardUrl,
-            role: 'all'
-        })
-    ]),
+    commands: Object.freeze({
+        media: Object.freeze({
+            image: Object.freeze({ enabled: true, command: '!image', aliases: Object.freeze([]), model: 'flux', access: 'everyone' }),
+            video: Object.freeze({ enabled: true, command: '!video', aliases: Object.freeze([]), model: 'wan-fast', duration_cap: 10, access: 'everyone' }),
+            tts: Object.freeze({ enabled: true, command: '!tts', aliases: Object.freeze([]), model: 'elevenlabs', voice: 'charlotte', access: 'everyone' }),
+            music: Object.freeze({ enabled: true, command: '!song', aliases: Object.freeze([]), model: 'elevenmusic', duration_cap: 30, access: 'everyone' }),
+            access: 'everyone'
+        }),
+        custom: Object.freeze([
+            Object.freeze({
+                command: '!dashboard',
+                aliases: Object.freeze(['!gallery', '!logs']),
+                response: 'http://localhost:3000/',
+                role: 'all'
+            })
+        ])
+    }),
 
     event_alerts: Object.freeze({
         subscription: Object.freeze({
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            fallback_template: 'Welcome to the community, {username}! Thanks for subscribing at {tier}!',
-            ai_prompt: 'Acknowledge {username} subscribing at {tier} with an enthusiastic welcome.'
+            fallback_template: 'Thanks for the {tier} sub, {username}!',
+            ai_prompt: 'Say a quick welcome to {username}, who just subscribed at {tier}.'
         }),
         resub: Object.freeze({
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            fallback_template: 'Welcome back, {username}! Thanks for {months} months of support (streak: {streak})!',
-            ai_prompt: "Celebrate {username} resubscribing for {months} cumulative months (streak: {streak}). Their resub message: '{message}'."
-        }),
-        community_sub_gift: Object.freeze({
-            enabled: true,
-            ai_enabled: true,
-            cooldown_seconds: 0,
-            fallback_template: 'Huge hype! {username} just gifted {count} subscriptions to the community!',
-            ai_prompt: 'Celebrate {username} generously gifting {count} subscriptions to the community with massive hype.'
+            fallback_template: 'Thanks for {months} months of support, {username}!',
+            ai_prompt: "Welcome back {username}, now at {months} months (streak: {streak}). Respond to their message: '{message}'."
         }),
         sub_gift: Object.freeze({
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            suppress_in_community_gift: true,
             fallback_template: 'Thanks for the gift sub, {username}!',
-            ai_prompt: 'Thank {username} for gifting a subscription to the channel.'
+            ai_prompt: 'Thank {username} for the gift sub.'
+        }),
+        community_sub_gift: Object.freeze({
+            enabled: true,
+            ai_enabled: true,
+            cooldown_seconds: 0,
+            fallback_template: 'Thanks for gifting {count} subs to the community, {username}!',
+            ai_prompt: 'React to {username} gifting {count} subs to the community.'
         }),
         cheer: Object.freeze({
             enabled: true,
@@ -94,7 +116,7 @@ When not doing a command, follow these rules to define your personality:
             min_bits: 100,
             cooldown_seconds: 0,
             fallback_template: 'Thanks for cheering {bits} bits, {username}!',
-            ai_prompt: "Thank {username} for cheering {bits} bits. Their cheer message: '{message}'."
+            ai_prompt: "Thank {username} for cheering {bits} bits. Respond to their message: '{message}'."
         }),
         channel_points: Object.freeze({
             enabled: false,
@@ -102,8 +124,8 @@ When not doing a command, follow these rules to define your personality:
             rewards: Object.freeze({
                 Hydrate: Object.freeze({
                     ai_enabled: true,
-                    fallback_template: 'Drink water, streamer! {username} redeemed Hydrate!',
-                    ai_prompt: "Remind the streamer to hydrate in your cheeky persona, requested by {username}. Note: '{user_input}'."
+                    fallback_template: '{username} says drink water, streamer!',
+                    ai_prompt: "{username} redeemed the Hydrate reward. Remind the streamer to drink water. Their note: '{user_input}'."
                 })
             })
         }),
@@ -112,15 +134,15 @@ When not doing a command, follow these rules to define your personality:
             ai_enabled: true,
             min_viewers: 1,
             cooldown_seconds: 10,
-            fallback_template: 'Welcome raiders! Thanks {username} for bringing {viewers} viewers over!',
-            ai_prompt: 'Welcome {username} and their raid of {viewers} viewers with huge energy.'
+            fallback_template: '{username} raided with {viewers} viewers. Welcome!',
+            ai_prompt: 'Welcome {username}, who just raided with {viewers} viewers.'
         }),
         follow: Object.freeze({
             enabled: false,
             ai_enabled: true,
             cooldown_seconds: 5,
-            fallback_template: 'Thanks for following the channel, {username}!',
-            ai_prompt: 'Thank {username} for following the channel.'
+            fallback_template: 'Thanks for the follow, {username}!',
+            ai_prompt: 'Thank {username} for the follow.'
         })
     }),
 
@@ -140,6 +162,8 @@ When not doing a command, follow these rules to define your personality:
         POLLINATIONS_RATE_LIMITED: '⏰ Rate Limited. Pollinations is busy. Try again in 30 seconds.',
         POLLINATIONS_GENERIC_ERROR: '🔧 Pollinations {modelType} Error. Something went wrong. Try again in 30 seconds.',
         MEDIA_PROMPT_REQUIRED: '@{username} Please provide a description for the {mediaType}.',
+        MEDIA_ACCESS_DENIED: '🔒 That command is restricted on this channel.',
+        MEDIA_COMMAND_DISABLED: '⛔ That command is turned off right now.',
         MEDIA_NO_DATA: '🔧 {service} Error. No {mediaType} data returned. Try again.',
         MEDIA_FALLBACK_RESPONSE: "Here's your {mediaType} {username}: {url}",
         COOLDOWN_ACTIVE: 'Cooldown active. Please wait {remainingTime} seconds before sending another message.',
@@ -188,14 +212,129 @@ When not doing a command, follow these rules to define your personality:
     })
 });
 
+export function createFactoryDefaults(env = {}) {
+    const csvList = (v) => String(v || '').split(',').map((s) => s.trim().replace(/^#/, '').toLowerCase()).filter(Boolean);
+    const boolVal = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
+
+    // Dashboard URL is the composition root's job; FACTORY keeps the
+    // placeholder and env seeds the live default (Render auto-sets
+    // RENDER_EXTERNAL_URL, local fallback stays localhost).
+    const dashboardUrl = String(env.RENDER_EXTERNAL_URL || 'http://localhost:3000').replace(/\/+$/, '') + '/';
+    const commands = dashboardUrl === 'http://localhost:3000/'
+        ? FACTORY.commands
+        : Object.freeze({
+            media: FACTORY.commands.media,
+            custom: Object.freeze([
+                Object.freeze({
+                    command: '!dashboard',
+                    aliases: Object.freeze(['!gallery', '!logs']),
+                    response: dashboardUrl,
+                    role: 'all'
+                })
+            ])
+        });
+
+    const envIgnored = csvList(env.IGNORED_USERNAMES);
+
+    return Object.freeze({
+        bot_settings: Object.freeze({
+            channels: Object.freeze(csvList(env.JOIN_CHANNELS)),
+            model_name: env.MODEL_NAME || FACTORY.bot_settings.model_name,
+            thinking_level: env.THINKING_LEVEL || FACTORY.bot_settings.thinking_level,
+            search_grounding: env.SEARCH_GROUNDING || FACTORY.bot_settings.search_grounding,
+            tavily_search_depth: env.TAVILY_SEARCH_DEPTH || FACTORY.bot_settings.tavily_search_depth,
+            cooldown_duration: env.COOLDOWN_DURATION !== undefined && env.COOLDOWN_DURATION !== '' ? Number(env.COOLDOWN_DURATION) : FACTORY.bot_settings.cooldown_duration,
+            ignored_usernames: Object.freeze(envIgnored.length ? envIgnored : [...FACTORY.bot_settings.ignored_usernames]),
+            ai_history_length: Number(env.AI_HISTORY_LENGTH) || FACTORY.bot_settings.ai_history_length,
+            chat_context_length: Number(env.CHAT_CONTEXT_LENGTH) || FACTORY.bot_settings.chat_context_length,
+            enable_helix_actions: boolVal(env.ENABLE_HELIX_ACTIONS, FACTORY.bot_settings.enable_helix_actions),
+            helix_clip_cooldown_seconds: Number(env.HELIX_CLIP_COOLDOWN_SECONDS) || FACTORY.bot_settings.helix_clip_cooldown_seconds,
+            helix_default_timeout_seconds: Number(env.HELIX_DEFAULT_TIMEOUT_SECONDS) || FACTORY.bot_settings.helix_default_timeout_seconds,
+            enable_emote_appending: boolVal(env.ENABLE_EMOTE_APPENDING, FACTORY.bot_settings.enable_emote_appending),
+            bot_command_name: env.BOT_COMMAND_NAME || FACTORY.bot_settings.bot_command_name,
+            highlight_bot_responses: boolVal(env.HIGHLIGHT_BOT_RESPONSES, FACTORY.bot_settings.highlight_bot_responses)
+        }),
+        system_instructions: FACTORY.system_instructions,
+        commands,
+        event_alerts: FACTORY.event_alerts,
+        error_messages: FACTORY.error_messages
+    });
+}
+
 const REDIS_KEY = (type) => `config:${type}`;
 const ROLES = new Set(['all', 'moderator', 'broadcaster']);
+const ACCESS_LEVELS = new Set(['everyone', 'subs', 'vipmod', 'mod']);
 const EVENT_KINDS = Object.keys(FACTORY.event_alerts);
+const MEDIA_COMMAND_KEYS = ['image', 'video', 'tts', 'music'];
+
+function exactTrigger(value) {
+    return String(value ?? '').trim().toLowerCase().slice(0, 32);
+}
+
+/**
+ * Collects every chat trigger owned by the commands config (media command
+ * names/aliases + custom static commands) using exact sigil preservation.
+ */
+export function collectExactTriggers(commands) {
+    const triggers = [];
+    if (!commands || typeof commands !== 'object') return triggers;
+    for (const key of MEDIA_COMMAND_KEYS) {
+        const cfg = commands.media?.[key];
+        if (!cfg || typeof cfg !== 'object') continue;
+        const sources = [cfg.command, ...(Array.isArray(cfg.aliases) ? cfg.aliases : String(cfg.aliases ?? '').split(','))];
+        for (const source of sources) {
+            const t = exactTrigger(source);
+            if (t) triggers.push(t);
+        }
+    }
+    const custom = Array.isArray(commands.custom) ? commands.custom : [];
+    for (const row of custom) {
+        if (!row || typeof row !== 'object') continue;
+        const sources = [row.command, ...(Array.isArray(row.aliases) ? row.aliases : String(row.aliases ?? '').split(','))];
+        for (const source of sources) {
+            const t = exactTrigger(source);
+            if (t) triggers.push(t);
+        }
+    }
+    return triggers;
+}
+
+// Legacy alias — keep test & external imports working; exact semantics.
+export const collectCommandTriggers = collectExactTriggers;
 
 function invalid(message) {
     const err = new Error(message);
     err.code = 'INVALID_CONFIG';
     return err;
+}
+
+function sanitizeCustomCommandList(raw, fieldName = 'custom_commands') {
+    if (!Array.isArray(raw)) throw invalid(`${fieldName} must be an array`);
+    const seen = new Set();
+    return raw.map((row, i) => {
+        const command = exactTrigger(row?.command);
+        if (!command) throw invalid(`${fieldName}[${i}].command is required`);
+        if (seen.has(command)) throw invalid(`duplicate command ${command}`);
+        seen.add(command);
+
+        const aliases = [];
+        const rawAliases = Array.isArray(row?.aliases)
+            ? row.aliases
+            : String(row?.aliases || '').split(',');
+        for (const a of rawAliases) {
+            const alias = exactTrigger(a);
+            if (!alias) continue;
+            if (seen.has(alias)) throw invalid(`duplicate command or alias ${alias}`);
+            seen.add(alias);
+            aliases.push(alias);
+        }
+
+        const response = String(row?.response || '').trim();
+        if (!response) throw invalid(`${fieldName}[${i}].response is required`);
+        if (response.length > 499) throw invalid(`${fieldName}[${i}].response exceeds 499 characters`);
+        const role = ROLES.has(row?.role) ? row.role : 'all';
+        return { command, aliases, response, role };
+    });
 }
 
 function sanitizeEventKind(kind, factoryKind, rawKind) {
@@ -243,10 +382,6 @@ function sanitizeEventKind(kind, factoryKind, rawKind) {
         out.min_viewers = mv;
     }
 
-    if ('suppress_in_community_gift' in factoryKind && 'suppress_in_community_gift' in rawKind) {
-        out.suppress_in_community_gift = Boolean(rawKind.suppress_in_community_gift);
-    }
-
     if (kind === 'channel_points' && 'rewards' in rawKind) {
         if (rawKind.rewards && typeof rawKind.rewards === 'object' && !Array.isArray(rawKind.rewards)) {
             const rewardsOut = {};
@@ -275,44 +410,131 @@ function sanitizeEventKind(kind, factoryKind, rawKind) {
     return out;
 }
 
-export function sanitizeConfig(type, raw) {
+export function sanitizeConfig(type, raw, context = {}) {
     switch (type) {
+        case 'bot_settings': {
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                throw invalid('bot_settings must be an object');
+            }
+            const out = { ...FACTORY.bot_settings };
+
+            if ('channels' in raw) {
+                if (!Array.isArray(raw.channels)) throw invalid('bot_settings.channels must be an array');
+                out.channels = raw.channels
+                    .map((c) => String(c || '').trim().replace(/^#/, '').toLowerCase())
+                    .filter(Boolean);
+            }
+            if ('model_name' in raw && raw.model_name) out.model_name = String(raw.model_name).trim();
+            if ('thinking_level' in raw && raw.thinking_level) out.thinking_level = String(raw.thinking_level).trim();
+            if ('search_grounding' in raw) out.search_grounding = String(raw.search_grounding || '').trim();
+            if ('tavily_search_depth' in raw) out.tavily_search_depth = String(raw.tavily_search_depth || 'basic').trim();
+            if ('cooldown_duration' in raw) {
+                const cd = Number(raw.cooldown_duration);
+                if (Number.isFinite(cd) && cd >= 0) out.cooldown_duration = cd;
+            }
+            if ('ignored_usernames' in raw) {
+                if (Array.isArray(raw.ignored_usernames)) {
+                    out.ignored_usernames = raw.ignored_usernames.map((u) => String(u || '').trim().toLowerCase()).filter(Boolean);
+                }
+            }
+            if ('ai_history_length' in raw) {
+                const l = Number(raw.ai_history_length);
+                if (Number.isFinite(l) && l >= 0) out.ai_history_length = l;
+            }
+            if ('chat_context_length' in raw) {
+                const l = Number(raw.chat_context_length);
+                if (Number.isFinite(l) && l >= 0) out.chat_context_length = l;
+            }
+            if ('enable_helix_actions' in raw) out.enable_helix_actions = Boolean(raw.enable_helix_actions);
+            if ('helix_clip_cooldown_seconds' in raw) {
+                const c = Number(raw.helix_clip_cooldown_seconds);
+                if (Number.isFinite(c) && c >= 0) out.helix_clip_cooldown_seconds = c;
+            }
+            if ('helix_default_timeout_seconds' in raw) {
+                const t = Number(raw.helix_default_timeout_seconds);
+                if (Number.isFinite(t) && t >= 0) out.helix_default_timeout_seconds = t;
+            }
+            if ('enable_emote_appending' in raw) out.enable_emote_appending = Boolean(raw.enable_emote_appending);
+            if ('bot_command_name' in raw && raw.bot_command_name) out.bot_command_name = String(raw.bot_command_name).trim();
+            if ('highlight_bot_responses' in raw) out.highlight_bot_responses = Boolean(raw.highlight_bot_responses);
+
+            if (Array.isArray(context.commandTriggers) && context.commandTriggers.length > 0) {
+                const owned = new Set(context.commandTriggers.map(exactTrigger).filter(Boolean));
+                for (const rawPrefix of String(out.bot_command_name ?? '').split(',')) {
+                    const p = exactTrigger(rawPrefix);
+                    if (p && owned.has(p)) {
+                        throw invalid(`${p} is already in use.`);
+                    }
+                }
+            }
+
+            return out;
+        }
         case 'system_instructions': {
             if (typeof raw !== 'string') throw invalid('system_instructions must be a string');
             if (raw.length > 16_000) throw invalid('system_instructions exceeds 16000 characters');
             return raw;
         }
-        case 'custom_commands': {
-            if (!Array.isArray(raw)) throw invalid('custom_commands must be an array');
-            const seen = new Set();
-            return raw.map((row, i) => {
-                let command = String(row?.command || '').trim().toLowerCase();
-                if (!command) throw invalid(`custom_commands[${i}].command is required`);
-                if (!command.startsWith('!')) command = `!${command}`;
-                if (command.length > 32) throw invalid(`custom_commands[${i}].command is too long`);
-                if (seen.has(command)) throw invalid(`duplicate command ${command}`);
-                seen.add(command);
-
-                const aliases = [];
-                const rawAliases = Array.isArray(row?.aliases)
-                    ? row.aliases
-                    : String(row?.aliases || '').split(',');
-                for (const a of rawAliases) {
-                    let alias = String(a || '').trim().toLowerCase();
-                    if (!alias) continue;
-                    if (!alias.startsWith('!')) alias = `!${alias}`;
-                    if (alias.length > 32) throw invalid(`custom_commands[${i}].aliases is too long`);
-                    if (seen.has(alias)) throw invalid(`duplicate command or alias ${alias}`);
-                    seen.add(alias);
-                    aliases.push(alias);
+        case 'commands': {
+            if (!raw || typeof raw !== 'object') throw invalid('commands must be an object');
+            const out = structuredClone(FACTORY.commands);
+            if (raw.media && typeof raw.media === 'object') {
+                const m = raw.media;
+                for (const key of MEDIA_COMMAND_KEYS) {
+                    if (m[key] && typeof m[key] === 'object') {
+                        out.media[key] = { ...out.media[key], ...m[key] };
+                        out.media[key].command = exactTrigger(out.media[key].command) || FACTORY.commands.media[key].command;
+                        const aliasSource = Array.isArray(m[key].aliases)
+                            ? m[key].aliases
+                            : String(m[key].aliases ?? '').split(',');
+                        const seenTriggers = new Set([out.media[key].command]);
+                        const aliases = [];
+                        for (const src of aliasSource) {
+                            const a = exactTrigger(src);
+                            if (!a) continue;
+                            if (seenTriggers.has(a)) throw invalid(`${a} is already in use.`);
+                            seenTriggers.add(a);
+                            aliases.push(a);
+                        }
+                        out.media[key].aliases = aliases;
+                        if ('duration_cap' in out.media[key]) {
+                            out.media[key].duration_cap = Number(out.media[key].duration_cap) || FACTORY.commands.media[key].duration_cap;
+                        }
+                        if (!ACCESS_LEVELS.has(out.media[key].access)) {
+                            out.media[key].access = FACTORY.commands.media[key].access;
+                        }
+                    }
                 }
+                if ('access' in m && ACCESS_LEVELS.has(m.access)) out.media.access = m.access;
+            }
+            if (raw.custom) {
+                out.custom = sanitizeCustomCommandList(raw.custom, 'commands.custom');
+            }
 
-                const response = String(row?.response || '').trim();
-                if (!response) throw invalid(`custom_commands[${i}].response is required`);
-                if (response.length > 499) throw invalid(`custom_commands[${i}].response exceeds 499 characters`);
-                const role = ROLES.has(row?.role) ? row.role : 'all';
-                return { command, aliases, response, role };
-            });
+            // Loud trigger-collision rejection: every chat trigger must be unique
+            // across media cards, custom commands, and the AI prefix, so saves fail
+            // visibly instead of silently shadowing by routing order.
+            const ownerByTrigger = new Map();
+            const claimTrigger = (trigger, owner) => {
+                const existing = ownerByTrigger.get(trigger);
+                if (existing) throw invalid(`${trigger} is already in use.`);
+                ownerByTrigger.set(trigger, owner);
+            };
+            for (const key of MEDIA_COMMAND_KEYS) {
+                claimTrigger(out.media[key].command, `the ${key} command`);
+                for (const alias of out.media[key].aliases) claimTrigger(alias, `the ${key} command`);
+            }
+            for (const row of out.custom) {
+                claimTrigger(row.command, `custom command ${row.command}`);
+                for (const alias of row.aliases) claimTrigger(alias, `custom command ${row.command}`);
+            }
+            for (const prefix of context.aiPrefixes || []) {
+                const p = exactTrigger(prefix);
+                if (p && ownerByTrigger.has(p)) {
+                    throw invalid(`${p} is already in use.`);
+                }
+            }
+            return out;
         }
         case 'event_alerts': {
             if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -344,9 +566,9 @@ export function sanitizeConfig(type, raw) {
 }
 
 export class ConfigStore {
-    constructor({ storage, defaults = FACTORY } = {}) {
+    constructor({ storage, defaults = null } = {}) {
         this.storage = storage || null;
-        this.defaults = defaults;
+        this.defaults = defaults || FACTORY;
     }
 
     async get(type) {
@@ -372,16 +594,35 @@ export class ConfigStore {
         return { ...out, overrides };
     }
 
-    async set(type, raw) {
-        const value = sanitizeConfig(type, raw);
+    /**
+     * Whether a stored override document for a config type actually defines a
+     * given top-level key. False for factory fallbacks and unparsable docs.
+     * Lets boot code tell "saved as empty" apart from "field predates schema",
+     * e.g. so env seeds migrate in exactly once for modal-owned lists.
+     */
+    async storedDocHas(type, key) {
+        const raw = await this.#read(REDIS_KEY(type));
+        if (raw == null || raw === '') return false;
+        try {
+            return key in JSON.parse(raw);
+        } catch {
+            return false;
+        }
+    }
+
+    async set(type, raw, context = {}) {
+        const value = sanitizeConfig(type, raw, context);
         const stored = type === 'system_instructions' ? value : JSON.stringify(value);
         await this.#write(REDIS_KEY(type), stored);
         return { value, override: true };
     }
 
-    async reset(type) {
+    async reset(type, context = {}) {
+        // Validate the factory-restored value BEFORE deleting so a colliding
+        // reset can't destroy the stored override.
+        const value = sanitizeConfig(type, structuredClone(this.defaults[type]), context);
         await this.#del(REDIS_KEY(type));
-        return { value: structuredClone(this.defaults[type]), override: false };
+        return { value, override: false };
     }
 
     async #read(key) {
@@ -409,19 +650,17 @@ export function commandsToMap(list) {
         if (!row || typeof row !== 'object') continue;
         const spec = { response: row.response, role: row.role };
         if (row.command) {
-            const cmd = String(row.command).trim().toLowerCase();
-            const normCmd = cmd.startsWith('!') ? cmd : `!${cmd}`;
-            map.set(normCmd, spec);
+            const cmd = exactTrigger(row.command);
+            if (cmd) map.set(cmd, spec);
         }
         if (row.aliases) {
             const aliasList = Array.isArray(row.aliases)
                 ? row.aliases
                 : String(row.aliases).split(',');
             for (const a of aliasList) {
-                const clean = String(a || '').trim().toLowerCase();
+                const clean = exactTrigger(a);
                 if (!clean) continue;
-                const normAlias = clean.startsWith('!') ? clean : `!${clean}`;
-                map.set(normAlias, spec);
+                map.set(clean, spec);
             }
         }
     }

@@ -33,7 +33,7 @@ A high-level checklist — the [Tutorial](#tutorial) below covers every step in 
 6. *(Optional)* **Get a Pollinations API key** from [`enter.pollinations.ai`](https://enter.pollinations.ai) to enable `!image`, `!video`, `!tts`, and `!song`
 7. **Deploy your fork to Render** and fill in your environment variables
 8. **Authorize the bot** at `https://YOUR-APP.onrender.com/auth/login`
-9. **Open your dashboard** at `https://YOUR-APP.onrender.com/` to customize personality, commands, and alerts
+9. **Open your dashboard** at `https://YOUR-APP.onrender.com/` to join channels and customize personality, commands, models, and alerts
 
 That's it. No local install. No terminal commands.
 
@@ -106,7 +106,6 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
 |---|---|
 | `TWITCH_USERNAME` | Your **bot account's** username (lowercase) |
 | `ADMIN_USERNAMES` | Your **streamer account's** username (grants access to dashboard settings) |
-| `JOIN_CHANNELS` | Your **streamer channel's** username (where the bot should chat) |
 | `TWITCH_CLIENT_ID` | The Client ID copied above |
 | `TWITCH_CLIENT_SECRET` | The Client Secret copied above |
 
@@ -223,13 +222,13 @@ Tavily lets the bot look up real-time facts — scores, patch notes, breaking ne
 1. Go to [app.tavily.com](https://app.tavily.com) and sign up
 2. Copy your API key from the dashboard
 
-#### Render environment variables
+#### Render environment variable
 
 | Variable | Value |
 |---|---|
-| `SEARCH_GROUNDING` | `tavily` |
 | `TAVILY_API_KEY` | Your Tavily API key |
-| `TAVILY_SEARCH_DEPTH` | `basic` (1 credit/search, default) or `advanced` |
+
+To turn search on, open your dashboard settings and set **Web search** to `Tavily`.
 
 > 💡 The free tier gives you 1,000 searches a month, resetting on the 1st — plenty for daily chat use.
 
@@ -257,7 +256,9 @@ Pollinations powers the `!image`, `!video`, `!tts`, and `!song` commands.
 |---|---|
 | `POLLINATIONS_API_KEY` | Your Pollinations API key |
 
-> 💡 Pollinations is an actively evolving platform — available models change frequently. If a command stops working, check [enter.pollinations.ai](https://enter.pollinations.ai) for current model names and update your environment variables accordingly.
+Models are managed from your dashboard under **Commands**.
+
+> 💡 Pollinations is an actively evolving platform and available models change frequently. Some models are paid only. Check [enter.pollinations.ai](https://enter.pollinations.ai) for current details.
 
 </details>
 
@@ -270,12 +271,13 @@ Pollinations powers the `!image`, `!video`, `!tts`, and `!song` commands.
 
 Your Render URL (`https://YOUR-APP.onrender.com`) is your live control center. Sign in with Twitch and click your name → **⚙️ Bot Configuration** to customize:
 
-- **Persona** — Set your bot's personality, tone, and channel rules.
-- **Commands** — Add instant chat commands (e.g. `!discord`, `!socials`) with custom role permissions.
-- **Alerts** — Toggle and customize AI or static celebrations for subs, raids, cheers, follows, and channel points.
-- **Errors** — Fine-tune chat fallback notices if external services go down.
+- **Configuration.** Which channels the bot joins and how it behaves in chat. Plus search, emotes, and stream actions.
+- **Persona.** Write your bot's personality, tone, and channel rules.
+- **Commands.** Tune the media commands (`!image`, `!video`, `!tts`, `!song`). Rename them, switch models, and set who can use them. Add custom text commands like `!discord` below.
+- **Alerts.** Toggle and customize AI or static celebrations for subs, raids, cheers, follows, and channel points.
+- **Errors.** Fine-tune chat fallback notices if external services go down.
 
-> 💡 All dashboard changes save instantly — no redeploying or waiting required.
+> 💡 All dashboard changes save instantly.
 
 </details>
 
@@ -325,9 +327,9 @@ Changing the title/category, timeouts, announcements, and shoutouts are limited 
 
 <br>
 
-Yes. Set `ENABLE_HELIX_ACTIONS` to `false` and the bot goes back to pure conversational Q&A.
+Yes. In your dashboard, open **Settings → Configuration** and turn off **Stream actions**. The bot goes back to pure Q&A.
 
-You can also tune `HELIX_CLIP_COOLDOWN_SECONDS` (default `30`) and `HELIX_DEFAULT_TIMEOUT_SECONDS` (default `600`) if you want to adjust those defaults.
+You can also tune **Clip Cooldown** and **Timeout Duration** below the toggle.
 
 </details>
 
@@ -336,11 +338,11 @@ You can also tune `HELIX_CLIP_COOLDOWN_SECONDS` (default `30`) and `HELIX_DEFAUL
 
 <br>
 
-Yes, if you set it up. Set `SEARCH_GROUNDING` to `tavily` and add a `TAVILY_API_KEY` to enable free web search.
+Yes, if you set it up. Add your `TAVILY_API_KEY` in Render, then set **Settings → Configuration → Web search** to `Tavily`.
 
-Leave it on `off` (the default) and the bot skips search — it still answers from its own knowledge, and you can still paste it a link directly to read via URL context.
+Leave it on `Off` and the bot skips search — it still answers from its own knowledge, and you can still paste it a link directly to read via URL context.
 
-`SEARCH_GROUNDING=google` uses Gemini's own built-in search instead of Tavily. This only works with a **paid** Gemini key, so stick to `tavily` or `off` unless you're already paying for Gemini.
+`Google` uses Gemini's own built-in search instead of Tavily. This only works with a **paid** Gemini key, so stick to `Tavily` or `Off` unless you're already paying for Gemini.
 
 </details>
 
@@ -415,7 +417,7 @@ Your Render service URL (`https://YOUR-APP.onrender.com`) doubles as a split-scr
 
 <br>
 
-Pollinations is an actively evolving platform — available models change frequently. You can update the model names in your environment variables at any time. Current model names are listed on the same page as your API key at [enter.pollinations.ai](https://enter.pollinations.ai).
+Pollinations is an actively evolving platform and available models change frequently. Open **Settings → Commands**. The dropdowns list the current models. Pick one for the command that failed.
 
 </details>
 
@@ -440,11 +442,13 @@ To update:
 
 <br>
 
-Yes, for development and testing. Run `npm install`, create a `.env` file with the same variable names from `render.yaml`, then run `npm run dev`.
+Yes, for development and testing. Run `npm install`, build the dashboard once with `npm run build`, create a `.env` file with the same variable names from `render.yaml`, then run `npm run dev`.
 
 > ⚠️ **Use separate credentials for local development.** Create a different Twitch application (with `http://localhost:3000/auth/callback` as the redirect URL) and either omit `UPSTASH_REDIS_URL` or point it to a separate database. Using the same credentials as production will overwrite your live tokens and data.
 
 Once running, visit `http://localhost:3000/auth/login` to authorize.
+
+> 💡 `AI_VERBOSE` | `true` turns on detailed engine logging while debugging.
 
 </details>
 

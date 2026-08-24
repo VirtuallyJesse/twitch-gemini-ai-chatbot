@@ -150,6 +150,14 @@ export function createHelixTools({
 } = {}) {
     if (!transport) throw new Error('createHelixTools requires transport');
 
+    // Mutable runtime knobs so dashboard saves hot-apply without a restart.
+    const initialClip = Number(clipCooldownSeconds);
+    const initialTimeout = Number(defaultTimeoutSeconds);
+    const knobs = {
+        clipCooldownSeconds: Number.isFinite(initialClip) ? Math.max(0, initialClip) : 30,
+        defaultTimeoutSeconds: Number.isFinite(initialTimeout) ? Math.max(0, initialTimeout) : 600
+    };
+
     const helix = transport.helix;
     const resolveContext = (context, { requireMod = false, requireBroadcaster = false } = {}) => {
         if ((requireMod || requireBroadcaster) && context?.caller && !isPrivilegedCaller(context.caller)) {
@@ -231,7 +239,7 @@ export function createHelixTools({
 
             const login = cleanTarget(username);
             if (!login) return { error: 'A username is required.' };
-            const seconds = resolveTimeoutDuration(duration, defaultTimeoutSeconds);
+            const seconds = resolveTimeoutDuration(duration, knobs.defaultTimeoutSeconds);
 
             try {
                 const ids = await helix.resolveUserIds([login]);
@@ -310,7 +318,7 @@ export function createHelixTools({
             const key = cleanTarget(context.channel);
             const now = clock();
             const cached = clipTracker.get(key);
-            if (cached && (now - cached.timestamp) / 1000 < clipCooldownSeconds) {
+            if (cached && (now - cached.timestamp) / 1000 < knobs.clipCooldownSeconds) {
                 return { success: true, url: cached.url, cached: true };
             }
 
@@ -331,7 +339,21 @@ export function createHelixTools({
         execute: (args, context) => handlers[decl.name](args, context)
     }));
 
-    return { tools, clipTracker, shoutoutTracker };
+    /**
+     * Hot-reloads runtime knobs (clip dedup window, default timeout duration)
+     * from config:bot_settings saves.
+     * @param {{ clipCooldownSeconds?: number, defaultTimeoutSeconds?: number }} [settings]
+     */
+    function reloadSettings({ clipCooldownSeconds: nextClipCooldown, defaultTimeoutSeconds: nextTimeout } = {}) {
+        if (nextClipCooldown !== undefined && nextClipCooldown !== null) {
+            knobs.clipCooldownSeconds = Number(nextClipCooldown) || 0;
+        }
+        if (nextTimeout !== undefined && nextTimeout !== null) {
+            knobs.defaultTimeoutSeconds = Number(nextTimeout) || 0;
+        }
+    }
+
+    return { tools, clipTracker, shoutoutTracker, reloadSettings };
 }
 
 export default createHelixTools;

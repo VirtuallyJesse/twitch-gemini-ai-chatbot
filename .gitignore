@@ -27,6 +27,11 @@ coverage
 # Tests are local-only and not shipped to the public repo
 test/
 
+# Build outputs & dev fixtures
+public/dist/
+public/media/
+dev_mock.js
+
 # Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
 .grunt
 

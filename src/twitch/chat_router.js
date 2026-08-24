@@ -4,7 +4,7 @@
 import { FACTORY, commandsToMap } from '../utils/bot_config.js';
 
 const DEFAULT_PREFIXES = {
-    ai: ['!gemini'],
+    ai: ['!gemini', '@yourbotusername'],
     image: ['!image'],
     video: ['!video'],
     tts: ['!tts'],
@@ -154,14 +154,9 @@ class CustomCommandRegistry {
 }
 
 class CommandMatcher {
-    constructor(prefixLists) {
-        this.ai = prefixLists.ai;
-        this.media = [
-            ...prefixLists.music.map((cmd) => ({ cmd, mediaType: 'music' })),
-            ...prefixLists.tts.map((cmd) => ({ cmd, mediaType: 'tts' })),
-            ...prefixLists.video.map((cmd) => ({ cmd, mediaType: 'video' })),
-            ...prefixLists.image.map((cmd) => ({ cmd, mediaType: 'image' }))
-        ];
+    constructor(aiList, mediaEntries) {
+        this.ai = aiList;
+        this.media = mediaEntries;
     }
 
     matchAi(lowerText) {
@@ -175,6 +170,48 @@ class CommandMatcher {
     mediaPrompt(text, command) {
         return text.slice(command.length).replace(/^,\s*/, '').trim();
     }
+}
+
+const MEDIA_TYPES = ['image', 'video', 'tts', 'music'];
+
+function entriesFromPrefixLists(prefixLists) {
+    const entries = [];
+    for (const type of [...MEDIA_TYPES].reverse()) {
+        for (const cmd of prefixLists[type] || []) {
+            entries.push({ cmd, mediaType: type, enabled: true });
+        }
+    }
+    return entries;
+}
+
+function normalizedCommandList(cfg) {
+    if (!cfg || typeof cfg !== 'object') return [];
+    const raw = [cfg.command, ...(Array.isArray(cfg.aliases) ? cfg.aliases : String(cfg.aliases || '').split(','))];
+    return raw.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
+}
+
+function mediaAccessAllowed(message, access) {
+    if (!access || access === 'everyone') return true;
+    const badges = message?.tags?.badges || {};
+    const isBroadcaster = !!badges.broadcaster || !!message?.isBroadcaster;
+    const isMod = badges.moderator != null || !!message?.isMod;
+    const isVip = badges.vip != null;
+    const isSub = badges.subscriber != null || badges.sub != null;
+    switch (access) {
+        case 'mod': return isBroadcaster || isMod;
+        case 'vipmod': return isBroadcaster || isMod || isVip;
+        case 'subs': return isBroadcaster || isMod || isVip || isSub;
+        default: return true;
+    }
+}
+
+function buildMediaOptions(cfg) {
+    if (!cfg || typeof cfg !== 'object') return {};
+    const options = {};
+    if (cfg.model) options.model = cfg.model;
+    if (cfg.voice) options.voice = cfg.voice;
+    if (cfg.duration_cap) options.duration_cap = Number(cfg.duration_cap);
+    return options;
 }
 
 function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
@@ -203,6 +240,7 @@ export class ChatRouter {
         maxMessageLength = 499,
         communityGiftWindowMs = 30_000,
         prefixes = {},
+        mediaCommands = null,
         clock = Date.now
     } = {}) {
         if (!aiEngine || !mediaPipeline || !emotePool) {
@@ -244,8 +282,81 @@ export class ChatRouter {
         this.customCommands = new CustomCommandRegistry({ customCommands });
         this.eventAlerts = new EventAlertRegistry({ eventAlerts });
         this.eventCooldowns = new EventCooldownTracker({ clock });
-        this.matcher = new CommandMatcher(this.prefixLists);
+
+        // Media command settings from config:commands.media are the live source of
+        // truth; the prefix lists above remain as boot fallback when no config exists.
+        this.mediaCommands = mediaCommands && typeof mediaCommands === 'object'
+            ? { ...structuredClone(FACTORY.commands.media), ...mediaCommands }
+            : null;
+        if (this.mediaCommands) {
+            this.#rebuildMediaRouting();
+        } else {
+            this.matcher = new CommandMatcher(this.prefixLists.ai, entriesFromPrefixLists(this.prefixLists));
+        }
         this.#communityGifts = new Map();
+    }
+
+    /**
+     * Live view of the response cooldown seconds. WebServer assigns this on
+     * dashboard saves so config:bot_settings.cooldown_duration hot-applies.
+     */
+    get cooldownDuration() {
+        return this.cooldowns.duration;
+    }
+
+    set cooldownDuration(seconds) {
+        this.cooldowns.duration = typeof seconds === 'number' ? seconds : 1;
+    }
+
+    #rebuildMediaRouting() {
+        const entries = [];
+        for (const type of MEDIA_TYPES) {
+            const cfg = this.mediaCommands?.[type];
+            const all = normalizedCommandList(cfg);
+            const enabled = cfg && cfg.enabled === false ? [] : all;
+            for (const cmd of all) {
+                entries.push({ cmd, mediaType: type, enabled: enabled.includes(cmd) });
+            }
+            this.prefixLists[type] = enabled;
+        }
+        this.allPrefixes = [
+            ...this.prefixLists.ai,
+            ...this.prefixLists.image,
+            ...this.prefixLists.video,
+            ...this.prefixLists.tts,
+            ...this.prefixLists.music
+        ];
+        this.matcher = new CommandMatcher(this.prefixLists.ai, entries);
+    }
+
+    /**
+     * Hot-reloads generative media command settings (names, aliases, enabled flags,
+     * models, voices, duration caps, access) from config:commands.media.
+     * @param {object} media sanitized commands.media object
+     */
+    reloadMediaCommands(media) {
+        if (!media || typeof media !== 'object') return;
+        this.mediaCommands = { ...structuredClone(FACTORY.commands.media), ...media };
+        this.#rebuildMediaRouting();
+    }
+
+    /**
+     * Hot-reloads AI command prefixes from config:bot_settings.bot_command_name,
+     * keeping media routing untouched.
+     * @param {string} nameCsv comma-separated trigger list
+     */
+    reloadAiPrefixes(nameCsv) {
+        const next = asPrefixList(nameCsv, []);
+        if (next.length === 0) return;
+        this.prefixLists.ai = next;
+        this.allPrefixes = [
+            ...next,
+            ...this.prefixLists.image,
+            ...this.prefixLists.video,
+            ...this.prefixLists.tts,
+            ...this.prefixLists.music
+        ];
+        this.matcher = new CommandMatcher(next, this.matcher.media);
     }
 
     #buildHarnessInstructions() {
@@ -399,6 +510,21 @@ export class ChatRouter {
             // 3. Media command matching
             const media = this.matcher.matchMedia(lower);
             if (media) {
+                if (media.enabled === false) {
+                    const reply = this.#safeErrorReply('MEDIA_COMMAND_DISABLED');
+                    if (transport && reply) await transport.send(channel, reply);
+                    return { kind: 'media_disabled', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply && transport) };
+                }
+
+                const access = this.mediaCommands?.[media.mediaType]?.access
+                    || this.mediaCommands?.access
+                    || 'everyone';
+                if (!mediaAccessAllowed(message, access)) {
+                    const reply = this.#safeErrorReply('MEDIA_ACCESS_DENIED');
+                    if (transport && reply) await transport.send(channel, reply);
+                    return { kind: 'media_denied', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply && transport) };
+                }
+
                 const prompt = this.matcher.mediaPrompt(text, media.cmd);
                 if (prompt) {
                     const cooldown = this.cooldowns.checkAndConsume(channel);
@@ -415,7 +541,8 @@ export class ChatRouter {
                     user: message.tags,
                     prompt,
                     mediaType: media.mediaType,
-                    command: media.cmd
+                    command: media.cmd,
+                    options: buildMediaOptions(this.mediaCommands?.[media.mediaType])
                 });
                 await transport.send(channel, result.replyText);
                 return {
@@ -549,8 +676,7 @@ export class ChatRouter {
                 return { kind: 'threshold', channel, eventKind, sent: false };
             }
 
-            if (eventKind === 'sub_gift' && policy.suppress_in_community_gift
-                && this.#consumeCommunityGift(channel, event.user)) {
+            if (eventKind === 'sub_gift' && this.#consumeCommunityGift(channel, event.user)) {
                 return { kind: 'suppressed', channel, eventKind, sent: false, reason: 'community_gift' };
             }
 

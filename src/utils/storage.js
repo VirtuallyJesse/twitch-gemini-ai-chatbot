@@ -4,8 +4,8 @@
 // and MemoryStorageAdapter (full-fidelity in-memory store).
 // All configuration crosses the constructor; this module reads zero process.env variables.
 
-const DEFAULT_MAX_CHAT_ENTRIES = 1000;
-const DEFAULT_MAX_MEDIA_ENTRIES = 500;
+const DEFAULT_MAX_CHAT_ENTRIES = 10000;
+const DEFAULT_MAX_MEDIA_ENTRIES = 10000;
 const DEFAULT_CHAT_READ_LIMIT = 200;
 const TOKENS_KEY = 'twitch:tokens';
 const MEDIA_KEY = 'media_log';
