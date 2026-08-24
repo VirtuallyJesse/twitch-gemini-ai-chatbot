@@ -317,7 +317,7 @@ export default function App() {
           query={query}
           onQuery={setQuery}
         />
-        <div className="min-h-0 flex-1 relative w-full">
+        <div className="min-h-0 flex-1">
           <MediaGrid items={items} resetKey={`${filter}:${query}`} />
         </div>
       </section>

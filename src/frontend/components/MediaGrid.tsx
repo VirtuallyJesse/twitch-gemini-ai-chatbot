@@ -20,10 +20,7 @@ export default function MediaGrid({ items, resetKey }: Props) {
   const timerRef = useRef(0);
   const loadingRef = useRef(false);
 
-  const [size, setSize] = useState(() => ({
-    w: typeof window !== 'undefined' ? Math.max(320, window.innerWidth - 420) : 800,
-    h: typeof window !== 'undefined' ? Math.max(400, window.innerHeight - 120) : 600,
-  }));
+  const [size, setSize] = useState({ w: 0, h: 0 });
   const [scrollTop, setScrollTop] = useState(0);
   const [loaded, setLoaded] = useState(PAGE);
   const [loading, setLoading] = useState(false);
@@ -40,35 +37,16 @@ export default function MediaGrid({ items, resetKey }: Props) {
 
   useEffect(() => () => window.clearTimeout(timerRef.current), []);
 
-  /* measure the scroll viewport */
+  /* measure the scroll viewport — re-attaches when items transition from empty (async hydration) so the scroll node exists */
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-
-    const measure = () => {
-      const w = el.clientWidth || (typeof window !== 'undefined' ? window.innerWidth - 420 : 800);
-      const h = el.clientHeight || (typeof window !== 'undefined' ? window.innerHeight - 120 : 600);
-      if (w > 0 && h > 0) {
-        setSize({ w, h });
-      }
-    };
-
+    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
     measure();
-
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const cr = entry.contentRect;
-        const w = cr.width || el.clientWidth;
-        const h = cr.height || el.clientHeight;
-        if (w > 0 && h > 0) {
-          setSize({ w, h });
-        }
-      }
-    });
-
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [items.length]);
 
   /* rAF-throttled scroll tracking */
   const onScroll = () => {
@@ -105,18 +83,15 @@ export default function MediaGrid({ items, resetKey }: Props) {
   }, [loaded, items, hasMore, requestMore]);
 
   /* ---------------- virtualization math ---------------- */
-  const effectiveW = size.w > 0 ? size.w : (typeof window !== 'undefined' ? Math.max(320, window.innerWidth - 420) : 800);
-  const effectiveH = size.h > 0 ? size.h : (typeof window !== 'undefined' ? Math.max(400, window.innerHeight - 120) : 600);
-
   const visible = items.slice(0, Math.min(loaded, items.length));
-  const cols = effectiveW >= 1080 ? 4 : effectiveW >= 620 ? 3 : 2;
-  const tile = Math.max(80, (effectiveW - (cols - 1) * GAP) / cols);
+  const cols = size.w >= 1080 ? 4 : size.w >= 620 ? 3 : 2;
+  const tile = size.w > 0 ? (size.w - (cols - 1) * GAP) / cols : 0;
   const rowH = tile + GAP;
   const totalRows = Math.ceil(visible.length / cols);
   const gridH = Math.max(0, totalRows * rowH - GAP);
 
   const startRow = rowH > 0 ? Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN) : 0;
-  const endRow = rowH > 0 ? Math.min(totalRows, Math.ceil((scrollTop + effectiveH) / rowH) + OVERSCAN) : 0;
+  const endRow = rowH > 0 ? Math.min(totalRows, Math.ceil((scrollTop + size.h) / rowH) + OVERSCAN) : 0;
   const startIdx = startRow * cols;
   const endIdx = Math.min(visible.length, endRow * cols);
   const slice = visible.slice(startIdx, endIdx);
@@ -130,10 +105,10 @@ export default function MediaGrid({ items, resetKey }: Props) {
   }
 
   return (
-    <div className="relative h-full w-full">
-      <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full w-full overflow-y-auto">
+    <div className="relative h-full">
+      <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full overflow-y-auto overflow-x-hidden">
         {/* virtual canvas */}
-        <div className="relative w-full" style={{ height: gridH }}>
+        <div className="relative" style={{ height: gridH }}>
           {slice.map((item, i) => {
             const idx = startIdx + i;
             const row = Math.floor(idx / cols);
