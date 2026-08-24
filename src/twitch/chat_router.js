@@ -2,7 +2,7 @@
 // Coordinates Twitch chat ingestion, command RBAC, media/AI dispatch,
 // per-channel cooldowns, and chatter-safe error translation.
 import { FACTORY, commandsToMap } from '../utils/bot_config.js';
-import { normalizeBadgeKinds } from '../utils/badges.js';
+import { normalizeBadges } from '../utils/badges.js';
 
 const DEFAULT_PREFIXES = {
     ai: ['!gemini', '@yourbotusername'],
@@ -481,7 +481,7 @@ export class ChatRouter {
                 transport.logMessage(channel, message.username, textForLogs, {
                     twitchEmotesByName: emoteIdMap
                 }, {
-                    badges: normalizeBadgeKinds(message),
+                    badges: normalizeBadges(message),
                     color
                 });
             }

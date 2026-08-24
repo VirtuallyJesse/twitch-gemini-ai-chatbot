@@ -1,6 +1,7 @@
 import type {
   AllConfig,
   BotStatus,
+  ChannelBadgeCatalog,
   ConfigDomain,
   PollinationsCatalog,
   RawChatEntry,
@@ -62,6 +63,10 @@ class ApiClient {
 
   async getEmotes(channel: string): Promise<Record<string, string | { url?: string; provider?: EmoteProvider }>> {
     return this.request<Record<string, string | { url?: string; provider?: EmoteProvider }>>(`/api/emotes/${normChannel(channel)}`);
+  }
+
+  async getBadges(channel: string): Promise<ChannelBadgeCatalog> {
+    return this.request<ChannelBadgeCatalog>(`/api/badges/${normChannel(channel)}`);
   }
 
   async getConfig(): Promise<AllConfig> {

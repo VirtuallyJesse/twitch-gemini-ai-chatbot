@@ -1,5 +1,37 @@
 export type MediaType = 'image' | 'video' | 'audio';
-export type BadgeKind = 'broadcaster' | 'mod' | 'vip' | 'sub' | 'bits' | 'bot';
+export interface BadgeDescriptor {
+  kind: string;
+  version: string;
+  info?: string;
+}
+
+export interface BadgeVersion {
+  id: string;
+  image_url_1x?: string;
+  image_url_2x?: string;
+  image_url_4x?: string;
+  title?: string;
+  description?: string;
+  click_action?: string | null;
+  click_url?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BadgeSet {
+  set_id: string;
+  versions: Record<string, BadgeVersion>;
+  [key: string]: unknown;
+}
+
+export interface BadgeDictionaries {
+  channel: Record<string, BadgeSet>;
+  global: Record<string, BadgeSet>;
+}
+
+export interface ChannelBadgeCatalog {
+  channel: string;
+  badges: BadgeDictionaries;
+}
 export type ChatEventKind = 'online' | 'offline' | 'raid' | 'sub' | 'gift' | 'cheer' | 'follow' | 'system';
 
 export type LogEntry =
@@ -10,7 +42,7 @@ export type LogEntry =
       user: string;
       text: string;
       color?: string;
-      badges?: BadgeKind[];
+      badges?: BadgeDescriptor[];
       meta?: {
         twitchEmotesByName?: Record<string, string>;
         [key: string]: unknown;
@@ -32,7 +64,7 @@ export interface MediaItem {
   duration?: string;
   audioKind?: 'Music' | 'Voice' | 'SFX';
   avatarUrl?: string | null;
-  badges?: BadgeKind[];
+  badges?: BadgeDescriptor[];
 }
 
 export interface RawMediaEntry {
@@ -42,7 +74,7 @@ export interface RawMediaEntry {
   username: string;
   userId?: string | null;
   avatarUrl?: string | null;
-  badges?: BadgeKind[];
+  badges?: BadgeDescriptor[];
   command?: string;
   prompt: string;
   mediaUrl: string;
@@ -60,7 +92,7 @@ export interface RawChatEntry {
   username?: string;
   user?: string;
   color?: string;
-  badges?: BadgeKind[];
+  badges?: BadgeDescriptor[];
   meta?: {
     twitchEmotesByName?: Record<string, string>;
     [key: string]: unknown;

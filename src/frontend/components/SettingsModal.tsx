@@ -1455,7 +1455,6 @@ export default function SettingsModal({
                                       user: currentBotName,
                                       text: (activeAlert.ai_enabled && testReply) ? testReply : (fallbackText || '…'),
                                       time: '18:04',
-                                      badges: ['bot'],
                                     }}
                                     channel="demo"
                                     botUsername={currentBotName}

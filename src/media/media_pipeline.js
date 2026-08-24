@@ -1,5 +1,5 @@
 import ErrorHandler from '../utils/error_handler.js';
-import { normalizeBadgeKinds } from '../utils/badges.js';
+import { normalizeBadges } from '../utils/badges.js';
 
 const MEDIA_TYPE_HARNESS = [
     { key: 'image', noun: 'an image', bullet: 'Generating images' },
@@ -352,7 +352,7 @@ export class MediaPipeline {
             const timestamp = this.now();
             const userId = typeof user === 'object' ? (user['user-id'] || user.userId || user.id || null) : null;
             const avatarUrl = typeof user === 'object' ? (user.profileImageUrl || user.avatarUrl || null) : null;
-            const badges = normalizeBadgeKinds(user);
+            const badges = normalizeBadges(user);
             const mediaEntry = {
                 id: this.idFactory(),
                 timestamp,

@@ -8,7 +8,8 @@
 
 import tmi from 'tmi.js';
 import { EventSubClient } from './eventsub_client.js';
-import { normalizeBadgeKinds } from '../utils/badges.js';
+import { normalizeBadges } from '../utils/badges.js';
+import { BadgeCatalog } from './badge_catalog.js';
 
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
@@ -238,6 +239,7 @@ class TokenVault {
     #expiresAt = 0;
     #appToken = null;
     #appExpiresAt = 0;
+    #appRefreshInFlight = null;
     #refreshInFlight = null;
     #broadcasterTokens = new Map();
     #broadcasterRefreshInFlight = new Map();
@@ -309,10 +311,18 @@ class TokenVault {
 
     async getAppToken() {
         if (this.#appToken && this.#now() < this.#appExpiresAt - TOKEN_EXPIRY_BUFFER_MS) return this.#appToken;
-        const data = await this.#tokenGrant({ grant_type: 'client_credentials' });
-        this.#appToken = data.access_token;
-        this.#appExpiresAt = this.#now() + Number(data.expires_in || 3600) * 1000;
-        return this.#appToken;
+        if (this.#appRefreshInFlight) return this.#appRefreshInFlight;
+        this.#appRefreshInFlight = (async () => {
+            try {
+                const data = await this.#tokenGrant({ grant_type: 'client_credentials' });
+                this.#appToken = data.access_token;
+                this.#appExpiresAt = this.#now() + Number(data.expires_in || 3600) * 1000;
+                return this.#appToken;
+            } finally {
+                this.#appRefreshInFlight = null;
+            }
+        })();
+        return this.#appRefreshInFlight;
     }
 
     invalidateAppToken() {
@@ -767,7 +777,7 @@ class MessageBufferStore {
         if (!this.#buffers.has(key)) this.#buffers.set(key, []);
         const buffer = this.#buffers.get(key);
         const entry = { username, message, timestamp: this.#now(), meta: meta && typeof meta === 'object' ? meta : null };
-        const badges = normalizeBadgeKinds(identity?.badges);
+        const badges = normalizeBadges(identity);
         const color = typeof identity?.color === 'string' ? identity.color.trim() : '';
         if (badges.length > 0) entry.badges = badges;
         if (color) entry.color = color;
@@ -802,6 +812,7 @@ export class TwitchTransport {
     #helix;
     #irc;
     #buffers;
+    #badges = null;
     #eventsub = null;
     #botId = null;
     #channelIdMap = {};
@@ -841,6 +852,15 @@ export class TwitchTransport {
 
         this.#vault = new TokenVault({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now: nowFn });
         this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl });
+        if (storage?.getJson && storage?.setJson) {
+            this.#badges = new BadgeCatalog({
+                helixClient: this.#helix,
+                storage,
+                nowFn,
+                ttlMs: options.badgeCacheTtlMs,
+                missCooldownMs: options.badgeMissCooldownMs
+            });
+        }
         this.#buffers = new MessageBufferStore({ maxBufferSize, now: nowFn });
         this.#irc = new IrcBridge({
             botUsername: this.#botUsername,
@@ -927,7 +947,7 @@ export class TwitchTransport {
         for (const chunk of chunks) {
             if (sent > 0) await delay(this.#chunkDelayMs);
             await this.#sendChunk(channel, chunk);
-            this.logMessage(channel, this.#botUsername, chunk, null, { badges: ['bot'] });
+            this.logMessage(channel, this.#botUsername, chunk);
             sent++;
         }
         return { sent };
@@ -995,6 +1015,7 @@ export class TwitchTransport {
     /** Appends to the channel history buffer (post-emote-processing text) and emits onLogEntry. */
     logMessage(channel, username, message, meta = null, identity = {}) {
         const entry = this.#buffers.append(channel, username, message, meta, identity);
+        if (entry.badges) void this.#badges?.noteDescriptors(channel, entry.badges);
         for (const handler of this.#logHandlers) {
             try {
                 handler(channelKey(channel), entry);
@@ -1046,6 +1067,15 @@ export class TwitchTransport {
             this.#unsubscribeEventSubChannel(ch);
         }
 
+        if (this.#badges) {
+            const activeIds = {};
+            for (const channel of this.#channels) {
+                const login = cleanName(channel);
+                if (this.#channelIdMap[login]) activeIds[login] = this.#channelIdMap[login];
+            }
+            await this.#badges.syncChannels(activeIds);
+        }
+
         return this.channels;
     }
 
@@ -1054,6 +1084,7 @@ export class TwitchTransport {
     get botId() { return this.#botId; }
     get channelIdMap() { return { ...this.#channelIdMap }; }
     get helix() { return this.#helix; }
+    get badges() { return this.#badges; }
 
     async getBroadcasterToken(channel) {
         return this.#vault.getBroadcasterAccessToken(channel);
@@ -1150,6 +1181,7 @@ export class TwitchTransport {
         this.#bootPromise = (async () => {
             await this.#vault.getUserToken();
             await this.#resolveIds();
+            await this.#badges?.initialize(this.#channelIdMap);
             await this.#irc.connect();
             await this.#startEventSub();
             this.#running = true;

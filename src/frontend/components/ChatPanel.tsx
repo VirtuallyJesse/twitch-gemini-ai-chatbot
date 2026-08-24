@@ -17,7 +17,7 @@ import {
   AlertCircle,
   ExternalLink,
 } from 'lucide-react';
-import type { BadgeKind, ChatEventKind, LogEntry } from '../lib/types';
+import type { ChatEventKind, LogEntry } from '../lib/types';
 import { parseChat, type Token } from '../lib/parseChat';
 import { useBotHighlight } from '../lib/settings';
 import { normChannel, channelLabel } from '../lib/channel';
@@ -118,7 +118,7 @@ export function MsgRow({
   highlightBots: boolean;
 }) {
   const isBot = botUsername ? entry.user.toLowerCase() === botUsername.toLowerCase() : false;
-  const badges: BadgeKind[] = entry.badges?.length ? entry.badges : (isBot ? ['bot'] : []);
+  const badges = entry.badges || [];
   const userColor = entry.color || stringToColor(entry.user);
 
   const body = (
@@ -127,7 +127,7 @@ export function MsgRow({
       {badges.length > 0 && (
         <span className="mr-1 inline-flex gap-1 align-[-2px]">
           {badges.map((b, idx) => (
-            <ChatBadge key={`${b}-${idx}`} kind={b} />
+            <ChatBadge key={`${b.kind}/${b.version}-${idx}`} badge={b} channel={channel} />
           ))}
         </span>
       )}

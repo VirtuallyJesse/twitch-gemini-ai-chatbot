@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { MessageSquareText, LayoutGrid } from 'lucide-react';
 import type {
+  BadgeDictionaries,
   BotStatus,
   LogEntry,
   MediaItem,
@@ -11,6 +12,7 @@ import type {
 import { api } from './lib/api';
 import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
+import { registerChannelBadges } from './lib/badges';
 import { timeAgo } from './lib/time';
 import { normChannel } from './lib/channel';
 import { createGalleryAvatarHydrator } from './lib/avatars';
@@ -99,6 +101,11 @@ export default function App() {
         api.getEmotes(first).then((emotes) => {
           if (emotes) registerChannelEmotes(first, emotes);
         });
+
+        void Promise.allSettled(chanList.map(async (channel) => {
+          const catalog = await api.getBadges(channel);
+          registerChannelBadges(catalog.channel || channel, catalog.badges);
+        }));
       }
 
       if (csRes.status === 'fulfilled') setChannelStatuses(csRes.value);
@@ -133,6 +140,10 @@ export default function App() {
       }
     });
 
+    const unsubBadges = wsClient.on<{ channel: string; badges: BadgeDictionaries }>('badges:update', (data) => {
+      if (data?.channel && data?.badges) registerChannelBadges(data.channel, data.badges);
+    });
+
     const unsubBotAuth = wsClient.on<{ authorized: boolean }>('auth:bot', (data) => {
       if (data) {
         setBotStatus((prev) => (prev ? { ...prev, authorized: data.authorized } : null));
@@ -156,9 +167,13 @@ export default function App() {
         Promise.allSettled([api.getChannels(), api.getChannelStatuses(), api.getStatus()]).then(
           ([cRes, csRes, sRes]) => {
             if (cRes.status === 'fulfilled' && Array.isArray(cRes.value)) {
-        const chanList = cRes.value.map(normChannel);
+              const chanList = cRes.value.map(normChannel);
               setChannels(chanList);
               setActiveChannel((prev) => (chanList.includes(prev) ? prev : chanList[0] || ''));
+              void Promise.allSettled(chanList.map(async (channel) => {
+                const catalog = await api.getBadges(channel);
+                registerChannelBadges(catalog.channel || channel, catalog.badges);
+              }));
             }
             if (csRes.status === 'fulfilled') {
               setChannelStatuses(csRes.value);
@@ -192,6 +207,7 @@ export default function App() {
       unsubChat();
       unsubMedia();
       unsubEmotes();
+      unsubBadges();
       unsubBotAuth();
       unsubBroadcaster();
       unsubConfig();
@@ -216,6 +232,7 @@ export default function App() {
         if (emotes) registerChannelEmotes(norm, emotes);
       });
     }
+    api.getBadges(norm).then((catalog) => registerChannelBadges(catalog.channel || norm, catalog.badges));
   };
 
   const handleLogout = async () => {

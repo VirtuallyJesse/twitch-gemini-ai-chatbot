@@ -92,6 +92,7 @@ export class WebServer {
     #transportStatusUnsub = null;
     #emotesHandler = null;
     #emotesUnsub = null;
+    #badgesUnsub = null;
     #prevOnMediaSaved = undefined;
     #avatarCache = new Map();
 
@@ -389,6 +390,13 @@ export class WebServer {
             this.#emotesUnsub = typeof unsub === 'function' ? unsub : null;
         }
 
+        if (this.#transport?.badges?.onUpdate) {
+            this.#badgesUnsub = this.#transport.badges.onUpdate(({ channel, badges }) => {
+                if (!this.#live) return;
+                this.broadcast({ type: 'badges:update', channel, badges });
+            });
+        }
+
         if (this.#mediaPipeline) {
             this.#prevOnMediaSaved = this.#mediaPipeline.onMediaSaved;
             this.#mediaPipeline.onMediaSaved = (entry) => {
@@ -415,6 +423,10 @@ export class WebServer {
             this.#emotePool.off?.('update', this.#emotesHandler);
             this.#emotePool.removeListener?.('update', this.#emotesHandler);
             this.#emotesHandler = null;
+        }
+        if (this.#badgesUnsub) {
+            try { this.#badgesUnsub(); } catch { /* ignore */ }
+            this.#badgesUnsub = null;
         }
         if (this.#mediaPipeline) {
             this.#mediaPipeline.onMediaSaved = this.#prevOnMediaSaved ?? null;
@@ -1080,6 +1092,15 @@ export class WebServer {
         this.#app.get('/api/emotes/:channel', (req, res) => {
             res.set('Cache-Control', 'public, max-age=300');
             res.json(this.#emotePool?.getEmoteMap?.(req.params.channel) || {});
+        });
+
+        this.#app.get('/api/badges/:channel', (req, res) => {
+            res.set('Cache-Control', 'no-cache');
+            const channel = String(req.params.channel || '').replace(/^#/, '').toLowerCase();
+            res.json(this.#transport?.badges?.getForChannel?.(channel) || {
+                channel,
+                badges: { channel: {}, global: {} }
+            });
         });
 
         this.#app.post('/api/users/avatars', async (req, res) => {

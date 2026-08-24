@@ -1,54 +1,54 @@
-import { useState } from 'react';
-import type { BadgeKind } from '../lib/types';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import type { BadgeDescriptor } from '../lib/types';
+import {
+  getBadgeRegistryRevision,
+  resolveBadge,
+  subscribeBadgeRegistry,
+} from '../lib/badges';
+import { stringToColor } from '../lib/color';
 
-/* Authentic Twitch badge assets from the shared static-cdn badge
-   registry, with a flat colored-square fallback if the CDN fails. */
-
-const BADGE_META: Record<BadgeKind, { uuid: string; label: string; fallback: string }> = {
-  broadcaster: { uuid: '5527c58c-fb7d-422d-b71b-f309dcb85cc1', label: 'Broadcaster', fallback: '#e91916' },
-  mod: { uuid: '3267646d-33f0-4b17-b3df-f923a41db1d0', label: 'Moderator', fallback: '#00ad03' },
-  vip: { uuid: 'b817aba4-fad8-49e2-b88a-7cc744dfa6ec', label: 'VIP', fallback: '#e005b9' },
-  sub: { uuid: '5d9f2208-5dd8-11e7-8513-2ff4adfae661', label: 'Subscriber', fallback: '#772ce8' },
-  bits: { uuid: '09d93036-e7ce-431c-9a9e-7044297d4569', label: 'Cheerer', fallback: '#1baac7' },
-  bot: { uuid: '3ffa9565-c35b-4cad-800b-041e60659cf2', label: 'Chat Bot', fallback: '#00ad9c' },
-};
-
-const badgeUrl = (uuid: string) => `https://static-cdn.jtvnw.net/badges/v1/${uuid}/1`;
-
-function Badge({ kind, size }: { kind: BadgeKind; size: number }) {
-  const meta = BADGE_META[kind];
+function Badge({ badge, channel, size }: { badge: BadgeDescriptor; channel: string; size: number }) {
+  useSyncExternalStore(subscribeBadgeRegistry, getBadgeRegistryRevision, getBadgeRegistryRevision);
+  const resolved = resolveBadge(channel, badge);
   const [failed, setFailed] = useState(false);
 
-  if (!meta) return null;
+  useEffect(() => setFailed(false), [resolved.imageUrl]);
 
-  if (failed) {
+  if (!resolved.imageUrl || failed) {
     return (
       <span
-        title={meta.label}
-        className="inline-block rounded-[3px] align-[-2px]"
-        style={{ width: size, height: size, background: meta.fallback }}
+        role="img"
+        aria-label={resolved.title}
+        title={resolved.title}
+        className="inline-block shrink-0 rounded-[3px] align-[-2px]"
+        style={{
+          width: size,
+          height: size,
+          background: stringToColor(`${badge.kind}:${badge.version}`),
+          boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.28)',
+        }}
       />
     );
   }
 
   return (
     <img
-      src={badgeUrl(meta.uuid)}
-      alt={meta.label}
-      title={meta.label}
+      src={resolved.imageUrl}
+      alt={resolved.title}
+      title={resolved.title}
       width={size}
       height={size}
       loading="lazy"
       onError={() => setFailed(true)}
-      className="inline-block rounded-[3px] align-[-2px]"
+      className="inline-block shrink-0 rounded-[3px] object-contain align-[-2px]"
     />
   );
 }
 
-export function ChatBadge({ kind }: { kind: BadgeKind }) {
-  return <Badge kind={kind} size={14} />;
+export function ChatBadge({ badge, channel }: { badge: BadgeDescriptor; channel: string }) {
+  return <Badge badge={badge} channel={channel} size={14} />;
 }
 
-export function AuthorBadge({ kind }: { kind: BadgeKind }) {
-  return <Badge kind={kind} size={12} />;
+export function AuthorBadge({ badge, channel }: { badge: BadgeDescriptor; channel: string }) {
+  return <Badge badge={badge} channel={channel} size={12} />;
 }
