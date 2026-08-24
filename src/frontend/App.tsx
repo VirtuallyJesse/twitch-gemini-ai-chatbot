@@ -13,6 +13,7 @@ import { api } from './lib/api';
 import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
 import { registerChannelBadges } from './lib/badges';
+import { hydrateBadgeCatalogs } from './lib/badgeHydration';
 import { timeAgo } from './lib/time';
 import { normChannel } from './lib/channel';
 import { createGalleryAvatarHydrator } from './lib/avatars';
@@ -86,26 +87,25 @@ export default function App() {
       if (vRes.status === 'fulfilled') setViewer(vRes.value);
       if (sRes.status === 'fulfilled') setBotStatus(sRes.value);
 
-      if (cRes.status === 'fulfilled' && cRes.value.length > 0) {
+      if (cRes.status === 'fulfilled') {
         const chanList = cRes.value.map(normChannel);
         setChannels(chanList);
-        const first = chanList[0];
+        const first = chanList[0] || '';
         setActiveChannel(first);
 
-        // Fetch first channel's chat log & emotes
-        api.getChatLog(first).then((entries) => {
-          const formatted: LogEntry[] = (entries || []).map((e, idx) => formatRawChatEntry(e, idx));
-          setLogs((prev) => ({ ...prev, [first]: formatted }));
-        });
+        if (first) {
+          // Fetch first channel's chat log & emotes
+          api.getChatLog(first).then((entries) => {
+            const formatted: LogEntry[] = (entries || []).map((e, idx) => formatRawChatEntry(e, idx));
+            setLogs((prev) => ({ ...prev, [first]: formatted }));
+          });
 
-        api.getEmotes(first).then((emotes) => {
-          if (emotes) registerChannelEmotes(first, emotes);
-        });
+          api.getEmotes(first).then((emotes) => {
+            if (emotes) registerChannelEmotes(first, emotes);
+          });
+        }
 
-        void Promise.allSettled(chanList.map(async (channel) => {
-          const catalog = await api.getBadges(channel);
-          registerChannelBadges(catalog.channel || channel, catalog.badges);
-        }));
+        void hydrateBadgeCatalogs(chanList, (channel) => api.getBadges(channel));
       }
 
       if (csRes.status === 'fulfilled') setChannelStatuses(csRes.value);
@@ -170,10 +170,7 @@ export default function App() {
               const chanList = cRes.value.map(normChannel);
               setChannels(chanList);
               setActiveChannel((prev) => (chanList.includes(prev) ? prev : chanList[0] || ''));
-              void Promise.allSettled(chanList.map(async (channel) => {
-                const catalog = await api.getBadges(channel);
-                registerChannelBadges(catalog.channel || channel, catalog.badges);
-              }));
+              void hydrateBadgeCatalogs(chanList, (channel) => api.getBadges(channel));
             }
             if (csRes.status === 'fulfilled') {
               setChannelStatuses(csRes.value);
@@ -337,6 +334,7 @@ export default function App() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         botUsername={botStatus?.botUsername || ''}
+        activeChannel={activeChannel}
         channelStatuses={channelStatuses}
         onChannelsChange={(newChans) => {
           const cleaned = newChans.map(normChannel);

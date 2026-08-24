@@ -6,17 +6,23 @@ import type {
 
 const registries = new Map<string, BadgeDictionaries>();
 const listeners = new Set<() => void>();
+let globalBadges: BadgeDictionaries['global'] = {};
 let revision = 0;
 
 const normChannel = (value: string): string => String(value || '').replace(/^#/, '').trim().toLowerCase();
 
 export function registerChannelBadges(channel: string, badges: BadgeDictionaries): void {
   const name = normChannel(channel);
-  if (!name) return;
-  registries.set(name, {
-    channel: badges?.channel || {},
-    global: badges?.global || {},
-  });
+  const nextGlobal = badges?.global || {};
+  if (Object.keys(nextGlobal).length > 0 || Object.keys(globalBadges).length === 0) {
+    globalBadges = nextGlobal;
+  }
+  if (name) {
+    registries.set(name, {
+      channel: badges?.channel || {},
+      global: {},
+    });
+  }
   revision++;
   for (const listener of listeners) listener();
 }
@@ -41,7 +47,7 @@ export interface ResolvedBadge {
 export function resolveBadge(channel: string, descriptor: BadgeDescriptor): ResolvedBadge {
   const registry = registries.get(normChannel(channel));
   const channelVersion = registry?.channel?.[descriptor.kind]?.versions?.[descriptor.version];
-  const globalVersion = registry?.global?.[descriptor.kind]?.versions?.[descriptor.version];
+  const globalVersion = globalBadges[descriptor.kind]?.versions?.[descriptor.version];
   const version = channelVersion || globalVersion || null;
   const scope = channelVersion ? 'channel' : globalVersion ? 'global' : null;
   return {
@@ -57,7 +63,7 @@ const EVENT_KIND = /(?:prediction|event|hype.?train|moment|clip.?champ)/i;
 const GLOBAL_AUTHORITY_KIND = /^(?:staff|admin|global[-_]?mod|partner|verified)(?:[-_].*)?$/i;
 const CHANNEL_AUTHORITY_KIND = /^(?:broadcaster|moderator|vip|artist(?:-badge)?)(?:[-_].*)?$/i;
 const CHANNEL_SUPPORT_KIND = /^(?:subscriber|founder|bits|cheer|sub[-_]?gift(?:er|[-_]?leader)?|bits[-_]?leader)(?:[-_].*)?$/i;
-const GLOBAL_VANITY_KIND = /^(?:prime|premium|turbo|ambassador|dj|listening|watching)(?:[-_].*)?$/i;
+const GLOBAL_VANITY_KIND = /^(?:bot[-_]?badge|prime|premium|turbo|ambassador|dj|listening|watching)(?:[-_].*)?$/i;
 
 function displayPriority(channel: string, descriptor: BadgeDescriptor): number {
   const resolved = resolveBadge(channel, descriptor);
@@ -66,7 +72,7 @@ function displayPriority(channel: string, descriptor: BadgeDescriptor): number {
   if (GLOBAL_AUTHORITY_KIND.test(descriptor.kind) || /\b(?:twitch staff|administrator|global moderator|partner|verified)\b/i.test(metadata)) return 10;
   if (CHANNEL_AUTHORITY_KIND.test(descriptor.kind) || /\b(?:broadcaster|moderator|channel artist|vip)\b/i.test(metadata)) return 20;
   if (CHANNEL_SUPPORT_KIND.test(descriptor.kind) || /\b(?:subscriber|founder|bits|cheerer|sub gifter)\b/i.test(metadata)) return 30;
-  if (GLOBAL_VANITY_KIND.test(descriptor.kind) || /\b(?:prime gaming|turbo|ambassador)\b/i.test(metadata)) return 40;
+  if (GLOBAL_VANITY_KIND.test(descriptor.kind) || /\b(?:chat bot|prime gaming|turbo|ambassador)\b/i.test(metadata)) return 40;
   return 100;
 }
 

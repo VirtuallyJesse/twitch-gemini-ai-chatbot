@@ -35,6 +35,7 @@ import type {
 import { api } from '../lib/api';
 import { setBotHighlight, useBotHighlight } from '../lib/settings';
 import { channelLabel, normChannel } from '../lib/channel';
+import { createAlertPreviewMessage } from '../lib/alertPreview';
 import { EventRow, MsgRow } from './ChatPanel';
 import TokenInput from './TokenInput';
 
@@ -42,6 +43,7 @@ interface Props {
   open: boolean;
   onClose: () => void;
   botUsername?: string;
+  activeChannel?: string;
   channelStatuses: Record<string, { authorized?: boolean }>;
   onChannelsChange?: (channels: string[]) => void;
 }
@@ -337,6 +339,7 @@ export default function SettingsModal({
   open,
   onClose,
   botUsername = 'Twitch Bot',
+  activeChannel = '',
   channelStatuses,
   onChannelsChange,
 }: Props) {
@@ -1394,6 +1397,12 @@ export default function SettingsModal({
                           const testReply = aiTestReplies[selectedAlertKey];
                           const currentBotName = (botUsername || 'Twitch Bot').replace(/^@/, '');
                           const tokens = EVENT_TOKENS[selectedAlertKey] || ['{username}'];
+                          const previewMessage = createAlertPreviewMessage({
+                            alertKey: selectedAlertKey,
+                            botUsername: currentBotName,
+                            channel: activeChannel,
+                            text: (activeAlert.ai_enabled && testReply) ? testReply : (fallbackText || '…'),
+                          });
 
                           return (
                             <div className="space-y-4 pt-1">
@@ -1449,14 +1458,8 @@ export default function SettingsModal({
                                   </div>
                                 ) : (
                                   <MsgRow
-                                    entry={{
-                                      kind: 'msg',
-                                      id: `preview-msg-${selectedAlertKey}`,
-                                      user: currentBotName,
-                                      text: (activeAlert.ai_enabled && testReply) ? testReply : (fallbackText || '…'),
-                                      time: '18:04',
-                                    }}
-                                    channel="demo"
+                                    entry={previewMessage.entry}
+                                    channel={previewMessage.channel}
                                     botUsername={currentBotName}
                                     highlightBots={highlightBots}
                                   />

@@ -1094,9 +1094,10 @@ export class WebServer {
             res.json(this.#emotePool?.getEmoteMap?.(req.params.channel) || {});
         });
 
-        this.#app.get('/api/badges/:channel', (req, res) => {
+        this.#app.get('/api/badges/:channel', async (req, res) => {
             res.set('Cache-Control', 'no-cache');
             const channel = String(req.params.channel || '').replace(/^#/, '').toLowerCase();
+            await this.#transport?.badges?.refreshGlobal?.();
             res.json(this.#transport?.badges?.getForChannel?.(channel) || {
                 channel,
                 badges: { channel: {}, global: {} }

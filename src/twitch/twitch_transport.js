@@ -947,7 +947,11 @@ export class TwitchTransport {
         for (const chunk of chunks) {
             if (sent > 0) await delay(this.#chunkDelayMs);
             await this.#sendChunk(channel, chunk);
-            this.logMessage(channel, this.#botUsername, chunk);
+            const broadcasterId = this.#channelIdMap[cleanName(channel)];
+            const badgeKind = broadcasterId === this.#botId ? 'broadcaster' : 'bot-badge';
+            this.logMessage(channel, this.#botUsername, chunk, null, {
+                badges: [{ kind: badgeKind, version: '1' }]
+            });
             sent++;
         }
         return { sent };
