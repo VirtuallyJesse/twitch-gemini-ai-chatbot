@@ -22,6 +22,7 @@ services:
       # ═══════════════════════════════════════════════════════════════════
       # API keys & persistence
       # ═══════════════════════════════════════════════════════════════════
+      # Vertex AI users may manually use VERTEX_API_KEY instead; see the README FAQ.
       - key: GEMINI_API_KEY
         value: "your-gemini-api-key(s)"    # Comma-separated keys rotate automatically
       - key: UPSTASH_REDIS_URL

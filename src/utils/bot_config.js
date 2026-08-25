@@ -147,7 +147,7 @@ When not doing a command, follow these rules to define your personality:
     }),
 
     error_messages: Object.freeze({
-        RATE_LIMIT_EXHAUSTED: '⏰ All API keys rate limited. Try again tomorrow.',
+        RATE_LIMIT_EXHAUSTED: '⏰ All API keys rate limited. Try again later.',
         GEMINI_EMPTY_RESPONSE: "🔭 Empty Response. Google's servers are having issues. Try again in 30 seconds.",
         POLLINATIONS_NOT_CONFIGURED: '❌ Pollinations API key not configured.',
         POLLINATIONS_AUDIO_EMPTY_INPUT: '⚠️ Text Required. You need to add text for TTS, tags alone are not enough.',

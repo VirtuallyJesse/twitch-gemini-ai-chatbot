@@ -17,6 +17,17 @@ const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
 const csv = (v) => String(v || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
+const geminiApiKeys = String(env.GEMINI_API_KEY || '').split(',').map((key) => key.trim()).filter(Boolean);
+const vertexApiKeys = String(env.VERTEX_API_KEY || '').split(',').map((key) => key.trim()).filter(Boolean);
+if ((geminiApiKeys.length > 0) === (vertexApiKeys.length > 0)) {
+    console.error('[Startup] Configure exactly one Google credential family: GEMINI_API_KEY or VERTEX_API_KEY.');
+    process.exit(1);
+}
+
+const vertexAI = vertexApiKeys.length > 0;
+const googleApiKeys = vertexAI ? vertexApiKeys : geminiApiKeys;
+console.log(`[AI] Google backend: ${vertexAI ? 'Vertex AI' : 'Gemini API'}`);
+
 const storage = new Storage({
     redisUrl: env.UPSTASH_REDIS_URL,
     restUrl: env.UPSTASH_REDIS_REST_URL,
@@ -26,10 +37,6 @@ const storage = new Storage({
 
 const configStore = new ConfigStore({ storage, defaults: createFactoryDefaults(env) });
 const bootConfig = await configStore.getAll();
-
-if (!env.GEMINI_API_KEY) {
-    console.error('No GEMINI_API_KEY found. Please set it as an environment variable.');
-}
 
 const searchSlot = String(env.SEARCH_GROUNDING || '').toLowerCase();
 const wantsTavily = searchSlot === 'tavily' || searchSlot === 'custom';
@@ -126,7 +133,8 @@ if (env.ENABLE_HELIX_ACTIONS !== 'false') {
 }
 
 const aiEngine = new AIEngine({
-    apiKeys: env.GEMINI_API_KEY || '',
+    apiKeys: googleApiKeys,
+    vertexAI,
     modelName: bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.7-flash',
     fileContext: bootConfig.system_instructions,
     historyLength: parseInt(bootConfig.bot_settings?.ai_history_length || env.AI_HISTORY_LENGTH, 10) || 10,

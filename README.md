@@ -438,6 +438,17 @@ To update:
 </details>
 
 <details>
+<summary><strong>Can I use Vertex AI instead of the Gemini API?</strong></summary>
+
+<br>
+
+Yes, set `VERTEX_API_KEY` instead of `GEMINI_API_KEY`; never configure both at the same time. `VERTEX_API_KEY` accepts comma-separated keys and uses the same rotation behavior, but additional keys should not be treated as additional permanent free quota.
+
+> Google owns the provisioning, IAM, and billing requirements. See the [Vertex AI quickstart](https://cloud.google.com/vertex-ai/generative-ai/docs/start/quickstart) and [Google Cloud API-key documentation](https://cloud.google.com/docs/authentication/api-keys) for the current setup details.
+
+</details>
+
+<details>
 <summary><strong>Can I run this locally?</strong></summary>
 
 <br>

@@ -48,6 +48,7 @@ export class AIEngine {
 
     constructor({
         apiKeys,
+        vertexAI = false,
         modelName = DEFAULT_MODEL,
         fileContext = 'You are a helpful Twitch Chatbot.',
         historyLength = 5,
@@ -72,6 +73,7 @@ export class AIEngine {
         if (this.apiKeys.length === 0) {
             throw new Error('No API keys provided');
         }
+        this.vertexAI = vertexAI === true;
 
         this.modelName = modelName;
         this.fileContext = fileContext;
@@ -102,7 +104,9 @@ export class AIEngine {
             ? genAIClient
             : genAIClient
                 ? () => genAIClient
-                : (apiKey) => new GoogleGenAI({ apiKey });
+                : (apiKey, useVertexAI) => new GoogleGenAI(
+                    useVertexAI ? { apiKey, vertexai: true } : { apiKey }
+                );
 
         this.#toolDispatcher = new ToolDispatcher({
             tools,
@@ -362,7 +366,7 @@ export class AIEngine {
             this.#logVerboseRequest({ contents, config });
         }
 
-        const client = this.#clientFor(this.apiKeys[keyIndex]);
+        const client = this.#clientFor(this.apiKeys[keyIndex], this.vertexAI);
         let result;
         try {
             result = await client.models.generateContent({
