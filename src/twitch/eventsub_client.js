@@ -169,8 +169,14 @@ function normalizeBotChatMessage(message, nowFn) {
     if (metadata.subscription_type !== BOT_CHAT_SUBSCRIPTION_TYPE) return null;
     const event = message?.payload?.event || {};
 
-    const id = String(event.message_id || metadata.message_id || '');
-    if (!id) return null;
+    // Canonical identity is Twitch's own chat message id; the envelope's
+    // delivery id exists only for notification deduplication and must never
+    // stand in for it.
+    const id = String(event.message_id || '');
+    if (!id) {
+        console.warn('[EventSub] Dropping bot chat notification without event.message_id');
+        return null;
+    }
 
     const occurredAt = Date.parse(metadata.message_timestamp) || nowFn();
     const text = String(event.message?.text ?? '');
@@ -591,6 +597,8 @@ class BroadcasterSession {
  * Shared bot-token chat session. One WebSocket carries
  * `channel.chat.message` subscriptions for every joined channel; access
  * tokens resolve fresh through `getAccessToken` because bot tokens rotate.
+ * The socket exists only while at least one desired channel remains:
+ * the first addition connects it, the final removal stops it terminally.
  */
 class BotChatSession {
     #botUserId;
@@ -619,6 +627,10 @@ class BotChatSession {
 
     get connected() {
         return this.#lifecycle.connected;
+    }
+
+    get hasDesiredChannels() {
+        return this.#desired.size > 0;
     }
 
     addChannel(broadcasterUserId, login) {
@@ -652,29 +664,16 @@ class BotChatSession {
         for (const broadcasterUserId of pending) {
             const login = this.#desired.get(broadcasterUserId);
             try {
-                await this.#helix.request('/eventsub/subscriptions', {
-                    method: 'POST',
-                    accessToken: token,
-                    body: {
-                        type: BOT_CHAT_SUBSCRIPTION_TYPE,
-                        version: BOT_CHAT_SUBSCRIPTION_VERSION,
-                        condition: {
-                            broadcaster_user_id: broadcasterUserId,
-                            user_id: this.#botUserId
-                        },
-                        transport: { method: 'websocket', session_id: sessionId }
-                    }
-                });
+                await this.#createSubscription(token, broadcasterUserId, sessionId);
                 this.#appliedIn.set(broadcasterUserId, sessionId);
             } catch (err) {
                 const status = err?.status;
-                if (status === 409) {
-                    // Already subscribed on this session; treat as applied.
-                    this.#appliedIn.set(broadcasterUserId, sessionId);
-                    continue;
-                }
                 if (status === 401 || status === 403) {
                     console.warn(`[EventSub] Skipping ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login}: missing scope (${status})`);
+                    continue;
+                }
+                if (status === 409) {
+                    await this.#recoverFromConflict(token, broadcasterUserId, login, sessionId);
                     continue;
                 }
                 console.warn(
@@ -683,6 +682,100 @@ class BotChatSession {
                 );
             }
         }
+    }
+
+    #createSubscription(token, broadcasterUserId, sessionId) {
+        return this.#helix.request('/eventsub/subscriptions', {
+            method: 'POST',
+            accessToken: token,
+            body: {
+                type: BOT_CHAT_SUBSCRIPTION_TYPE,
+                version: BOT_CHAT_SUBSCRIPTION_VERSION,
+                condition: {
+                    broadcaster_user_id: broadcasterUserId,
+                    user_id: this.#botUserId
+                },
+                transport: { method: 'websocket', session_id: sessionId }
+            }
+        });
+    }
+
+    /**
+     * Session-aware 409 recovery. A conflict is either an idempotent duplicate
+     * already attached to the current socket (treat as applied, delete nothing)
+     * or a stale leftover from a dead previous session (delete it, retry
+     * creation once). Anything that cannot be proven deterministically stays
+     * unapplied so the next reconnect resync retries it - never marked applied
+     * merely to silence the error.
+     */
+    async #recoverFromConflict(token, broadcasterUserId, login, sessionId) {
+        let matches;
+        try {
+            matches = await this.#findChatSubscriptions(token, broadcasterUserId);
+        } catch (err) {
+            console.warn(`[EventSub] Failed to inspect conflicting ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login}:`, err?.message || err);
+            return false;
+        }
+
+        if (matches.some((sub) => sub?.status === 'enabled' && String(sub?.transport?.session_id || '') === sessionId)) {
+            this.#appliedIn.set(broadcasterUserId, sessionId);
+            return true;
+        }
+
+        const staleIds = matches.map((sub) => sub?.id).filter(Boolean);
+        if (staleIds.length === 0) {
+            console.warn(
+                `[EventSub] Conflicting ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login} has no inspectable subscription; leaving unapplied`
+            );
+            return false;
+        }
+
+        for (const subId of staleIds) {
+            try {
+                await this.#helix.request('/eventsub/subscriptions', {
+                    method: 'DELETE',
+                    query: { id: subId },
+                    accessToken: token
+                });
+            } catch (err) {
+                if (err?.status !== 404) {
+                    console.warn(`[EventSub] Failed to delete stale bot chat subscription ${subId}:`, err?.message || err);
+                    return false;
+                }
+            }
+        }
+
+        try {
+            await this.#createSubscription(token, broadcasterUserId, sessionId);
+        } catch (err) {
+            console.warn(
+                `[EventSub] Failed to re-create ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login} after stale cleanup:`,
+                err?.message || err
+            );
+            return false;
+        }
+        this.#appliedIn.set(broadcasterUserId, sessionId);
+        return true;
+    }
+
+    async #findChatSubscriptions(token, broadcasterUserId) {
+        const matches = [];
+        let after = '';
+        do {
+            const page = await this.#helix.request('/eventsub/subscriptions', {
+                query: { first: 100, ...(after ? { after } : {}) },
+                accessToken: token
+            });
+            for (const sub of page?.data || []) {
+                if (sub?.type !== BOT_CHAT_SUBSCRIPTION_TYPE) continue;
+                if (sub?.transport?.method !== 'websocket') continue;
+                if (String(sub?.condition?.broadcaster_user_id || '') !== broadcasterUserId) continue;
+                if (String(sub?.condition?.user_id || '') !== this.#botUserId) continue;
+                matches.push(sub);
+            }
+            after = page?.pagination?.cursor || '';
+        } while (after);
+        return matches;
     }
 
     /**
@@ -868,16 +961,16 @@ export class EventSubClient {
     }
 
     /**
-     * Opens the shared bot-token chat session. Safe to call once per boot;
-     * later calls refresh the token provider and reuse the live socket.
+     * Records the bot identity and token provider for the shared chat
+     * session. Configuration only: no socket opens until the first desired
+     * channel arrives, so a bot with zero joined channels never holds an
+     * idle socket Twitch would close for lack of subscriptions.
      */
     async startBotChat({ userId, getAccessToken }) {
         this.#stopped = false;
         if (!userId) throw new Error('EventSubClient.startBotChat requires the bot user id');
         this.#botUserId = String(userId);
         this.#botTokenProvider = getAccessToken;
-        if (!this.#botSession) this.#botSession = this.#createBotSession();
-        await this.#botSession.ensureConnected();
     }
 
     /** Adds one joined channel to the shared bot chat session (connecting it lazily). */
@@ -891,10 +984,19 @@ export class EventSubClient {
         await this.#botSession.applySubscriptions();
     }
 
-    /** Removes one channel's bot chat subscription without disturbing the shared socket. */
+    /**
+     * Removes one channel's subscription. Other channels keep the shared
+     * socket alive; removing the final one stops the session terminally and
+     * releases it, so a later addition starts from a fresh object.
+     */
     async unsubscribeBotChannel(broadcasterUserId) {
-        if (!this.#botSession) return;
-        await this.#botSession.removeChannel(broadcasterUserId);
+        const session = this.#botSession;
+        if (!session) return;
+        await session.removeChannel(broadcasterUserId);
+        if (!session.hasDesiredChannels) {
+            session.stop();
+            this.#botSession = null;
+        }
     }
 
     get botChatConnected() {

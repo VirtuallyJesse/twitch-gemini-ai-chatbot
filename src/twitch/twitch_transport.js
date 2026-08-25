@@ -9,7 +9,6 @@
 // or ignored-username policy runs.
 // All config and I/O cross the constructor - this module reads zero environment variables directly.
 
-import crypto from 'node:crypto';
 import tmi from 'tmi.js';
 import { EventSubClient } from './eventsub_client.js';
 import { normalizeBadges } from '../utils/badges.js';
@@ -1450,6 +1449,15 @@ export class TwitchTransport {
      */
     #observe(obs) {
         const key = channelKey(obs.channel);
+
+        // Exact Twitch identity only: a live observation without its canonical
+        // message id is discarded rather than given synthetic identity.
+        const id = String(obs.id || '');
+        if (!id) {
+            console.warn(`[TwitchTransport] Discarding ${key} message without a canonical Twitch message id`);
+            return;
+        }
+
         const routable = !obs.authoredByBot && !this.#ignored.has(obs.loginName);
 
         const { text, emotes } = this.#normalizeTranscriptText(key, obs.text, obs.tags);
@@ -1457,7 +1465,7 @@ export class TwitchTransport {
         const color = typeof obs.tags?.color === 'string' && obs.tags.color.trim() ? obs.tags.color.trim() : '';
 
         const entry = {
-            id: String(obs.id || '') || crypto.randomUUID(),
+            id,
             username: obs.username,
             message: text,
             timestamp: Number(obs.timestamp) || this.#nowFn(),
