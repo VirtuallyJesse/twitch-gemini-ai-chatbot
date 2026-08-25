@@ -1,10 +1,12 @@
 import { GoogleGenAI } from '@google/genai';
-import ErrorHandler from '../utils/error_handler.js';
+import ErrorHandler, { BotError } from '../utils/error_handler.js';
 import { ImageDownloader } from './image_downloader.js';
 import { ToolDispatcher } from './tool_dispatcher.js';
 
 const DEFAULT_MODEL = 'gemini-3.7-flash';
+const DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS = 20_000;
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
+const ROTATE_WORTHY_MODEL_STATUSES = new Set([401, 403, 429, 503]);
 
 const YT_ID_RE = /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
 const YT_URL_RE = /(https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)[\w-]+|https?:\/\/youtu\.be\/[\w-]+)/;
@@ -62,6 +64,7 @@ export class AIEngine {
         imageDownloader = null,
         fetchImpl = (...a) => globalThis.fetch(...a),
         genAIClient = null,
+        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS,
         verbose = false
     } = {}) {
         this.apiKeys = (Array.isArray(apiKeys) ? apiKeys : String(apiKeys ?? '').split(','))
@@ -85,6 +88,9 @@ export class AIEngine {
         this.maxResponseLength = parseInt(maxResponseLength, 10) || 450;
         this.errorHandler = errorHandler;
         this.fetchImpl = fetchImpl;
+        this.modelAttemptTimeoutMs = Number(modelAttemptTimeoutMs) > 0
+            ? Number(modelAttemptTimeoutMs)
+            : DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS;
         this.verbose = verbose;
 
         this.currentKeyIndex = 0;
@@ -336,7 +342,7 @@ export class AIEngine {
     /**
      * Executes generation call via the Google GenAI SDK.
      */
-    async #executeModelCall({ contents, systemInstruction, safetySettings, tools }) {
+    async #executeModelCall({ contents, systemInstruction, safetySettings, tools, keyIndex }) {
         const config = {
             maxOutputTokens: 8192,
             thinkingConfig: {
@@ -345,24 +351,166 @@ export class AIEngine {
             },
             tools,
             systemInstruction,
-            safetySettings
+            safetySettings,
+            httpOptions: {
+                timeout: this.modelAttemptTimeoutMs,
+                retryOptions: { attempts: 1 }
+            }
         };
 
         if (this.verbose) {
             this.#logVerboseRequest({ contents, config });
         }
 
-        const client = this.#clientFor(this.apiKeys[this.currentKeyIndex]);
-        const result = await client.models.generateContent({
-            model: this.modelName,
-            contents,
-            config
-        });
+        const client = this.#clientFor(this.apiKeys[keyIndex]);
+        let result;
+        try {
+            result = await client.models.generateContent({
+                model: this.modelName,
+                contents,
+                config
+            });
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                throw new BotError('FETCH_TIMEOUT', { cause: error });
+            }
+            throw error;
+        }
 
         if (this.verbose) {
             this.#logVerboseResponse(result);
         }
         return result;
+    }
+
+    #classifyModelError(error) {
+        const info = this.errorHandler.classify(error);
+        if (info.status == null && /RESOURCE_EXHAUSTED|\bquota\b/i.test(String(error?.message || ''))) {
+            return { ...info, key: 'HTTP_429', category: 'quota', status: 429 };
+        }
+        return info;
+    }
+
+    #isRotateWorthyModelError(error) {
+        return ROTATE_WORTHY_MODEL_STATUSES.has(this.#classifyModelError(error).status);
+    }
+
+    #attemptDuration(started) {
+        return `${((Date.now() - started) / 1000).toFixed(2)}s`;
+    }
+
+    #logModelAttemptFailure(error, keyIndex, started, action) {
+        console.log(
+            `   ${COLORS.yellow}⚠️${COLORS.reset} ${this.#getKeyErrorReason(error)} on key #${keyIndex + 1} after ${this.#attemptDuration(started)}; ${action}`
+        );
+    }
+
+    async #executeModelTurn({
+        contents,
+        systemInstruction,
+        safetySettings,
+        tools,
+        generationState,
+        disableGoogleGrounding
+    }) {
+        const startingKeyIndex = this.currentKeyIndex;
+        const failures = [];
+
+        for (let visited = 0; visited < this.apiKeys.length; visited++) {
+            const keyIndex = (startingKeyIndex + visited) % this.apiKeys.length;
+            let attemptTools = generationState.googleGroundingDisabled
+                ? this.#toolDispatcher.withoutGoogleSearch(tools)
+                : tools;
+            let attemptSystemInstruction = systemInstruction;
+
+            const attempt = async () => {
+                const attemptStarted = Date.now();
+                try {
+                    const result = await this.#executeModelCall({
+                        contents,
+                        systemInstruction: attemptSystemInstruction,
+                        safetySettings,
+                        tools: attemptTools,
+                        keyIndex
+                    });
+                    if (this.verbose) {
+                        console.log(
+                            `   ${COLORS.green}✓ Model turn${COLORS.reset} on key #${keyIndex + 1} after ${this.#attemptDuration(attemptStarted)}`
+                        );
+                    }
+                    return { result, error: null, started: attemptStarted };
+                } catch (error) {
+                    return { result: null, error, started: attemptStarted };
+                }
+            };
+
+            let outcome = await attempt();
+
+            if (outcome.error
+                && this.#classifyModelError(outcome.error).status === 429
+                && this.#toolDispatcher.hasGoogleSearch(attemptTools)) {
+                this.#logModelAttemptFailure(
+                    outcome.error,
+                    keyIndex,
+                    outcome.started,
+                    'retrying same key without Google Search grounding'
+                );
+
+                // Gemini 3.x Google Search grounding is unavailable to free-tier API-key
+                // projects and commonly reports quota/429. This same-key ungrounded retry
+                // deliberately handholds streamers who enabled an incompatible mode; it is
+                // a compatibility exception, not generic quota retry logic.
+                generationState.googleGroundingDisabled = true;
+                attemptTools = this.#toolDispatcher.withoutGoogleSearch(attemptTools);
+                attemptSystemInstruction = await disableGoogleGrounding();
+                outcome = await attempt();
+            }
+
+            if (!outcome.error) {
+                this.currentKeyIndex = keyIndex;
+                return outcome.result;
+            }
+
+            failures.push(outcome.error);
+            if (!this.#isRotateWorthyModelError(outcome.error)) {
+                this.#logModelAttemptFailure(
+                    outcome.error,
+                    keyIndex,
+                    outcome.started,
+                    'failing turn'
+                );
+                throw outcome.error;
+            }
+
+            if (visited + 1 < this.apiKeys.length) {
+                const nextKeyIndex = (keyIndex + 1) % this.apiKeys.length;
+                this.#logModelAttemptFailure(
+                    outcome.error,
+                    keyIndex,
+                    outcome.started,
+                    `switching to key #${nextKeyIndex + 1}`
+                );
+                continue;
+            }
+
+            this.#logModelAttemptFailure(
+                outcome.error,
+                keyIndex,
+                outcome.started,
+                'key pool exhausted'
+            );
+        }
+
+        if (failures.length > 0 && failures.every(
+            error => this.#classifyModelError(error).status === 429
+        )) {
+            throw new BotError('RATE_LIMIT_EXHAUSTED', { cause: failures.at(-1) });
+        }
+
+        const relevantFailure = [...failures].reverse().find(
+            error => this.#classifyModelError(error).status !== 429
+        );
+        throw relevantFailure || failures.at(-1) || new BotError('UNKNOWN_ERROR');
     }
 
     #extractCandidateContent(result) {
@@ -407,11 +555,15 @@ export class AIEngine {
     }
 
     #getKeyErrorReason(error) {
-        const info = this.errorHandler.classify(error);
-        if (info.category === 'quota' || info.key === 'RATE_LIMIT_EXHAUSTED') return 'Rate limit';
+        const info = this.#classifyModelError(error);
+        if (info.key === 'FETCH_TIMEOUT') return 'Connection timeout';
+        if (info.category === 'quota' || info.key === 'RATE_LIMIT_EXHAUSTED') return 'Quota exceeded (429)';
         if (info.status === 503) return 'High demand (503)';
+        if (info.status === 401) return 'Authentication failed (401)';
+        if (info.status === 403) return 'Access denied (403)';
         if (info.status) return `HTTP ${info.status}`;
-        return info.message ? info.message.slice(0, 40) : 'Error';
+        if (info.category === 'network') return 'Network failure';
+        return 'Gemini request failed';
     }
 
     #logHeader(title) {
@@ -548,6 +700,21 @@ export class AIEngine {
         let result = null;
         let activeTools = tools;
         let activeSystemInstruction = systemInstruction;
+        const generationState = { googleGroundingDisabled: false };
+
+        const disableGoogleGrounding = async () => {
+            activeTools = this.#toolDispatcher.withoutGoogleSearch(activeTools);
+            activeSystemInstruction = await this.#compileSystemInstruction({
+                prompt,
+                channelContext,
+                recentLogs,
+                harnessInstructions,
+                ephemeralContext,
+                overrideFileContext,
+                tools: activeTools
+            });
+            return activeSystemInstruction;
+        };
 
         const runLoop = async () => {
             const loop = await this.#toolDispatcher.executeTurnLoop({
@@ -555,11 +722,13 @@ export class AIEngine {
                 tools: activeTools,
                 context: { channel, channelContext, caller },
                 invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
-                    const turnResult = await this.#executeModelCall({
+                    const turnResult = await this.#executeModelTurn({
                         contents: turnContents,
                         systemInstruction: activeSystemInstruction,
                         safetySettings,
-                        tools: turnTools
+                        tools: turnTools,
+                        generationState,
+                        disableGoogleGrounding
                     });
                     this.#logTurnParts(turnResult);
                     return turnResult;
@@ -574,27 +743,7 @@ export class AIEngine {
             return loop.result;
         };
 
-        try {
-            result = await runLoop();
-        } catch (turnError) {
-            const isRateLimit = this.errorHandler.classify(turnError).category === 'quota';
-            if (isRateLimit && this.#toolDispatcher.hasGoogleSearch(activeTools)) {
-                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Google Search grounding quota exceeded/unavailable on key #${this.currentKeyIndex}, falling back to ungrounded generation...`);
-                activeTools = this.#toolDispatcher.withoutGoogleSearch(activeTools);
-                activeSystemInstruction = await this.#compileSystemInstruction({
-                    prompt,
-                    channelContext,
-                    recentLogs,
-                    harnessInstructions,
-                    ephemeralContext,
-                    overrideFileContext,
-                    tools: activeTools
-                });
-                result = await runLoop();
-            } else {
-                throw turnError;
-            }
-        }
+        result = await runLoop();
 
         if (result?.toolError) {
             const key = result.errorKey || 'HELIX_ACTION_FAILED';
@@ -662,11 +811,13 @@ export class AIEngine {
             ];
 
             try {
-                const retryResult = await this.#executeModelCall({
+                const retryResult = await this.#executeModelTurn({
                     contents: retryContents,
                     systemInstruction: activeSystemInstruction,
                     safetySettings,
-                    tools: this.#toolDispatcher.withoutFunctionDeclarations(activeTools)
+                    tools: this.#toolDispatcher.withoutFunctionDeclarations(activeTools),
+                    generationState,
+                    disableGoogleGrounding
                 });
                 const retryExtracted = this.#extractCandidateContent(retryResult);
                 const retryTextPart = retryExtracted.winningTextPart;
@@ -758,7 +909,7 @@ export class AIEngine {
     }
 
     /**
-     * Generates an AI response for a prompt across available API keys.
+     * Generates an AI response for a prompt.
      * @param {string} prompt
      * @param {object} options
      * @returns {Promise<string>}
@@ -774,39 +925,25 @@ export class AIEngine {
         caller = null
     } = {}) {
         const started = Date.now();
-        let attempt = 0;
-        let lastError = null;
 
         this.#checkHistoryLength(channel);
 
-        while (attempt < this.apiKeys.length) {
-            try {
-                return await this.#runOnce(prompt, {
-                    channel,
-                    channelContext,
-                    recentLogs,
-                    harnessInstructions,
-                    ephemeralContext,
-                    disableMultimedia,
-                    overrideFileContext,
-                    caller,
-                    started
-                });
-            } catch (error) {
-                lastError = error;
-                const reason = this.#getKeyErrorReason(error);
-                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} ${reason} on key #${this.currentKeyIndex}, switching...`);
-                this.#logFooter();
-                this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-                attempt++;
-            }
+        try {
+            return await this.#runOnce(prompt, {
+                channel,
+                channelContext,
+                recentLogs,
+                harnessInstructions,
+                ephemeralContext,
+                disableMultimedia,
+                overrideFileContext,
+                caller,
+                started
+            });
+        } catch (error) {
+            this.#logFooter();
+            return this.errorHandler.format(error);
         }
-
-        const info = this.errorHandler.classify(lastError);
-        if (info.category === 'quota') {
-            return this.errorHandler.format('RATE_LIMIT_EXHAUSTED');
-        }
-        return this.errorHandler.format(lastError);
     }
 
     /**
