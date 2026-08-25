@@ -1,11 +1,15 @@
 // src/twitch/twitch_transport.js
 //
-// Deep module owning the entire Twitch transport surface: IRC ingestion (tmi.js),
-// Helix REST chat delivery (App Access Token -> official Chatbot badge), the OAuth
-// 2.0 lifecycle with 401 recovery and refresh mutexing, Helix user-ID resolution,
-// channel history buffers, and AI context collation.
+// Deep module owning the entire Twitch transport surface: the sole seam for
+// observed chat. IRC (tmi.js) is authoritative for viewer-authored messages;
+// a bot-token EventSub WebSocket session is authoritative for bot-authored
+// messages; Helix REST (App Access Token -> official Chatbot badge) sends.
+// One private observation path records every Twitch-observed message - exact
+// identity, message ID, timestamp, local order - before any routing, ambient,
+// or ignored-username policy runs.
 // All config and I/O cross the constructor - this module reads zero environment variables directly.
 
+import crypto from 'node:crypto';
 import tmi from 'tmi.js';
 import { EventSubClient } from './eventsub_client.js';
 import { normalizeBadges } from '../utils/badges.js';
@@ -14,6 +18,8 @@ import { BadgeCatalog } from './badge_catalog.js';
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+/** Required so the bot-token EventSub session can observe bot chat. */
+const REQUIRED_BOT_SCOPE = 'user:read:chat';
 
 export const TWITCH_AUTH_SCOPES = [
     'chat:read', 'chat:edit', 'user:bot', 'user:read:chat', 'user:write:chat',
@@ -49,6 +55,16 @@ export class AuthMismatchError extends Error {
         this.name = 'AuthMismatchError';
         this.expected = expected;
         this.actual = actual;
+    }
+}
+
+export class MissingScopeError extends Error {
+    constructor(scope) {
+        super(`Bot grant lacks required "${scope}" scope; reauthorization required.`);
+        this.name = 'MissingScopeError';
+        this.scope = scope;
+        // User-facing copy renders from the catalog via ErrorHandler (BOT_SCOPE_MISSING).
+        this.key = 'BOT_SCOPE_MISSING';
     }
 }
 
@@ -243,6 +259,7 @@ class TokenVault {
     #refreshInFlight = null;
     #broadcasterTokens = new Map();
     #broadcasterRefreshInFlight = new Map();
+    #grantedScopes = null;
 
     constructor({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now }) {
         this.#clientId = clientId;
@@ -254,6 +271,12 @@ class TokenVault {
     }
 
     isAuthorized() { return !!this.#refreshToken; }
+
+    /** True only when the granted scope set explicitly includes bot chat observation. */
+    hasRequiredScope() {
+        return Array.isArray(this.#grantedScopes)
+            && this.#grantedScopes.includes(REQUIRED_BOT_SCOPE);
+    }
 
     /** Load from storage (falling back to the seed refresh token) and prove one works. */
     async bootstrap() {
@@ -272,6 +295,13 @@ class TokenVault {
             this.#refreshToken = seed;
             try {
                 await this.#refreshUserToken();
+                if (!this.hasRequiredScope()) {
+                    // Stale grant: refresh works but Twitch never granted the
+                    // chat-observation scope. Stand by for reauthorization.
+                    console.error(`[TwitchTransport] Stored grant lacks "${REQUIRED_BOT_SCOPE}"; reauthorization required.`);
+                    this.#clearUserTokens();
+                    continue;
+                }
                 return true;
             } catch (err) {
                 console.error('[TwitchTransport] Refresh token rejected:', err.message);
@@ -281,13 +311,14 @@ class TokenVault {
         return false;
     }
 
-    /** Exchange an OAuth code; revoke and throw AuthMismatchError on account mismatch. */
+    /** Exchange an OAuth code; revoke and throw on account or scope mismatch. */
     async exchangeCode(code, redirectUri, expectedLogin) {
         const data = await this.#tokenGrant({
             grant_type: 'authorization_code',
             code: String(code),
             redirect_uri: redirectUri
         });
+        let grantedScopes = null;
         if (expectedLogin) {
             const validation = await this.#validateToken(data.access_token);
             const authorizedLogin = cleanName(validation.login || '');
@@ -296,9 +327,18 @@ class TokenVault {
                 await this.#revokeToken(data.access_token).catch(() => {});
                 throw new AuthMismatchError(expected, authorizedLogin);
             }
+            // A grant without the chat-observation scope must never persist;
+            // the runtime would otherwise boot without its source of truth.
+            grantedScopes = Array.isArray(validation.scopes)
+                ? validation.scopes.map(scope => String(scope).trim()).filter(Boolean)
+                : null;
+            if (!grantedScopes?.includes(REQUIRED_BOT_SCOPE)) {
+                await this.#revokeToken(data.access_token).catch(() => {});
+                throw new MissingScopeError(REQUIRED_BOT_SCOPE);
+            }
             console.log(`[TwitchTransport] Token verified for bot account: ${authorizedLogin}`);
         }
-        this.#setUserTokens(data);
+        this.#setUserTokens(data, grantedScopes);
         await this.#persist();
         return data;
     }
@@ -388,16 +428,25 @@ class TokenVault {
         );
     }
 
-    #setUserTokens(data) {
+    #setUserTokens(data, validatedScopes = null) {
         this.#accessToken = data.access_token;
         this.#refreshToken = data.refresh_token || this.#refreshToken; // Twitch rotates refresh tokens
         this.#expiresAt = this.#now() + Number(data.expires_in || 3600) * 1000;
+        const rawScope = data.scope ?? data.scopes ?? validatedScopes;
+        if (Array.isArray(rawScope)) {
+            this.#grantedScopes = rawScope.map((scope) => String(scope).trim()).filter(Boolean);
+        } else if (typeof rawScope === 'string' && rawScope.trim()) {
+            this.#grantedScopes = rawScope.trim().split(/\s+/).map((scope) => scope.trim()).filter(Boolean);
+        }
+        // Unparseable scope leaves the current state untouched; authorization
+        // checks fail closed when no explicit scope set is available.
     }
 
     #clearUserTokens() {
         this.#accessToken = null;
         this.#refreshToken = null;
         this.#expiresAt = 0;
+        this.#grantedScopes = null;
     }
 
     async #persist() {
@@ -772,30 +821,32 @@ class MessageBufferStore {
         this.#now = now;
     }
 
-    append(channel, username, message, meta = null, identity = {}) {
+    /** Ambient logs hold only policy-eligible observations; entries arrive prebuilt. */
+    append(channel, entry) {
         const key = channelKey(channel);
         if (!this.#buffers.has(key)) this.#buffers.set(key, []);
         const buffer = this.#buffers.get(key);
-        const entry = { username, message, timestamp: this.#now(), meta: meta && typeof meta === 'object' ? meta : null };
-        const badges = normalizeBadges(identity);
-        const color = typeof identity?.color === 'string' ? identity.color.trim() : '';
-        if (badges.length > 0) entry.badges = badges;
-        if (color) entry.color = color;
-        buffer.push(entry);
+        const stored = {
+            username: entry.username,
+            message: entry.message,
+            timestamp: Number(entry.timestamp) || this.#now(),
+            meta: entry.meta && typeof entry.meta === 'object' ? entry.meta : null
+        };
+        if (Array.isArray(entry.badges) && entry.badges.length > 0) stored.badges = entry.badges;
+        if (entry.color) stored.color = entry.color;
+        buffer.push(stored);
         if (buffer.length > this.#maxBufferSize) buffer.shift();
-        return entry;
+        return stored;
     }
 
-    /** AI-facing logs: newest `count`, minus excluded logins and command-prefixed lines. */
-    recentLogs(channel, { count = 10, excludeLogins = [], excludePrefixes = [] } = {}) {
+    /** AI-facing logs: newest `count` entries, minus excluded logins. */
+    recentLogs(channel, { count = 10, excludeLogins = [] } = {}) {
         const buffer = this.#buffers.get(channelKey(channel)) || [];
         return buffer
             .slice(-count)
             .filter(entry => {
                 const login = cleanName(entry.username || '');
-                if (excludeLogins.includes(login)) return false;
-                const message = String(entry.message || '').toLowerCase().trim();
-                return !excludePrefixes.some(prefix => message.startsWith(prefix));
+                return !excludeLogins.includes(login);
             })
             .map(entry => `${entry.username}: ${entry.message}`);
     }
@@ -808,12 +859,14 @@ export class TwitchTransport {
     #ignored;
     #maxMessageLength;
     #chunkDelayMs;
+    #nowFn;
     #vault;
     #helix;
     #irc;
     #buffers;
     #badges = null;
     #eventsub = null;
+    #emotePool = null;
     #botId = null;
     #channelIdMap = {};
     #running = false;
@@ -822,6 +875,8 @@ export class TwitchTransport {
     #logHandlers = [];
     #statusHandlers = [];
     #eventHandlers = [];
+    #commandPrefixes = { startsWith: [], wordPrefixed: [] };
+    #orders = new Map(); // channelKey -> last assigned local order
 
     constructor(options = {}) {
         const {
@@ -835,6 +890,7 @@ export class TwitchTransport {
             maxMessageLength = 499,
             chunkDelayMs = 1000,
             ignoredUsernames = [],
+            emotePool = null,
             fetchImpl = globalThis.fetch.bind(globalThis),
             ircClientFactory = (tmiOptions) => new tmi.client(tmiOptions),
             nowFn = Date.now,
@@ -849,6 +905,7 @@ export class TwitchTransport {
         this.#ignored = new Set((ignoredUsernames || []).map(cleanName).filter(Boolean));
         this.#maxMessageLength = maxMessageLength;
         this.#chunkDelayMs = chunkDelayMs;
+        this.#nowFn = nowFn;
 
         this.#vault = new TokenVault({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now: nowFn });
         this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl });
@@ -862,12 +919,13 @@ export class TwitchTransport {
             });
         }
         this.#buffers = new MessageBufferStore({ maxBufferSize, now: nowFn });
+        this.#emotePool = emotePool;
         this.#irc = new IrcBridge({
             botUsername: this.#botUsername,
             channels: this.#channels,
             tokenVault: this.#vault,
             ircClientFactory,
-            onMessage: msg => this.#ingest(msg),
+            onMessage: msg => this.#ingestIrc(msg),
             onStatus: status => this.#emitStatus(status)
         });
 
@@ -883,6 +941,10 @@ export class TwitchTransport {
 
         if (this.#eventsub?.onEvent) {
             this.#eventsub.onEvent((event) => this.#emitEvent(event));
+        }
+        // Bot-token EventSub session: authoritative observation of bot chat.
+        if (this.#eventsub?.onBotChat) {
+            this.#eventsub.onBotChat(obs => this.#ingestBotChat(obs));
         }
 
         this.auth = {
@@ -937,7 +999,9 @@ export class TwitchTransport {
     /**
      * Delivers chat via Helix with the App Access Token (official Chatbot badge).
      * Flattens newlines, chunks >maxMessageLength on word boundaries paced
-     * chunkDelayMs apart, retries 401s transparently, logs each delivered chunk.
+     * chunkDelayMs apart, retries 401s transparently. Delivery is a separate
+     * fact from observation: the transcript row arrives only when the
+     * bot-token EventSub session reports Twitch's own record of the message.
      */
     async send(channel, message) {
         const flat = String(message ?? '').replace(/\s+/g, ' ').trim();
@@ -947,11 +1011,6 @@ export class TwitchTransport {
         for (const chunk of chunks) {
             if (sent > 0) await delay(this.#chunkDelayMs);
             await this.#sendChunk(channel, chunk);
-            const broadcasterId = this.#channelIdMap[cleanName(channel)];
-            const badgeKind = broadcasterId === this.#botId ? 'broadcaster' : 'bot-badge';
-            this.logMessage(channel, this.#botUsername, chunk, null, {
-                badges: [{ kind: badgeKind, version: '1' }]
-            });
             sent++;
         }
         return { sent };
@@ -959,8 +1018,8 @@ export class TwitchTransport {
 
     /* ── AI context ────────────────────────────────────────── */
 
-    /** Stream metadata + command-filtered recent logs in one call for AIEngine. */
-    async getContext(channel, { logCount = 10, commandPrefixes = [] } = {}) {
+    /** Stream metadata + recent logs in one call for AIEngine. */
+    async getContext(channel, { logCount = 10 } = {}) {
         const broadcasterId = this.#channelIdMap[cleanName(channel)];
         let channelContext = null;
         if (broadcasterId) {
@@ -971,7 +1030,7 @@ export class TwitchTransport {
             }
         }
         const recentLogs = logCount > 0
-            ? this.#buffers.recentLogs(channel, { count: logCount, excludeLogins: [this.#botUsername], excludePrefixes: commandPrefixes })
+            ? this.#buffers.recentLogs(channel, { count: logCount, excludeLogins: [this.#botUsername] })
             : [];
         return { channelContext, recentLogs };
     }
@@ -1016,20 +1075,6 @@ export class TwitchTransport {
         }
     }
 
-    /** Appends to the channel history buffer (post-emote-processing text) and emits onLogEntry. */
-    logMessage(channel, username, message, meta = null, identity = {}) {
-        const entry = this.#buffers.append(channel, username, message, meta, identity);
-        if (entry.badges) void this.#badges?.noteDescriptors(channel, entry.badges);
-        for (const handler of this.#logHandlers) {
-            try {
-                handler(channelKey(channel), entry);
-            } catch (err) {
-                console.error('[TwitchTransport] onLogEntry handler failed:', err.message);
-            }
-        }
-        return entry;
-    }
-
     /* ── getters & dynamic setters ──────────────────────────── */
 
     setIgnoredUsernames(usernames) {
@@ -1037,8 +1082,22 @@ export class TwitchTransport {
     }
 
     /**
+     * Hot-applies the command-trigger policy used to keep command lines out of
+     * ambient chat logs. Supplied by the ChatRouter, which owns the live trigger
+     * configuration. `startsWith` triggers match bare prefixes (AI/media style);
+     * `wordPrefixed` triggers must match as a whole word (custom-command style),
+     * mirroring how the router routes each family.
+     */
+    setCommandPrefixes({ startsWith = [], wordPrefixed = [] } = {}) {
+        const clean = (list) => [...new Set((list || [])
+            .map(prefix => String(prefix || '').trim().toLowerCase())
+            .filter(Boolean))];
+        this.#commandPrefixes = { startsWith: clean(startsWith), wordPrefixed: clean(wordPrefixed) };
+    }
+
+    /**
      * Hot-reloads the active channel list: diffs additions/removals, resolves Helix IDs,
-     * joins/parts IRC chat, and updates EventSub subscriptions.
+     * joins/parts IRC chat, and updates both EventSub session families.
      * @param {string[]} channels
      */
     async syncChannels(channels) {
@@ -1063,11 +1122,13 @@ export class TwitchTransport {
             await this.#irc.join(ch);
             if (this.#running) {
                 await this.#subscribeEventSubChannel(ch);
+                await this.#subscribeBotChatChannel(ch);
             }
         }
 
         for (const ch of toRemove) {
             await this.#irc.part(ch);
+            await this.#unsubscribeBotChatChannel(ch);
             this.#unsubscribeEventSubChannel(ch);
         }
 
@@ -1206,6 +1267,52 @@ export class TwitchTransport {
             console.error('[TwitchTransport] EventSub failed to start:', err.message);
         }
         await this.#subscribeEventSubChannels();
+        await this.#startBotChat();
+    }
+
+    /** Opens the shared bot-token chat session and subscribes every joined channel. */
+    async #startBotChat() {
+        if (!this.#eventsub?.startBotChat || !this.#botId) return;
+        try {
+            await this.#eventsub.startBotChat({
+                userId: this.#botId,
+                getAccessToken: () => this.#vault.getUserToken()
+            });
+        } catch (err) {
+            console.error('[TwitchTransport] Bot chat observation failed to start:', err.message);
+            return;
+        }
+        for (const channel of this.#channels) {
+            await this.#subscribeBotChatChannel(channel);
+        }
+    }
+
+    async #subscribeBotChatChannel(channel) {
+        if (!this.#eventsub?.subscribeBotChannel || !this.#botId) return;
+        const login = cleanName(channel);
+        const broadcasterId = this.#channelIdMap[login];
+        if (!broadcasterId) return;
+        try {
+            // Bot user identity only: no broadcaster token or moderator status required.
+            await this.#eventsub.subscribeBotChannel({
+                broadcasterUserId: broadcasterId,
+                broadcasterChannel: login
+            });
+        } catch (err) {
+            console.error(`[TwitchTransport] Bot chat subscribe failed for ${channel}:`, err.message);
+        }
+    }
+
+    async #unsubscribeBotChatChannel(channel) {
+        if (!this.#eventsub?.unsubscribeBotChannel) return;
+        const login = cleanName(channel);
+        const broadcasterId = this.#channelIdMap[login];
+        if (!broadcasterId) return;
+        try {
+            await this.#eventsub.unsubscribeBotChannel(broadcasterId);
+        } catch (err) {
+            console.error(`[TwitchTransport] Bot chat unsubscribe failed for ${channel}:`, err.message);
+        }
     }
 
     async #subscribeEventSubChannels() {
@@ -1285,15 +1392,114 @@ export class TwitchTransport {
         await this.#helix.sendChatMessage({ broadcasterId, senderId: this.#botId, message: chunk });
     }
 
-    #ingest(msg) {
+    /* ── observation path ──────────────────────────────────── */
+
+    /**
+     * IRC ingestion: authoritative for viewer-authored messages. The message
+     * is recorded before routing eligibility, ignored-username rules, or
+     * ambient-log policy run. Twitch does not echo the bot's own PRIVMSG back,
+     * and any bot-authored IRC line would double-count against the EventSub
+     * record, so those are discarded outright.
+     */
+    #ingestIrc(msg) {
         if (msg.self || !msg.loginName || msg.loginName === this.#botUsername) return;
-        if (this.#ignored.has(msg.loginName)) {
-            console.log(`[TwitchTransport] Ignoring message from ${msg.username}`);
+        this.#observe({
+            channel: msg.channel,
+            loginName: msg.loginName,
+            username: msg.username,
+            text: msg.text,
+            tags: msg.tags || {},
+            id: msg.tags?.id || '',
+            timestamp: Number(msg.tags?.['tmi-sent-ts']) || this.#nowFn(),
+            authoredByBot: false,
+            isMod: msg.isMod,
+            isBroadcaster: msg.isBroadcaster
+        });
+    }
+
+    /**
+     * Bot-token EventSub ingestion: authoritative for bot-authored messages.
+     * Viewer-authored notifications are discarded because IRC owns viewers.
+     */
+    #ingestBotChat(observation) {
+        const channel = channelKey(observation.channel);
+        if (
+            String(this.#botId || '') === ''
+            || observation.chatterUserId !== String(this.#botId)
+            || !this.#channels.includes(channel)
+        ) return;
+        this.#observe({
+            channel,
+            loginName: observation.loginName,
+            username: observation.username,
+            text: observation.text,
+            tags: observation.tags || {},
+            id: observation.id || '',
+            timestamp: Number(observation.timestamp) || this.#nowFn(),
+            authoredByBot: true
+        });
+    }
+
+    /**
+     * The one private observation path. Records the canonical transcript
+     * entry - exact Twitch ID, identity, emote metadata, source timestamp,
+     * and monotonic local order assigned before any listener runs - then
+     * applies the projection policy: bot-authored observations are transcript-
+     * only; ignored usernames are transcript-only; viewer commands are kept
+     * out of ambient logs; ordinary viewer messages flow everywhere eligible.
+     */
+    #observe(obs) {
+        const key = channelKey(obs.channel);
+        const routable = !obs.authoredByBot && !this.#ignored.has(obs.loginName);
+
+        const { text, emotes } = this.#normalizeTranscriptText(key, obs.text, obs.tags);
+        const badges = normalizeBadges(obs.tags);
+        const color = typeof obs.tags?.color === 'string' && obs.tags.color.trim() ? obs.tags.color.trim() : '';
+
+        const entry = {
+            id: String(obs.id || '') || crypto.randomUUID(),
+            username: obs.username,
+            message: text,
+            timestamp: Number(obs.timestamp) || this.#nowFn(),
+            meta: { twitchEmotesByName: emotes },
+            order: this.#nextLocalOrder(key)
+        };
+        if (badges.length > 0) entry.badges = badges;
+        if (color) entry.color = color;
+
+        // Transcript emission: complete rows only; consumers never repair them.
+        if (entry.badges) void this.#badges?.noteDescriptors(key, entry.badges);
+        for (const handler of this.#logHandlers) {
+            try {
+                handler(key, entry);
+            } catch (err) {
+                console.error('[TwitchTransport] onLogEntry handler failed:', err.message);
+            }
+        }
+
+        if (obs.authoredByBot) return; // transcript evidence only: no ambient, no routing, no memory turn
+
+        if (!routable) {
+            console.log(`[TwitchTransport] Ignoring message from ${obs.username}`);
             return;
         }
+
+        if (!this.#isAmbientExcluded(entry.message)) {
+            this.#buffers.append(key, entry);
+        }
+
         for (const handler of this.#messageHandlers) {
             try {
-                const result = handler(msg);
+                const result = handler({
+                    channel: key,
+                    username: obs.username,
+                    loginName: obs.loginName,
+                    text: obs.text,
+                    tags: obs.tags,
+                    isMod: !!obs.isMod,
+                    isBroadcaster: !!obs.isBroadcaster,
+                    self: false
+                });
                 if (result && typeof result.catch === 'function') {
                     result.catch(err => console.error('[TwitchTransport] Message handler failed:', err.message));
                 }
@@ -1301,6 +1507,31 @@ export class TwitchTransport {
                 console.error('[TwitchTransport] Message handler failed:', err.message);
             }
         }
+    }
+
+    /** Transcript pass: flags channel + native emotes via the injected pool. */
+    #normalizeTranscriptText(channelKey, text, tags) {
+        if (this.#emotePool?.ingestMessage) {
+            const { textForLogs, emoteIdMap } = this.#emotePool.ingestMessage({ channel: channelKey, text, tags });
+            return { text: textForLogs, emotes: emoteIdMap };
+        }
+        return { text: String(text ?? ''), emotes: {} };
+    }
+
+    #isAmbientExcluded(messageText) {
+        const lowered = String(messageText ?? '').toLowerCase().trim();
+        return this.#commandPrefixes.startsWith.some(prefix => prefix && lowered.startsWith(prefix))
+            || this.#commandPrefixes.wordPrefixed.some(prefix => prefix
+                && (lowered === prefix || lowered.startsWith(`${prefix} `)));
+    }
+
+    #nextLocalOrder(key) {
+        const previous = this.#orders.get(key) || 0;
+        const now = Number(this.#nowFn());
+        const clockOrder = Number.isFinite(now) && now > 0 ? Math.floor(now * 1000) : 1;
+        const next = Math.max(previous + 1, clockOrder);
+        this.#orders.set(key, next);
+        return next;
     }
 
     #emitStatus(status) {

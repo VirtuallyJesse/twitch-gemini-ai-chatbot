@@ -1,8 +1,7 @@
 // twitch-gemini-ai-chatbot/src/twitch/chat_router.js
-// Coordinates Twitch chat ingestion, command RBAC, media/AI dispatch,
+// Coordinates Twitch chat routing: command RBAC, media/AI dispatch,
 // per-channel cooldowns, and chatter-safe error translation.
 import { FACTORY, commandsToMap } from '../utils/bot_config.js';
-import { normalizeBadges } from '../utils/badges.js';
 
 const DEFAULT_PREFIXES = {
     ai: ['!gemini', '@yourbotusername'],
@@ -271,13 +270,6 @@ export class ChatRouter {
             tts: asPrefixList(prefixes.tts, DEFAULT_PREFIXES.tts),
             music: asPrefixList(prefixes.music, DEFAULT_PREFIXES.music)
         };
-        this.allPrefixes = [
-            ...this.prefixLists.ai,
-            ...this.prefixLists.image,
-            ...this.prefixLists.video,
-            ...this.prefixLists.tts,
-            ...this.prefixLists.music
-        ];
 
         this.cooldowns = new CooldownTracker({ duration: cooldownDuration, clock });
         this.customCommands = new CustomCommandRegistry({ customCommands });
@@ -320,14 +312,8 @@ export class ChatRouter {
             }
             this.prefixLists[type] = enabled;
         }
-        this.allPrefixes = [
-            ...this.prefixLists.ai,
-            ...this.prefixLists.image,
-            ...this.prefixLists.video,
-            ...this.prefixLists.tts,
-            ...this.prefixLists.music
-        ];
         this.matcher = new CommandMatcher(this.prefixLists.ai, entries);
+        this.#syncAmbientExclusions();
     }
 
     /**
@@ -350,14 +336,36 @@ export class ChatRouter {
         const next = asPrefixList(nameCsv, []);
         if (next.length === 0) return;
         this.prefixLists.ai = next;
-        this.allPrefixes = [
-            ...next,
-            ...this.prefixLists.image,
-            ...this.prefixLists.video,
-            ...this.prefixLists.tts,
-            ...this.prefixLists.music
-        ];
         this.matcher = new CommandMatcher(next, this.matcher.media);
+        this.#syncAmbientExclusions();
+    }
+
+    /**
+     * Every trigger that must stay out of ambient chat logs, grouped by the
+     * matching semantics each family uses in routing: AI and media commands
+     * match bare prefixes; custom command triggers must match as a whole word.
+     * The transport owns the buffer; the router owns the live trigger config.
+     */
+    #ambientExclusions() {
+        return {
+            startsWith: [
+                ...this.prefixLists.ai,
+                ...this.prefixLists.image,
+                ...this.prefixLists.video,
+                ...this.prefixLists.tts,
+                ...this.prefixLists.music
+            ],
+            wordPrefixed: [...this.customCommands.commands.keys()]
+        };
+    }
+
+    #syncAmbientExclusions() {
+        if (typeof this.transport?.setCommandPrefixes !== 'function') return;
+        try {
+            this.transport.setCommandPrefixes(this.#ambientExclusions());
+        } catch (err) {
+            console.warn('[ChatRouter] Failed to sync ambient command exclusions:', err?.message || err);
+        }
     }
 
     #buildHarnessInstructions() {
@@ -368,7 +376,7 @@ export class ChatRouter {
     }
 
     /**
-     * Binds inbound IRC messages and EventSub events. Returns an unsubscribe function.
+     * Binds inbound chat messages and EventSub events. Returns an unsubscribe function.
      * @param {object} transport TwitchTransport-like collaborator
      * @returns {() => void}
      */
@@ -377,6 +385,7 @@ export class ChatRouter {
             throw new Error('attach(transport) requires a transport instance');
         }
         this.transport = transport;
+        this.#syncAmbientExclusions();
         let listening = true;
 
         const onMessage = (message) => {
@@ -411,6 +420,7 @@ export class ChatRouter {
      */
     reloadCustomCommands(source) {
         this.customCommands.reload(source);
+        this.#syncAmbientExclusions();
     }
 
     /**
@@ -465,26 +475,15 @@ export class ChatRouter {
             const lower = text.toLowerCase();
             const aiCommand = this.matcher.matchAi(lower);
 
-            // 1. Single-pass emote ingestion + logging (always occurs, even for emote-only messages)
-            const { textForAi, textForLogs, emoteIdMap, isEmoteOnly } =
+            // Prompt-specific emote pass: command removal + emote-only detection.
+            // The transport already recorded the transcript with its own pass.
+            const { textForAi, isEmoteOnly } =
                 this.emotePool.ingestMessage({
                     channel,
                     text,
                     tags: message.tags,
                     prefix: aiCommand || ''
                 });
-
-            if (transport.logMessage) {
-                const color = typeof message.tags?.color === 'string' && message.tags.color.trim()
-                    ? message.tags.color.trim()
-                    : undefined;
-                transport.logMessage(channel, message.username, textForLogs, {
-                    twitchEmotesByName: emoteIdMap
-                }, {
-                    badges: normalizeBadges(message),
-                    color
-                });
-            }
 
             // 2. Custom command matching & RBAC
             const custom = this.customCommands.match(text);
@@ -575,8 +574,7 @@ export class ChatRouter {
                 }
 
                 const { channelContext, recentLogs } = await transport.getContext(channel, {
-                    logCount: this.chatContextLength,
-                    commandPrefixes: this.allPrefixes
+                    logCount: this.chatContextLength
                 });
                 const role = message.isBroadcaster ? 'broadcaster' : message.isMod ? 'moderator' : 'viewer';
                 const prompt = `Message from (role:${role}) ${message.loginName}: ${textForAi}`;
@@ -719,8 +717,7 @@ export class ChatRouter {
                 if (aiEnabled && promptTemplate) {
                     try {
                         const { channelContext, recentLogs } = await transport.getContext(channel, {
-                            logCount: this.chatContextLength,
-                            commandPrefixes: this.allPrefixes
+                            logCount: this.chatContextLength
                         });
                         const framed = `[Event Alert: ${eventKind}] ${interpolate(promptTemplate, vars)}`;
                         const flaggedFramed = typeof this.emotePool.flagText === 'function'
@@ -772,8 +769,7 @@ export class ChatRouter {
             if (aiEnabled && promptTemplate) {
                 try {
                     const { channelContext, recentLogs } = await transport.getContext(channel, {
-                        logCount: this.chatContextLength,
-                        commandPrefixes: this.allPrefixes
+                        logCount: this.chatContextLength
                     });
                     const framed = `[Event Alert: ${eventKind}] ${interpolate(promptTemplate, vars)}`;
                     const flaggedFramed = typeof this.emotePool.flagText === 'function'

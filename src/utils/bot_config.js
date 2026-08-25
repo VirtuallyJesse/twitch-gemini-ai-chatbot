@@ -198,6 +198,7 @@ When not doing a command, follow these rules to define your personality:
         YOUTUBE_RESTRICTED: '🚫 Access Denied. The video is likely copyrighted or geo-restricted.',
         BOT_NOT_MODERATOR: 'I need moderator status in this channel to do that! Please /mod the bot in chat.',
         BROADCASTER_AUTH_REQUIRED: 'I need broadcaster authorization to update the stream in this channel.',
+        BOT_SCOPE_MISSING: '🔐 Missing Permission. The bot account was connected without the required chat scope. Reconnect the bot account to fix this.',
         HELIX_ACTION_TIMEOUT: '⏱️ Twitch took too long to respond. Try again in a moment.',
         HELIX_ACTION_FAILED: '🔧 Twitch action failed. Try again in a moment.',
         HTTP_400: '❌ Bad Request. Ask the bot owner to fix this.',

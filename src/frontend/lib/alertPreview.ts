@@ -19,11 +19,10 @@ export function createAlertPreviewMessage({
   channel,
   text,
 }: AlertPreviewInput): AlertPreviewMessage {
-  const previewChannel = normChannel(channel.trim());
-  const badgeKind = previewChannel === normChannel(botUsername.trim()) ? 'broadcaster' : 'bot-badge';
-
+  // Previews run before any channel is joined, so the only badge the bot can
+  // guarantee is its global Chatbot badge - never an inferred Broadcaster one.
   return {
-    channel: previewChannel,
+    channel: normChannel(channel.trim()),
     entry: {
       kind: 'msg',
       id: `preview-msg-${alertKey}`,
@@ -31,7 +30,7 @@ export function createAlertPreviewMessage({
       user: botUsername,
       text,
       time: '18:04',
-      badges: [{ kind: badgeKind, version: '1' }],
+      badges: [{ kind: 'bot-badge', version: '1' }],
     },
   };
 }

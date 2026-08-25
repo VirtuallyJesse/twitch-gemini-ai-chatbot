@@ -110,6 +110,7 @@ const transport = new TwitchTransport({
     initialRefreshToken: env.TWITCH_REFRESH_TOKEN || '',
     storage,
     ignoredUsernames,
+    emotePool: emotes,
     wsImpl: WebSocket
 });
 

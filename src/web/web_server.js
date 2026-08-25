@@ -96,7 +96,6 @@ export class WebServer {
     #badgesUnsub = null;
     #prevOnMediaSaved = undefined;
     #avatarCache = new Map();
-    #liveChatOrders = new Map();
 
     constructor(options = {}) {
         const {
@@ -353,21 +352,13 @@ export class WebServer {
 
     #attachCollaborators() {
         if (this.#transport?.onLogEntry) {
+            // Transport observations arrive complete: exact Twitch message ID
+            // and positive local order assigned before emission. The web layer
+            // broadcasts and persists them unchanged.
             const unsub = this.#transport.onLogEntry((channel, entry) => {
                 if (!this.#live) return;
-                const normalized = String(channel || '').replace(/^#/, '').toLowerCase();
-                const previous = this.#liveChatOrders.get(normalized) || 0;
-                const requested = Number.isSafeInteger(entry?.order) && entry.order > previous
-                    ? entry.order
-                    : Math.max(previous + 1, Date.now() * 1000);
-                this.#liveChatOrders.set(normalized, requested);
-                const liveEntry = {
-                    ...entry,
-                    id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
-                    order: requested
-                };
-                this.broadcast({ type: 'chat', channel, entry: liveEntry });
-                this.#storage.addChatMessage(channel, liveEntry).catch((err) => {
+                this.broadcast({ type: 'chat', channel, entry });
+                this.#storage.addChatMessage(channel, entry).catch((err) => {
                     console.error('Failed to save chat to storage:', err.message);
                 });
             });

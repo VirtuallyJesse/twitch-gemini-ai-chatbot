@@ -55,6 +55,7 @@ const KEY_CATEGORY = {
     POLLINATIONS_NOT_CONFIGURED: 'auth',
     BOT_NOT_MODERATOR: 'auth',
     BROADCASTER_AUTH_REQUIRED: 'auth',
+    BOT_SCOPE_MISSING: 'auth',
     HELIX_ACTION_TIMEOUT: 'network',
     HELIX_ACTION_FAILED: 'server',
 
