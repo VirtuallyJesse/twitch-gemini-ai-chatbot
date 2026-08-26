@@ -16,8 +16,8 @@ export interface EmoteDef {
 /**
  * Constructs a Twitch native emote URL targeting dark theme and 1.0 scale (~28x28px).
  */
-export function getTwitchEmoteUrlById(id: string | number): string | null {
-  if (!id && id !== 0) return null;
+export function getTwitchEmoteUrlById(id: unknown): string | null {
+  if (typeof id !== 'string' && typeof id !== 'number') return null;
   const cleanId = String(id).trim();
   if (!cleanId) return null;
   return `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(cleanId)}/default/dark/1.0`;
@@ -50,14 +50,22 @@ export function registerChannelEmotes(
 export function getEmote(
   name: string,
   channel?: string,
-  meta?: { twitchEmotesByName?: Record<string, string> } | null
+  meta?: { twitchEmotesByName?: unknown } | null
 ): EmoteDef | null {
   const clean = name.replace(/^emote:/, '');
 
   // 1) Per-message Twitch native emotes (exact IDs from IRC message tags)
   const twitchMap = meta?.twitchEmotesByName;
-  if (twitchMap) {
-    const id = twitchMap[clean] ?? twitchMap[name];
+  const twitchMapPrototype = twitchMap && typeof twitchMap === 'object'
+    ? Object.getPrototypeOf(twitchMap)
+    : undefined;
+  if (twitchMapPrototype === Object.prototype || twitchMapPrototype === null) {
+    const twitchEmotes = twitchMap as Record<string, unknown>;
+    const id = Object.hasOwn(twitchEmotes, clean)
+      ? twitchEmotes[clean]
+      : Object.hasOwn(twitchEmotes, name)
+        ? twitchEmotes[name]
+        : undefined;
     if (id) {
       const url = getTwitchEmoteUrlById(id);
       if (url) return { name: clean, provider: 'twitch', url };

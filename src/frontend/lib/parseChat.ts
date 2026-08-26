@@ -14,7 +14,7 @@ const URLISH_RE = /^https?:\/\/\S+$/i;
 export function parseChat(
   raw: string,
   channel?: string,
-  meta?: { twitchEmotesByName?: Record<string, string> } | null
+  meta?: { twitchEmotesByName?: unknown } | null
 ): Token[] {
   const out: Token[] = [];
   let buf = '';

@@ -1613,7 +1613,7 @@ export class TwitchTransport {
             username: obs.username,
             message: text,
             timestamp: Number(obs.timestamp) || this.#nowFn(),
-            meta: { twitchEmotesByName: emotes },
+            meta: Object.keys(emotes).length > 0 ? { twitchEmotesByName: emotes } : {},
             order: this.#nextLocalOrder(key)
         };
         if (badges.length > 0) entry.badges = badges;
