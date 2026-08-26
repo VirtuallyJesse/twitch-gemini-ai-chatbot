@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, Plus, X } from 'lucide-react';
+import { Plus, X } from 'lucide-react';
 import type { ConfigIntent } from '../../config/ConfigEditor';
 import type { BotSettings } from '../../lib/types';
 import { channelLabel, normChannel } from '../../lib/channel';
@@ -9,18 +9,14 @@ interface Props {
   value: BotSettings;
   busy: boolean;
   botUsername: string;
-  channelStatuses: Record<string, { authorized?: boolean }>;
   dispatch: (intent: ConfigIntent) => void;
-  onAuthorizeBroadcaster: (channel: string) => void;
 }
 
 export default function ConfigurationTab({
   value,
   busy,
   botUsername,
-  channelStatuses,
   dispatch,
-  onAuthorizeBroadcaster,
 }: Props) {
   const [newChannel, setNewChannel] = useState('');
   const [newIgnoredUser, setNewIgnoredUser] = useState('');
@@ -54,17 +50,9 @@ export default function ConfigurationTab({
         {value.channels.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {value.channels.map((channel) => {
-              const linked = channelStatuses[channel]?.authorized ?? channelStatuses[`#${channel}`]?.authorized ?? false;
               return (
                 <span key={channel} className="flex items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink">
                   {channelLabel(channel)}
-                  {linked ? (
-                    <span className="rounded bg-emerald-400/10 px-1 py-px text-[9px] font-semibold text-emerald-400">Linked</span>
-                  ) : (
-                    <button onClick={() => onAuthorizeBroadcaster(channel)} title="Authorize broadcaster stream actions" className="flex cursor-pointer items-center gap-0.5 rounded bg-amber-400/10 px-1 py-px text-[9px] font-semibold text-amber-400 hover:bg-amber-400/20">
-                      <Link size={9} /> Link
-                    </button>
-                  )}
                   <button onClick={() => dispatch({ type: 'channel.removed', channel })} aria-label={`Remove ${channel}`} className="ml-0.5 cursor-pointer text-faint transition-colors hover:text-ink">
                     <X size={11} />
                   </button>
@@ -133,18 +121,10 @@ export default function ConfigurationTab({
         </FieldRow>
       )}
 
-      <SectionTitle>Emotes & Stream Actions</SectionTitle>
+      <SectionTitle>Emotes & display</SectionTitle>
       <FieldRow label="Auto-Append Emotes" hint="Append channel emotes to bot responses"><Toggle on={value.enable_emote_appending} onChange={(next) => change('enable_emote_appending', next)} /></FieldRow>
-      <FieldRow label="Stream actions" hint="Enables chat tools like title changes, clips and timeouts"><Toggle on={value.enable_helix_actions} onChange={(next) => change('enable_helix_actions', next)} /></FieldRow>
-      {value.enable_helix_actions && (
-        <>
-          <FieldRow label="Clip Cooldown (sec)"><input type="number" min={0} max={300} value={value.helix_clip_cooldown_seconds} onChange={(event) => change('helix_clip_cooldown_seconds', Math.max(0, parseInt(event.target.value, 10) || 0))} className={`w-24 ${inputCls}`} /></FieldRow>
-          <FieldRow label="Timeout Duration (sec)"><input type="number" min={1} max={1209600} value={value.helix_default_timeout_seconds} onChange={(event) => change('helix_default_timeout_seconds', Math.max(1, parseInt(event.target.value, 10) || 600))} className={`w-24 ${inputCls}`} /></FieldRow>
-        </>
-      )}
       <FieldRow label="Highlight bot replies in dashboard" noBorder><Toggle on={value.highlight_bot_responses} onChange={(next) => change('highlight_bot_responses', next)} /></FieldRow>
       <ResetTabButton onReset={() => dispatch({ type: 'domain.reset', domain: 'bot_settings' })} disabled={busy} />
     </div>
   );
 }
-

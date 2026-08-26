@@ -56,6 +56,8 @@ const KEY_CATEGORY = {
     BOT_NOT_MODERATOR: 'auth',
     BROADCASTER_AUTH_REQUIRED: 'auth',
     BOT_SCOPE_MISSING: 'auth',
+    POLL_UNAVAILABLE: 'validation',
+    PREDICTION_UNAVAILABLE: 'validation',
     HELIX_ACTION_TIMEOUT: 'network',
     HELIX_ACTION_FAILED: 'server',
 

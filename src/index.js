@@ -121,16 +121,11 @@ const transport = new TwitchTransport({
     wsImpl: WebSocket
 });
 
-let helixTools = [];
-let helixActionSuite = null;
-if (env.ENABLE_HELIX_ACTIONS !== 'false') {
-    helixActionSuite = createHelixTools({
-        transport,
-        clipCooldownSeconds: bootConfig.bot_settings?.helix_clip_cooldown_seconds ?? env.HELIX_CLIP_COOLDOWN_SECONDS ?? 30,
-        defaultTimeoutSeconds: bootConfig.bot_settings?.helix_default_timeout_seconds ?? env.HELIX_DEFAULT_TIMEOUT_SECONDS ?? 600
-    });
-    helixTools = helixActionSuite.tools;
-}
+const helixActionSuite = createHelixTools({
+    transport,
+    clipCooldownSeconds: bootConfig.stream_actions?.clip_cooldown_seconds ?? 30
+});
+const helixTools = helixActionSuite.tools;
 
 const aiEngine = new AIEngine({
     apiKeys: googleApiKeys,
@@ -149,6 +144,7 @@ const aiEngine = new AIEngine({
     maxResponseLength: 450,
     errorHandler,
     tools: helixTools,
+    streamActionsPolicy: bootConfig.stream_actions,
     verbose: env.AI_VERBOSE === 'true'
 });
 

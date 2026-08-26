@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, Bell, Loader2, Sliders, Sparkles, Terminal, X } from 'lucide-react';
+import { Activity, AlertTriangle, Bell, Loader2, Sliders, Sparkles, Terminal, X } from 'lucide-react';
 import type { BotSettings, ConfigDomain, PollinationsCatalog } from '../lib/types';
 import { api } from '../lib/api';
 import { channelLabel } from '../lib/channel';
@@ -13,21 +13,23 @@ import CommandsTab from './settings/CommandsTab';
 import ConfigurationTab from './settings/ConfigurationTab';
 import ErrorsTab from './settings/ErrorsTab';
 import PersonaTab from './settings/PersonaTab';
+import StreamActionsTab from './settings/StreamActionsTab';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   botUsername?: string;
   activeChannel?: string;
-  channelStatuses: Record<string, { authorized?: boolean }>;
+  channelStatuses: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   onChannelsChange?: (channels: string[]) => void;
 }
 
-type TabKey = 'config' | 'persona' | 'commands' | 'alerts' | 'errors';
+type TabKey = 'config' | 'persona' | 'stream-actions' | 'commands' | 'alerts' | 'errors';
 
 const TAB_DOMAINS: Record<TabKey, ConfigDomain> = {
   config: 'bot_settings',
   persona: 'system_instructions',
+  'stream-actions': 'stream_actions',
   commands: 'commands',
   alerts: 'event_alerts',
   errors: 'error_messages',
@@ -113,11 +115,15 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
     switch (activeTab) {
       case 'config': {
         const value = snapshot.domains.bot_settings.value;
-        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} channelStatuses={channelStatuses} dispatch={dispatch} onAuthorizeBroadcaster={openBroadcasterLink} />;
+        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} dispatch={dispatch} />;
       }
       case 'persona': {
         const value = snapshot.domains.system_instructions.value;
         return value !== null && <PersonaTab value={value} busy={busy} dispatch={dispatch} />;
+      }
+      case 'stream-actions': {
+        const value = snapshot.domains.stream_actions.value;
+        return value && <StreamActionsTab value={value} channels={snapshot.domains.bot_settings.value?.channels || []} channelStatuses={channelStatuses} busy={busy} dispatch={dispatch} onAuthorizeBroadcaster={openBroadcasterLink} onOpenConfiguration={() => setActiveTab('config')} />;
       }
       case 'commands': {
         const value = snapshot.domains.commands.value;
@@ -153,7 +159,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
           <div className="w-36 sm:w-44 md:w-48 shrink-0 border-r border-line bg-surface-2/40 p-1.5 sm:p-2">
             <nav className="flex flex-col gap-1">
               {([
-                ['config', 'Configuration', Sliders], ['persona', 'Persona', Sparkles], ['commands', 'Commands', Terminal],
+                ['config', 'Configuration', Sliders], ['persona', 'Persona', Sparkles], ['stream-actions', 'Stream Actions', Activity], ['commands', 'Commands', Terminal],
                 ['alerts', 'Alerts', Bell], ['errors', 'Errors', AlertTriangle],
               ] as const).map(([key, label, Icon]) => (
                 <button key={key} onClick={() => setActiveTab(key)} className={`flex cursor-pointer items-center gap-2 rounded-lg px-2.5 sm:px-3 py-2 text-[12px] sm:text-[12.5px] font-medium transition-colors ${activeTab === key ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-surface-2 hover:text-ink'}`}>

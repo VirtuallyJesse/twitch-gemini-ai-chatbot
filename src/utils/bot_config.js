@@ -1,10 +1,11 @@
 // src/utils/bot_config.js
 //
 // Single deep module managing bot configuration: factory presets, schema
-// sanitization, and the non-throwing ConfigStore persistence layer across 5 domains.
+// sanitization, and the non-throwing ConfigStore persistence layer across 6 domains.
 
 export const CONFIG_TYPES = Object.freeze([
     'bot_settings',
+    'stream_actions',
     'system_instructions',
     'commands',
     'event_alerts',
@@ -22,12 +23,20 @@ export const FACTORY = Object.freeze({
         ignored_usernames: Object.freeze(['streamelements', 'nightbot']),
         ai_history_length: 10,
         chat_context_length: 10,
-        enable_helix_actions: true,
-        helix_clip_cooldown_seconds: 30,
-        helix_default_timeout_seconds: 600,
         enable_emote_appending: true,
         bot_command_name: '!gemini,@yourbotusername',
         highlight_bot_responses: true
+    }),
+
+    stream_actions: Object.freeze({
+        enabled: true,
+        stream_setup_enabled: true,
+        moderation_enabled: true,
+        chat_access_enabled: true,
+        community_enabled: true,
+        polls_predictions_enabled: true,
+        viewer_clips_enabled: true,
+        clip_cooldown_seconds: 30
     }),
 
     system_instructions: `<content_guidelines>
@@ -198,7 +207,9 @@ When not doing a command, follow these rules to define your personality:
         YOUTUBE_RESTRICTED: '🚫 Access Denied. The video is likely copyrighted or geo-restricted.',
         BOT_NOT_MODERATOR: 'I need moderator status in this channel to do that! Please /mod the bot in chat.',
         BROADCASTER_AUTH_REQUIRED: 'I need broadcaster authorization to update the stream in this channel.',
-        BOT_SCOPE_MISSING: '🔐 Missing Permission. The bot account was connected without the required chat scope. Reconnect the bot account to fix this.',
+        BOT_SCOPE_MISSING: '🔐 Missing Permission. The Twitch account was connected without required permissions. Reconnect it to fix this.',
+        POLL_UNAVAILABLE: '📊 Polls are not available for this Twitch channel.',
+        PREDICTION_UNAVAILABLE: '🎯 Channel Points predictions are not available for this Twitch channel.',
         HELIX_ACTION_TIMEOUT: '⏱️ Twitch took too long to respond. Try again in a moment.',
         HELIX_ACTION_FAILED: '🔧 Twitch action failed. Try again in a moment.',
         HTTP_400: '❌ Bad Request. Ask the bot owner to fix this.',
@@ -216,6 +227,14 @@ When not doing a command, follow these rules to define your personality:
 export function createFactoryDefaults(env = {}) {
     const csvList = (v) => String(v || '').split(',').map((s) => s.trim().replace(/^#/, '').toLowerCase()).filter(Boolean);
     const boolVal = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
+    const clipCooldown = Number(env.STREAM_ACTIONS_CLIP_COOLDOWN_SECONDS);
+    const seededClipCooldown = env.STREAM_ACTIONS_CLIP_COOLDOWN_SECONDS !== undefined
+        && env.STREAM_ACTIONS_CLIP_COOLDOWN_SECONDS !== ''
+        && Number.isFinite(clipCooldown)
+        && clipCooldown >= 0
+        && clipCooldown <= 300
+        ? clipCooldown
+        : FACTORY.stream_actions.clip_cooldown_seconds;
 
     // Dashboard URL is the composition root's job; FACTORY keeps the
     // placeholder and env seeds the live default (Render auto-sets
@@ -248,12 +267,14 @@ export function createFactoryDefaults(env = {}) {
             ignored_usernames: Object.freeze(envIgnored.length ? envIgnored : [...FACTORY.bot_settings.ignored_usernames]),
             ai_history_length: Number(env.AI_HISTORY_LENGTH) || FACTORY.bot_settings.ai_history_length,
             chat_context_length: Number(env.CHAT_CONTEXT_LENGTH) || FACTORY.bot_settings.chat_context_length,
-            enable_helix_actions: boolVal(env.ENABLE_HELIX_ACTIONS, FACTORY.bot_settings.enable_helix_actions),
-            helix_clip_cooldown_seconds: Number(env.HELIX_CLIP_COOLDOWN_SECONDS) || FACTORY.bot_settings.helix_clip_cooldown_seconds,
-            helix_default_timeout_seconds: Number(env.HELIX_DEFAULT_TIMEOUT_SECONDS) || FACTORY.bot_settings.helix_default_timeout_seconds,
             enable_emote_appending: boolVal(env.ENABLE_EMOTE_APPENDING, FACTORY.bot_settings.enable_emote_appending),
             bot_command_name: env.BOT_COMMAND_NAME || FACTORY.bot_settings.bot_command_name,
             highlight_bot_responses: boolVal(env.HIGHLIGHT_BOT_RESPONSES, FACTORY.bot_settings.highlight_bot_responses)
+        }),
+        stream_actions: Object.freeze({
+            ...FACTORY.stream_actions,
+            enabled: boolVal(env.ENABLE_STREAM_ACTIONS, FACTORY.stream_actions.enabled),
+            clip_cooldown_seconds: seededClipCooldown
         }),
         system_instructions: FACTORY.system_instructions,
         commands,
@@ -446,15 +467,6 @@ export function sanitizeConfig(type, raw, context = {}) {
                 const l = Number(raw.chat_context_length);
                 if (Number.isFinite(l) && l >= 0) out.chat_context_length = l;
             }
-            if ('enable_helix_actions' in raw) out.enable_helix_actions = Boolean(raw.enable_helix_actions);
-            if ('helix_clip_cooldown_seconds' in raw) {
-                const c = Number(raw.helix_clip_cooldown_seconds);
-                if (Number.isFinite(c) && c >= 0) out.helix_clip_cooldown_seconds = c;
-            }
-            if ('helix_default_timeout_seconds' in raw) {
-                const t = Number(raw.helix_default_timeout_seconds);
-                if (Number.isFinite(t) && t >= 0) out.helix_default_timeout_seconds = t;
-            }
             if ('enable_emote_appending' in raw) out.enable_emote_appending = Boolean(raw.enable_emote_appending);
             if ('bot_command_name' in raw && raw.bot_command_name) out.bot_command_name = String(raw.bot_command_name).trim();
             if ('highlight_bot_responses' in raw) out.highlight_bot_responses = Boolean(raw.highlight_bot_responses);
@@ -469,6 +481,31 @@ export function sanitizeConfig(type, raw, context = {}) {
                 }
             }
 
+            return out;
+        }
+        case 'stream_actions': {
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                throw invalid('stream_actions must be an object');
+            }
+            const out = { ...FACTORY.stream_actions };
+            for (const key of [
+                'enabled',
+                'stream_setup_enabled',
+                'moderation_enabled',
+                'chat_access_enabled',
+                'community_enabled',
+                'polls_predictions_enabled',
+                'viewer_clips_enabled'
+            ]) {
+                if (key in raw) out[key] = Boolean(raw[key]);
+            }
+            if ('clip_cooldown_seconds' in raw) {
+                const cooldown = Number(raw.clip_cooldown_seconds);
+                if (!Number.isFinite(cooldown) || cooldown < 0 || cooldown > 300) {
+                    throw invalid('stream_actions.clip_cooldown_seconds must be between 0 and 300');
+                }
+                out.clip_cooldown_seconds = cooldown;
+            }
             return out;
         }
         case 'system_instructions': {

@@ -21,20 +21,20 @@ export class ToolDispatcher {
     #searchMode;
     #fetchImpl;
     #defaultTimeoutMs;
-    #enableHelixActions;
+    #streamActionsPolicy;
 
     constructor({
         tools = [],
         searchProvider = null,
         searchMode = 'off',
-        enableHelixActions = true,
+        streamActionsPolicy = {},
         fetchImpl = (...a) => globalThis.fetch(...a),
         defaultTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS
     } = {}) {
         this.#tools = Array.isArray(tools) ? tools.filter(Boolean) : [];
         this.#searchProvider = searchProvider || null;
         this.#applySearchMode(searchMode);
-        this.#enableHelixActions = enableHelixActions !== false;
+        this.#streamActionsPolicy = { enabled: true, ...streamActionsPolicy };
         this.#fetchImpl = fetchImpl;
         this.#defaultTimeoutMs = Number(defaultTimeoutMs) > 0
             ? Number(defaultTimeoutMs)
@@ -47,12 +47,12 @@ export class ToolDispatcher {
         return this.#searchMode;
     }
 
-    get enableHelixActions() {
-        return this.#enableHelixActions;
+    get streamActionsPolicy() {
+        return { ...this.#streamActionsPolicy };
     }
 
-    setEnableHelixActions(enabled) {
-        this.#enableHelixActions = Boolean(enabled);
+    setStreamActionsPolicy(policy = {}) {
+        this.#streamActionsPolicy = { ...this.#streamActionsPolicy, ...policy };
     }
 
     reloadSearchMode(searchMode, searchProvider = this.#searchProvider) {
@@ -117,14 +117,14 @@ export class ToolDispatcher {
         return true;
     }
 
-    compileTools({ hasWebpageUrls = false, disableMultimedia = false, caller } = {}) {
+    compileTools({ hasWebpageUrls = false, disableMultimedia = false, caller, channelContext } = {}) {
         if (disableMultimedia) return undefined;
 
         const compiled = [];
         if (hasWebpageUrls) compiled.push({ urlContext: {} });
         if (this.#searchMode === 'google') compiled.push({ googleSearch: {} });
 
-        const declarations = this.#compileFunctionDeclarations(caller);
+        const declarations = this.#compileFunctionDeclarations(caller, channelContext);
         if (declarations.length > 0) {
             compiled.push({ functionDeclarations: declarations });
         }
@@ -148,19 +148,23 @@ export class ToolDispatcher {
         return filtered.length > 0 ? filtered : undefined;
     }
 
-    #compileFunctionDeclarations(caller) {
+    #compileFunctionDeclarations(caller, channelContext) {
         const decls = [];
         const searchTool = this.#customSearchTool();
         if (searchTool) decls.push(this.#toDeclaration(searchTool));
 
-        if (this.#enableHelixActions) {
-            for (const tool of this.#tools) {
-                if (!tool?.name) continue;
-                if (this.#searchMode === 'google' && SEARCH_TOOL_NAMES.has(tool.name)) continue;
-                if (searchTool && tool.name === searchTool.name) continue;
-                if (!this.#allowedForCaller(tool, caller)) continue;
-                decls.push(this.#toDeclaration(tool));
+        const policy = { ...this.#streamActionsPolicy };
+        for (const tool of this.#tools) {
+            if (!tool?.name) continue;
+            if (this.#searchMode === 'google' && SEARCH_TOOL_NAMES.has(tool.name)) continue;
+            if (searchTool && tool.name === searchTool.name) continue;
+            if (!this.#allowedForCaller(tool, caller)) continue;
+            if (tool.streamActionFamily) {
+                if (policy.enabled === false) continue;
+                if (policy[`${tool.streamActionFamily}_enabled`] === false) continue;
+                if (tool.requiresLive && channelContext?.isLive === false) continue;
             }
+            decls.push(this.#toDeclaration(tool));
         }
         return decls;
     }

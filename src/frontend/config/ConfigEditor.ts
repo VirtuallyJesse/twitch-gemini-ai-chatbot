@@ -7,11 +7,13 @@ import type {
   ErrorMessagesConfig,
   EventAlertConfig,
   MediaCommandConfig,
+  StreamActionsSettings,
 } from '../lib/types';
 import type { ConfigDomainValues, ConfigPersistence } from './persistence';
 
 const DOMAINS: ConfigDomain[] = [
   'bot_settings',
+  'stream_actions',
   'system_instructions',
   'commands',
   'event_alerts',
@@ -24,8 +26,17 @@ const AUTOSAVED_BOT_FIELDS = new Set<keyof BotSettings>([
   'search_grounding',
   'tavily_search_depth',
   'enable_emote_appending',
-  'enable_helix_actions',
   'highlight_bot_responses',
+]);
+
+const AUTOSAVED_STREAM_ACTION_FIELDS = new Set<keyof StreamActionsSettings>([
+  'enabled',
+  'stream_setup_enabled',
+  'moderation_enabled',
+  'chat_access_enabled',
+  'community_enabled',
+  'polls_predictions_enabled',
+  'viewer_clips_enabled',
 ]);
 
 type Operation = 'load' | 'defaults' | 'autosave' | 'save';
@@ -61,6 +72,7 @@ export interface ConfigEditorSnapshot {
 export type ConfigIntent =
   | { type: 'persona.changed'; value: string }
   | { type: 'bot-setting.changed'; field: keyof BotSettings; value: BotSettings[keyof BotSettings] }
+  | { type: 'stream-action.changed'; field: keyof StreamActionsSettings; value: StreamActionsSettings[keyof StreamActionsSettings] }
   | { type: 'channel.added'; channel: string }
   | { type: 'channel.removed'; channel: string }
   | { type: 'ignored-users.added'; usernames: string[] }
@@ -114,6 +126,21 @@ function equal(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function applyChanges<T>(base: T, previous: T, next: T): T {
+  if (equal(previous, next)) return clone(base);
+  if (!isRecord(base) || !isRecord(previous) || !isRecord(next)) return clone(next);
+  const result = clone(base) as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+    if (equal(previous[key], next[key])) continue;
+    result[key] = applyChanges(result[key], previous[key], next[key]);
+  }
+  return result as T;
+}
+
 function failure(domain: ConfigDomain | null, operation: Operation, error: unknown): ConfigFailure {
   const candidate = error as { message?: unknown; code?: unknown } | null;
   return {
@@ -146,6 +173,7 @@ export class ConfigEditor {
   private readonly listeners = new Set<() => void>();
   private readonly records: { [D in ConfigDomain]: DomainRecord<D> } = {
     bot_settings: emptyDomain() as DomainRecord<'bot_settings'>,
+    stream_actions: emptyDomain() as DomainRecord<'stream_actions'>,
     system_instructions: emptyDomain() as DomainRecord<'system_instructions'>,
     commands: emptyDomain() as DomainRecord<'commands'>,
     event_alerts: emptyDomain() as DomainRecord<'event_alerts'>,
@@ -208,6 +236,9 @@ export class ConfigEditor {
         break;
       case 'bot-setting.changed':
         this.edit('bot_settings', (draft) => ({ ...draft, [intent.field]: intent.value }), AUTOSAVED_BOT_FIELDS.has(intent.field));
+        break;
+      case 'stream-action.changed':
+        this.edit('stream_actions', (draft) => ({ ...draft, [intent.field]: intent.value }), AUTOSAVED_STREAM_ACTION_FIELDS.has(intent.field));
         break;
       case 'channel.added':
         this.edit('bot_settings', (draft) => ({ ...draft, channels: [...draft.channels, intent.channel] }), true);
@@ -301,14 +332,18 @@ export class ConfigEditor {
   ): void {
     const record = this.records[domain];
     if (record.draft === null) return;
+    const previousDraft = clone(record.draft);
     record.draft = clone(update(clone(record.draft)));
     record.revision += 1;
     record.failure = null;
     if (this.globalFailure?.domain === domain) this.globalFailure = null;
     if (autosave) {
+      const queuedBase = [...this.queue].reverse().find((job) => job.domain === domain)?.value;
+      const activeBase = this.activeWrite?.domain === domain ? this.activeWrite.value : null;
+      const persistenceBase = (queuedBase ?? activeBase ?? record.baseline ?? record.draft) as ConfigDomainValues[D];
       this.enqueue({
         domain,
-        value: clone(record.draft),
+        value: applyChanges(persistenceBase, previousDraft, record.draft),
         revision: record.revision,
         kind: 'autosave',
         token: this.token,
@@ -359,7 +394,7 @@ export class ConfigEditor {
     const record = this.records[domain];
     if (record.baseline !== null) record.draft = clone(record.baseline);
     record.revision += 1;
-    record.explicitRevision = record.committedRevision;
+    record.explicitRevision = 0;
     record.failedAutosaveRevision = 0;
     record.cancelAfterActive = false;
   }
@@ -440,15 +475,16 @@ export class ConfigEditor {
     const record = this.records[job.domain] as DomainRecord;
     record.baseline = clone(canonical);
     record.committedRevision = Math.max(record.committedRevision, job.revision);
+    if (job.kind === 'save' && record.explicitRevision <= job.revision) record.explicitRevision = 0;
     record.failure = null;
     if (record.failedAutosaveRevision <= job.revision) record.failedAutosaveRevision = 0;
     if (record.cancelAfterActive) {
       record.draft = clone(canonical);
       record.revision += 1;
-      record.explicitRevision = record.committedRevision;
+      record.explicitRevision = 0;
       record.cancelAfterActive = false;
-    } else if (record.revision === job.revision) {
-      record.draft = clone(canonical);
+    } else {
+      record.draft = applyChanges(canonical, job.value, record.draft);
     }
     try {
       this.onCommitted?.({ domain: job.domain, value: clone(canonical) });
@@ -502,7 +538,7 @@ export class ConfigEditor {
       domains[domain] = {
         value: record.draft === null ? null : clone(record.draft),
         dirty: this.isDomainDirty(domain),
-        saveRequired: record.explicitRevision > record.committedRevision || record.failedAutosaveRevision > 0,
+        saveRequired: record.explicitRevision > 0 || record.failedAutosaveRevision > 0,
         pending: this.hasOutstandingWrites(domain),
         saving: this.activeWrite?.domain === domain,
         resetting: record.resetting,

@@ -133,7 +133,7 @@ export interface BotStatus {
   botUsername?: string;
   authorized?: boolean;
   connected?: boolean;
-  channelStatuses?: Record<string, { authorized?: boolean }>;
+  channelStatuses?: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   storageConfigured?: boolean;
 }
 
@@ -147,15 +147,23 @@ export interface BotSettings {
   ignored_usernames: string[];
   ai_history_length: number;
   chat_context_length: number;
-  enable_helix_actions: boolean;
-  helix_clip_cooldown_seconds: number;
-  helix_default_timeout_seconds: number;
   enable_emote_appending: boolean;
   bot_command_name: string;
   highlight_bot_responses: boolean;
 }
 
-export type ConfigDomain = 'bot_settings' | 'system_instructions' | 'commands' | 'event_alerts' | 'error_messages';
+export interface StreamActionsSettings {
+  enabled: boolean;
+  stream_setup_enabled: boolean;
+  moderation_enabled: boolean;
+  chat_access_enabled: boolean;
+  community_enabled: boolean;
+  polls_predictions_enabled: boolean;
+  viewer_clips_enabled: boolean;
+  clip_cooldown_seconds: number;
+}
+
+export type ConfigDomain = 'bot_settings' | 'stream_actions' | 'system_instructions' | 'commands' | 'event_alerts' | 'error_messages';
 export type CommandAccess = 'everyone' | 'subs' | 'vipmod' | 'mod';
 
 export interface MediaCommandConfig {
@@ -202,6 +210,7 @@ export type ErrorMessagesConfig = Record<string, string>;
 
 export interface AllConfig {
   bot_settings: BotSettings;
+  stream_actions: StreamActionsSettings;
   system_instructions: string;
   commands: CommandsConfig;
   event_alerts: EventAlertsConfig;

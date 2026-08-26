@@ -49,8 +49,8 @@ class ApiClient {
     return this.request<string[]>('/api/channels');
   }
 
-  async getChannelStatuses(): Promise<Record<string, { authorized?: boolean }>> {
-    return this.request<Record<string, { authorized?: boolean }>>('/api/channel-status');
+  async getChannelStatuses(): Promise<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>> {
+    return this.request<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>>('/api/channel-status');
   }
 
   async getChatPage(channel: string, cursor: string | null = null): Promise<RawChatHistoryPage> {

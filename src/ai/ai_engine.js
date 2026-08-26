@@ -56,7 +56,7 @@ export class AIEngine {
         searchGrounding = null,
         searchProvider = null,
         tools = [],
-        enableHelixActions = true,
+        streamActionsPolicy = {},
         toolTimeoutMs = 3500,
         thinkingLevel = 'medium',
         youtubeApiKey = null,
@@ -112,7 +112,7 @@ export class AIEngine {
             tools,
             searchProvider: this.searchProvider,
             searchMode: this.searchGrounding,
-            enableHelixActions: enableHelixActions !== false,
+            streamActionsPolicy,
             fetchImpl,
             defaultTimeoutMs: toolTimeoutMs
         });
@@ -203,7 +203,8 @@ export class AIEngine {
         harnessInstructions,
         ephemeralContext,
         overrideFileContext,
-        tools
+        tools,
+        caller
     }) {
         const timeString = new Date().toLocaleString('en-US', {
             timeZone: 'UTC',
@@ -224,7 +225,7 @@ export class AIEngine {
         // 1. Channel and temporal context
         const channelLines = [];
         if (channelContext) {
-            const liveStatus = channelContext.isLive ? 'LIVE' : 'OFFLINE';
+            const liveStatus = channelContext.isLive === true ? 'LIVE' : channelContext.isLive === false ? 'OFFLINE' : 'UNKNOWN';
             const category = channelContext.gameName || channelContext.game;
             channelLines.push(`Channel: ${channelContext.channelName}`);
             channelLines.push(`Status: ${liveStatus}`);
@@ -272,8 +273,15 @@ export class AIEngine {
                 'Do not attempt to browse URLs, search the web, or invoke external tools. Answer directly from internal knowledge and the context already provided.'
             );
         }
+        const privilegedCaller = Boolean(caller?.isBroadcaster || caller?.isMod);
+        const unavailableRule = privilegedCaller
+            ? 'If a requested Stream Action is not declared, explain that it is unavailable right now.'
+            : 'If a requested privileged Stream Action is not declared, explain that it requires the broadcaster or a moderator.';
+        const offlineRule = channelContext?.isLive === false
+            ? 'The channel is known to be offline, which may explain why a live-only action is unavailable.'
+            : '';
         toolRules.push(
-            'Your available tools are dynamically provided based on the user\'s permissions. If an administrative action tool (such as changing the stream title/category, timeouts, announcements, or shoutouts) is available in your tools, the user is authorized—execute the tool to fulfill their request. If a requested action tool is not declared in your tools, politely explain that only the broadcaster or moderators can request that action. Never claim or pretend you performed an action in text unless you successfully executed the corresponding tool call.\nDo not mention user roles (such as viewer, moderator, or role tags) in casual conversation unless specifically relevant to explaining action permissions.'
+            `Available Stream Action tools already reflect the current settings, caller access, and stream state. If an action tool is available, execute it to fulfill a valid request. ${unavailableRule} ${offlineRule} Never claim or pretend you performed an action unless its tool call succeeded.\nDo not mention user roles in casual conversation unless specifically relevant to explaining action access.`
         );
         sections.push(`<tool_guidelines>\n${toolRules.join('\n\n')}\n</tool_guidelines>`);
 
@@ -338,9 +346,9 @@ export class AIEngine {
     /**
      * Picks SDK grounding tools and custom tool declarations for this turn.
      */
-    #selectTools({ allUrls, imageUrl, disableMultimedia, caller }) {
+    #selectTools({ allUrls, imageUrl, disableMultimedia, caller, channelContext }) {
         const hasWebpageUrls = allUrls.some(url => url !== imageUrl && !YT_URL_RE.test(url));
-        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia, caller });
+        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia, caller, channelContext });
     }
 
     /**
@@ -659,7 +667,7 @@ export class AIEngine {
         if (channelContext || recentLogs?.length) {
             this.#logSubsection('Twitch Context');
             if (channelContext) {
-                const liveStatus = channelContext.isLive ? 'LIVE' : 'OFFLINE';
+                const liveStatus = channelContext.isLive === true ? 'LIVE' : channelContext.isLive === false ? 'OFFLINE' : 'UNKNOWN';
                 console.log(`   ${COLORS.dim}Channel:${COLORS.reset} ${channelContext.channelName || channel || ''} ${COLORS.dim}│ Status:${COLORS.reset} ${liveStatus}`);
                 if (channelContext.title) {
                     console.log(`   ${COLORS.dim}Title:${COLORS.reset} ${channelContext.title}`);
@@ -672,7 +680,7 @@ export class AIEngine {
         }
 
         const { userParts, allUrls, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
-        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia, caller });
+        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia, caller, channelContext });
 
         const systemInstruction = await this.#compileSystemInstruction({
             prompt,
@@ -681,7 +689,8 @@ export class AIEngine {
             harnessInstructions,
             ephemeralContext,
             overrideFileContext,
-            tools
+            tools,
+            caller
         });
 
         const history = this.getHistory(channel);
@@ -715,7 +724,8 @@ export class AIEngine {
                 harnessInstructions,
                 ephemeralContext,
                 overrideFileContext,
-                tools: activeTools
+                tools: activeTools,
+                caller
             });
             return activeSystemInstruction;
         };
@@ -982,7 +992,6 @@ export class AIEngine {
         thinkingLevel,
         searchGrounding,
         historyLength,
-        enableHelixActions,
         tavilySearchDepth
     } = {}) {
         if (modelName) this.modelName = String(modelName);
@@ -1002,9 +1011,10 @@ export class AIEngine {
         if (historyLength !== undefined) {
             this.historyLength = parseInt(historyLength, 10) || 5;
         }
-        if (enableHelixActions !== undefined) {
-            this.#toolDispatcher?.setEnableHelixActions?.(enableHelixActions);
-        }
+    }
+
+    reloadStreamActions(policy = {}) {
+        this.#toolDispatcher?.setStreamActionsPolicy?.(policy);
     }
 }
 

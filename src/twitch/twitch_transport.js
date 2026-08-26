@@ -17,15 +17,13 @@ import { BadgeCatalog } from './badge_catalog.js';
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
-/** Required so the bot-token EventSub session can observe bot chat. */
-const REQUIRED_BOT_SCOPE = 'user:read:chat';
-
 export const TWITCH_AUTH_SCOPES = [
     'chat:read', 'chat:edit', 'user:bot', 'user:read:chat', 'user:write:chat',
     'clips:edit',
     'moderator:manage:banned_users',
     'moderator:manage:announcements',
     'moderator:manage:shoutouts',
+    'moderator:manage:chat_settings',
     'channel:manage:broadcast'
 ];
 
@@ -34,8 +32,28 @@ export const TWITCH_BROADCASTER_SCOPES = [
     'channel:read:subscriptions',
     'bits:read',
     'channel:read:redemptions',
-    'moderator:read:followers'
+    'moderator:read:followers',
+    'channel:manage:raids',
+    'channel:manage:polls',
+    'channel:manage:predictions'
 ];
+
+function normalizedScopes(value) {
+    if (Array.isArray(value)) return value.map((scope) => String(scope).trim()).filter(Boolean);
+    if (typeof value === 'string') return value.trim().split(/\s+/).filter(Boolean);
+    return null;
+}
+
+function hasScopeBundle(granted, required) {
+    const scopes = normalizedScopes(granted);
+    return Array.isArray(scopes) && required.every((scope) => scopes.includes(scope));
+}
+
+function firstMissingScope(granted, required) {
+    const scopes = normalizedScopes(granted) || [];
+    if (required.includes('user:read:chat') && !scopes.includes('user:read:chat')) return 'user:read:chat';
+    return required.find((scope) => !scopes.includes(scope)) || null;
+}
 
 export class HelixApiError extends Error {
     constructor(method, path, status, data) {
@@ -59,7 +77,7 @@ export class AuthMismatchError extends Error {
 
 export class MissingScopeError extends Error {
     constructor(scope) {
-        super(`Bot grant lacks required "${scope}" scope; reauthorization required.`);
+        super(`Twitch grant lacks ${scope}; reauthorization required.`);
         this.name = 'MissingScopeError';
         this.scope = scope;
         // User-facing copy renders from the catalog via ErrorHandler (BOT_SCOPE_MISSING).
@@ -271,10 +289,9 @@ class TokenVault {
 
     isAuthorized() { return !!this.#refreshToken; }
 
-    /** True only when the granted scope set explicitly includes bot chat observation. */
+    /** True only when the grant satisfies the current fixed bot bundle. */
     hasRequiredScope() {
-        return Array.isArray(this.#grantedScopes)
-            && this.#grantedScopes.includes(REQUIRED_BOT_SCOPE);
+        return hasScopeBundle(this.#grantedScopes, TWITCH_AUTH_SCOPES);
     }
 
     /** Load from storage (falling back to the seed refresh token) and prove one works. */
@@ -295,9 +312,7 @@ class TokenVault {
             try {
                 await this.#refreshUserToken();
                 if (!this.hasRequiredScope()) {
-                    // Stale grant: refresh works but Twitch never granted the
-                    // chat-observation scope. Stand by for reauthorization.
-                    console.error(`[TwitchTransport] Stored grant lacks "${REQUIRED_BOT_SCOPE}"; reauthorization required.`);
+                    console.error('[TwitchTransport] Stored bot grant lacks required Twitch permissions; reauthorization required.');
                     this.#clearUserTokens();
                     continue;
                 }
@@ -326,14 +341,10 @@ class TokenVault {
                 await this.#revokeToken(data.access_token).catch(() => {});
                 throw new AuthMismatchError(expected, authorizedLogin);
             }
-            // A grant without the chat-observation scope must never persist;
-            // the runtime would otherwise boot without its source of truth.
-            grantedScopes = Array.isArray(validation.scopes)
-                ? validation.scopes.map(scope => String(scope).trim()).filter(Boolean)
-                : null;
-            if (!grantedScopes?.includes(REQUIRED_BOT_SCOPE)) {
+            grantedScopes = normalizedScopes(validation.scopes);
+            if (!hasScopeBundle(grantedScopes, TWITCH_AUTH_SCOPES)) {
                 await this.#revokeToken(data.access_token).catch(() => {});
-                throw new MissingScopeError(REQUIRED_BOT_SCOPE);
+                throw new MissingScopeError(firstMissingScope(grantedScopes, TWITCH_AUTH_SCOPES) || 'required Twitch permissions');
             }
             console.log(`[TwitchTransport] Token verified for bot account: ${authorizedLogin}`);
         }
@@ -431,12 +442,8 @@ class TokenVault {
         this.#accessToken = data.access_token;
         this.#refreshToken = data.refresh_token || this.#refreshToken; // Twitch rotates refresh tokens
         this.#expiresAt = this.#now() + Number(data.expires_in || 3600) * 1000;
-        const rawScope = data.scope ?? data.scopes ?? validatedScopes;
-        if (Array.isArray(rawScope)) {
-            this.#grantedScopes = rawScope.map((scope) => String(scope).trim()).filter(Boolean);
-        } else if (typeof rawScope === 'string' && rawScope.trim()) {
-            this.#grantedScopes = rawScope.trim().split(/\s+/).map((scope) => scope.trim()).filter(Boolean);
-        }
+        const scopes = normalizedScopes(data.scope ?? data.scopes ?? validatedScopes);
+        if (scopes) this.#grantedScopes = scopes;
         // Unparseable scope leaves the current state untouched; authorization
         // checks fail closed when no explicit scope set is available.
     }
@@ -470,7 +477,12 @@ class TokenVault {
             await this.#revokeToken(data.access_token).catch(() => {});
             throw new AuthMismatchError(expected, authorizedLogin);
         }
-        await this.#setBroadcasterTokens(expected, data);
+        const grantedScopes = normalizedScopes(validation.scopes ?? data.scope ?? data.scopes);
+        if (!hasScopeBundle(grantedScopes, TWITCH_BROADCASTER_SCOPES)) {
+            await this.#revokeToken(data.access_token).catch(() => {});
+            throw new MissingScopeError(firstMissingScope(grantedScopes, TWITCH_BROADCASTER_SCOPES) || 'required broadcaster permissions');
+        }
+        await this.#setBroadcasterTokens(expected, data, grantedScopes);
         return data;
     }
 
@@ -478,6 +490,13 @@ class TokenVault {
         const key = cleanName(channel);
         const entry = await this.#loadBroadcasterEntry(key);
         return Boolean(entry?.refreshToken);
+    }
+
+    async getBroadcasterStatus(channel) {
+        const entry = await this.#loadBroadcasterEntry(cleanName(channel));
+        const linked = Boolean(entry?.refreshToken);
+        const authorized = linked && hasScopeBundle(entry?.scopes, TWITCH_BROADCASTER_SCOPES);
+        return { linked, authorized, needsRelink: linked && !authorized };
     }
 
     /**
@@ -488,6 +507,7 @@ class TokenVault {
         const key = cleanName(channel);
         const entry = await this.#loadBroadcasterEntry(key);
         if (!entry?.refreshToken) return null;
+        if (!hasScopeBundle(entry.scopes, TWITCH_BROADCASTER_SCOPES)) return null;
         if (entry.accessToken && this.#now() < (entry.expiresAt || 0) - TOKEN_EXPIRY_BUFFER_MS) {
             return entry.accessToken;
         }
@@ -509,7 +529,7 @@ class TokenVault {
                     grant_type: 'refresh_token',
                     refresh_token: entry.refreshToken
                 });
-                await this.#setBroadcasterTokens(key, data);
+                await this.#setBroadcasterTokens(key, data, normalizedScopes(data.scope ?? data.scopes) ?? entry.scopes);
                 return this.#broadcasterTokens.get(key).accessToken;
             } catch (err) {
                 if (err.grantRejected) {
@@ -525,11 +545,13 @@ class TokenVault {
         return pending;
     }
 
-    async #setBroadcasterTokens(channel, data) {
+    async #setBroadcasterTokens(channel, data, validatedScopes = null) {
+        const current = this.#broadcasterTokens.get(channel);
         const entry = {
             accessToken: data.access_token,
-            refreshToken: data.refresh_token || this.#broadcasterTokens.get(channel)?.refreshToken,
-            expiresAt: this.#now() + Number(data.expires_in || 3600) * 1000
+            refreshToken: data.refresh_token || current?.refreshToken,
+            expiresAt: this.#now() + Number(data.expires_in || 3600) * 1000,
+            scopes: normalizedScopes(data.scope ?? data.scopes ?? validatedScopes) ?? current?.scopes ?? null
         };
         this.#broadcasterTokens.set(channel, entry);
         if (this.#storage) {
@@ -716,6 +738,125 @@ class HelixClient {
             },
             signal
         });
+    }
+
+    async banUser(broadcasterId, moderatorId, { targetUserId, reason }, { signal } = {}) {
+        return this.request('/moderation/bans', {
+            method: 'POST',
+            query: { broadcaster_id: broadcasterId, moderator_id: moderatorId },
+            body: { data: { user_id: targetUserId, reason: reason || '' } },
+            signal
+        });
+    }
+
+    async unbanUser(broadcasterId, moderatorId, targetUserId, { signal } = {}) {
+        return this.request('/moderation/bans', {
+            method: 'DELETE',
+            query: { broadcaster_id: broadcasterId, moderator_id: moderatorId, user_id: targetUserId },
+            signal
+        });
+    }
+
+    async updateChatSettings(broadcasterId, moderatorId, settings, { signal } = {}) {
+        const body = {};
+        if (settings.emoteMode !== undefined) body.emote_mode = settings.emoteMode;
+        if (settings.subscriberMode !== undefined) body.subscriber_mode = settings.subscriberMode;
+        if (settings.followerMode !== undefined) body.follower_mode = settings.followerMode;
+        if (settings.followerModeDuration !== undefined) body.follower_mode_duration = settings.followerModeDuration;
+        return this.request('/chat/settings', {
+            method: 'PATCH',
+            query: { broadcaster_id: broadcasterId, moderator_id: moderatorId },
+            body,
+            signal
+        });
+    }
+
+    async createStreamMarker(broadcasterId, description, { accessToken, channel, signal } = {}) {
+        const body = { user_id: broadcasterId };
+        if (description) body.description = description;
+        const data = await this.request('/streams/markers', {
+            method: 'POST',
+            body,
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return data?.data?.[0] || null;
+    }
+
+    async startRaid(fromBroadcasterId, toBroadcasterId, { accessToken, channel, signal } = {}) {
+        return this.request('/raids', {
+            method: 'POST',
+            query: { from_broadcaster_id: fromBroadcasterId, to_broadcaster_id: toBroadcasterId },
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+    }
+
+    async cancelRaid(broadcasterId, { accessToken, channel, signal } = {}) {
+        return this.request('/raids', {
+            method: 'DELETE',
+            query: { broadcaster_id: broadcasterId },
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+    }
+
+    async createPoll(broadcasterId, { title, choices, duration }, { accessToken, channel, signal } = {}) {
+        const data = await this.request('/polls', {
+            method: 'POST',
+            body: {
+                broadcaster_id: broadcasterId,
+                title,
+                choices: choices.map((choice) => ({ title: choice })),
+                duration
+            },
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return data?.data?.[0] || null;
+    }
+
+    async createPrediction(broadcasterId, { title, outcomes, duration }, { accessToken, channel, signal } = {}) {
+        const data = await this.request('/predictions', {
+            method: 'POST',
+            body: {
+                broadcaster_id: broadcasterId,
+                title,
+                outcomes: outcomes.map((outcome) => ({ title: outcome })),
+                prediction_window: duration
+            },
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return data?.data?.[0] || null;
+    }
+
+    async getPredictions(broadcasterId, { accessToken, channel, signal } = {}) {
+        const data = await this.request('/predictions', {
+            query: { broadcaster_id: broadcasterId, first: 20 },
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return data?.data || [];
+    }
+
+    async endPrediction(broadcasterId, { id, status, winningOutcomeId }, { accessToken, channel, signal } = {}) {
+        const body = { broadcaster_id: broadcasterId, id, status };
+        if (winningOutcomeId) body.winning_outcome_id = winningOutcomeId;
+        const data = await this.request('/predictions', {
+            method: 'PATCH',
+            body,
+            accessToken,
+            broadcasterChannel: channel ? cleanName(channel) : null,
+            signal
+        });
+        return data?.data?.[0] || null;
     }
 
     async sendAnnouncement(broadcasterId, moderatorId, { message, color }, { signal } = {}) {
@@ -1158,9 +1299,12 @@ export class TwitchTransport {
         const statuses = {};
         for (const channel of this.#channels) {
             const key = cleanName(channel);
+            const grant = await this.#vault.getBroadcasterStatus(key);
             statuses[channel] = {
                 channel,
-                authorized: await this.#vault.hasBroadcasterToken(key),
+                authorized: grant.authorized,
+                linked: grant.linked,
+                needsRelink: grant.needsRelink,
                 isBot: Boolean(this.#botUsername && key === cleanName(this.#botUsername))
             };
         }

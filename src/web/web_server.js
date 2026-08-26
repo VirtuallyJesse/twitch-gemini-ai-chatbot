@@ -645,22 +645,12 @@ export class WebServer {
                     thinkingLevel: value?.thinking_level,
                     searchGrounding: value?.search_grounding,
                     tavilySearchDepth: value?.tavily_search_depth,
-                    historyLength: value?.ai_history_length,
-                    enableHelixActions: value?.enable_helix_actions
+                    historyLength: value?.ai_history_length
                 });
             }
             if (this.#emotePool?.reloadSettings) {
                 this.#emotePool.reloadSettings({
                     appendEnabled: value?.enable_emote_appending
-                });
-            }
-            if (this.#helixActions?.reloadSettings && (
-                value?.helix_clip_cooldown_seconds !== undefined
-                || value?.helix_default_timeout_seconds !== undefined
-            )) {
-                this.#helixActions.reloadSettings({
-                    clipCooldownSeconds: value?.helix_clip_cooldown_seconds,
-                    defaultTimeoutSeconds: value?.helix_default_timeout_seconds
                 });
             }
             if (value?.cooldown_duration !== undefined && this.#chatRouter) {
@@ -672,6 +662,9 @@ export class WebServer {
             if (value?.bot_command_name !== undefined && this.#chatRouter?.reloadAiPrefixes) {
                 this.#chatRouter.reloadAiPrefixes(value.bot_command_name);
             }
+        } else if (type === 'stream_actions') {
+            this.#aiEngine?.reloadStreamActions?.(value);
+            this.#helixActions?.reloadSettings?.({ clipCooldownSeconds: value?.clip_cooldown_seconds });
         } else if (type === 'system_instructions') {
             this.#chatRouter?.reloadSystemInstructions?.(value);
             this.#aiEngine?.reloadFileContext?.(value);

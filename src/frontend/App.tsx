@@ -64,7 +64,7 @@ export default function App() {
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
   const [channels, setChannels] = useState<string[]>([]);
   const [activeChannel, setActiveChannel] = useState<string>('');
-  const [channelStatuses, setChannelStatuses] = useState<Record<string, { authorized?: boolean }>>({});
+  const [channelStatuses, setChannelStatuses] = useState<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>>({});
   const [chatHistory, setChatHistory] = useState(createChatHistoryModel);
   const chatHistoryRef = useRef(chatHistory);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
