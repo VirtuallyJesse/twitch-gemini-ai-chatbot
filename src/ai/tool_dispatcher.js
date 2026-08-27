@@ -96,7 +96,9 @@ export class ToolDispatcher {
         enableSearchGrounding = false,
         searchProvider = null
     } = {}) {
-        const explicit = String(searchGrounding || '').toLowerCase();
+        const supplied = searchGrounding !== null && searchGrounding !== undefined;
+        const explicit = String(searchGrounding ?? '').trim().toLowerCase();
+        if (supplied && explicit === '') return 'off';
         if (explicit === 'tavily') {
             return searchProvider ? 'custom' : 'off';
         }
