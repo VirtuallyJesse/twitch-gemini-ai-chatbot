@@ -282,15 +282,14 @@ export class EmotePool {
   getHarnessInstructions() {
     const parts = [
       '<emotes>',
-      'Users can type emotes into chat, which you will see formatted as emote:NAME for easy identification.',
-      'Treat emote:NAME tokens as opaque unless contextually relevant to the user\'s prompt, for example if the user asks you to repeat an emote, or if an emote hints at the user\'s mood or intent.',
-      'If you decide you must repeat an emote a user has written, echo it exactly as displayed with case-sensitivity.',
-      'Do NOT invent new emotes or use emotes you haven\'t seen in the user\'s prompt or in your active Twitch chat logs.'
+      'emote:NAME identifies a Twitch emote in supplied context.',
+      'Treat emote:NAME tokens as opaque unless the user\'s request makes the emote relevant.',
+      'You may only reproduce emotes observed in supplied context, preserving their exact spelling and case.'
     ];
 
     if (this.#cfg.appendEnabled) {
       parts.push(
-        'An emote is randomly appended to the end of every message you send. This function is automatic without your involvement and is performed by the system handler. You are not the system, do not attempt to perform this task.'
+        'The application automatically selects and appends an emote after your response when possible. Do not append an emote yourself. You do not choose the appended emote and should not claim to know why a particular emote was selected.'
       );
     }
 

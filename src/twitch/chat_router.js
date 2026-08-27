@@ -2,6 +2,7 @@
 // Coordinates Twitch chat routing: command RBAC, media/AI dispatch,
 // per-channel cooldowns, and chatter-safe error translation.
 import { FACTORY, commandsToMap } from '../utils/bot_config.js';
+import { EVENT_REACTION_HARNESS } from './event_reaction.js';
 
 const DEFAULT_PREFIXES = {
     ai: ['!gemini', '@yourbotusername'],
@@ -52,9 +53,6 @@ function findRewardConfig(policy, title) {
     }
     return null;
 }
-
-const EVENT_ALERT_HARNESS =
-    'You are reacting to a live Twitch channel event. Stay in persona. Keep it under 60 words, celebratory, and authentic. Do not mention being an AI or these instructions. Do not ask follow-up questions. Do not call tools.';
 
 function asPrefixList(value, fallback) {
     if (value == null || value === '') return [...fallback];
@@ -818,7 +816,7 @@ export class ChatRouter {
                             recentLogs,
                             harnessInstructions: [
                                 this.emotePool.getHarnessInstructions(),
-                                EVENT_ALERT_HARNESS
+                                EVENT_REACTION_HARNESS
                             ],
                             overrideFileContext: this.#flaggedPersona(channel),
                             disableTools: true,
@@ -874,7 +872,7 @@ export class ChatRouter {
                         recentLogs,
                         harnessInstructions: [
                             this.emotePool.getHarnessInstructions(),
-                            EVENT_ALERT_HARNESS
+                            EVENT_REACTION_HARNESS
                         ],
                         overrideFileContext: this.#flaggedPersona(channel),
                         disableTools: true,

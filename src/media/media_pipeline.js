@@ -3,17 +3,11 @@ import { FACTORY } from '../utils/bot_config.js';
 import { normalizeBadges } from '../utils/badges.js';
 
 const MEDIA_TYPE_HARNESS = [
-    { key: 'image', noun: 'an image', bullet: 'Generating images' },
-    { key: 'video', noun: 'a video', bullet: 'Generating videos' },
-    { key: 'tts', noun: 'TTS audio', bullet: 'Generating text to speech' },
-    { key: 'music', noun: 'music', bullet: 'Generating music' }
+    { key: 'image', bullet: 'Generating images' },
+    { key: 'video', bullet: 'Generating videos' },
+    { key: 'tts', bullet: 'Generating text to speech' },
+    { key: 'music', bullet: 'Generating music' }
 ];
-
-function formatMediaNounList(nouns) {
-    if (nouns.length === 1) return nouns[0];
-    if (nouns.length === 2) return `${nouns[0]} or ${nouns[1]}`;
-    return `${nouns.slice(0, -1).join(', ')}, or ${nouns[nouns.length - 1]}`;
-}
 
 function providerId(provider) {
     return String(provider?.id || provider?.name || '').trim();
@@ -56,17 +50,6 @@ function emptyCatalog() {
     return { image: [], video: [], tts: [], music: [] };
 }
 
-const MEDIA_INSTRUCTIONS_TEMPLATE = `This is a media delivery turn. The {media_type} has already been generated and uploaded.
-
-Requested by: {username}
-Original request: {description}
-Media URL: {media_url}
-
-Present the completed {media_type} now, following the configured channel personality.
-Include the exact URL {media_url} in the response.
-Keep the presentation brief and specific to the request.
-The URL may appear at the beginning, middle, or end. Vary the framing and placement naturally, including relative to recent media deliveries.`;
-
 function resolveUsername(user) {
     if (!user) return 'someone';
     if (typeof user === 'string') return user;
@@ -81,23 +64,11 @@ function displayMediaType(mediaType) {
     return mediaType === 'tts' ? 'TTS audio' : mediaType;
 }
 
-function buildMediaInstruction(username, prompt, mediaUrl, mediaType) {
-    const description = String(prompt || '')
+function normalizeMediaRequest(prompt) {
+    return String(prompt || '')
         .replace(/https?:\/\/\S+/g, '[original-url]')
         .replace(/\s+/g, ' ')
         .trim();
-
-    const values = {
-        media_type: mediaType,
-        username,
-        description,
-        media_url: mediaUrl
-    };
-
-    return MEDIA_INSTRUCTIONS_TEMPLATE.replace(
-        /\{([^}]+)\}/g,
-        (_match, key) => values[key] ?? ''
-    );
 }
 
 function extractText(result) {
@@ -263,11 +234,11 @@ export class MediaPipeline {
         if (!prefixes) return null;
 
         const active = [];
-        for (const { key, noun, bullet } of MEDIA_TYPE_HARNESS) {
+        for (const { key, bullet } of MEDIA_TYPE_HARNESS) {
             if (!this.supports(key)) continue;
             const cmdList = prefixes[key];
             if (cmdList?.length) {
-                active.push({ noun, line: `- ${bullet}: ${cmdList[0]}` });
+                active.push(`- ${bullet}: ${cmdList[0]}`);
             }
         }
 
@@ -275,9 +246,8 @@ export class MediaPipeline {
 
         return (
             '<media_commands>\n' +
-            `For any user request to directly generate or edit ${formatMediaNounList(active.map((a) => a.noun))}, do not say you are unable to. Instead, instruct the user to use one of the following commands:\n\n` +
-            `${active.map((a) => a.line).join('\n')}\n\n` +
-            'Never attempt to create media yourself by using one of the above generate commands. The system will create the media and alert you to present it.\n' +
+            'Media generation and editing are available through chat commands. When a user asks to generate or edit supported media, do not say you are unable to generate it; instead, direct them to the matching command. Do not emit or use a media-generation command yourself.\n\n' +
+            `${active.join('\n')}\n` +
             '</media_commands>'
         );
     }
@@ -309,19 +279,27 @@ export class MediaPipeline {
 
         let presentation;
         try {
-            const ephemeralContext = buildMediaInstruction(
-                username,
-                prompt,
-                mediaUrl,
-                displayMediaType(mediaType)
-            );
+            const originalRequest = normalizeMediaRequest(prompt);
+
+            const presentationTask = [
+                `Deliver the completed ${displayMediaType(mediaType)} requested by ${username}.`,
+                `Prompt: "${originalRequest}"`,
+                'React to the concept with brief commentary, banter, or a witty reaction.',
+                'Do not echo, parrot, or restate the prompt text (avoid "Here is your [prompt]").',
+                'Include the media URL. It may appear at the beginning, between sentences, or at the end. Keep placement natural.'
+            ].join('\n');
 
             const result = await this.aiEngine?.generate(
-                `User requested: ${prompt}`,
+                presentationTask,
                 {
                     disableMultimedia: true,
                     channel,
-                    ephemeralContext
+                    mediaDelivery: {
+                        mediaType,
+                        requester: username,
+                        originalRequest,
+                        generatedUrl: mediaUrl
+                    }
                 }
             );
 

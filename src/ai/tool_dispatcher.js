@@ -13,7 +13,7 @@ const DEFAULT_SEARCH_PARAMETERS = {
     required: ['query']
 };
 const TOOL_BUDGET_MESSAGE =
-    'Tool calling budget exhausted. Answer now from the information already retrieved. Do not call any tools.';
+    'Answer the current request using the information already retrieved.';
 
 export class ToolDispatcher {
     #tools;

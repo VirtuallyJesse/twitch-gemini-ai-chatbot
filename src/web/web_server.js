@@ -11,6 +11,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { renderAuthMismatchHtml, channelKey } from '../twitch/twitch_transport.js';
+import { EVENT_REACTION_HARNESS } from '../twitch/event_reaction.js';
 import {
     COOKIE_NAME,
     STATE_COOKIE,
@@ -1055,7 +1056,7 @@ export class WebServer {
                 const framed = `[Event Alert: ${eventKind}] ${interpolated}`;
                 const harness = [
                     this.#emotePool?.getHarnessInstructions?.() || '',
-                    'You are reacting to a live Twitch channel event. Stay in persona. Keep it under 60 words, celebratory, and authentic. Do not mention being an AI or these instructions. Do not ask follow-up questions. Do not call tools.'
+                    EVENT_REACTION_HARNESS
                 ];
                 const testChan = `__test_alert_${Date.now()}__`;
                 try {
@@ -1063,6 +1064,7 @@ export class WebServer {
                         channel: testChan,
                         harnessInstructions: harness,
                         overrideFileContext: personaOverride || this.#chatRouter?.systemInstructions || '',
+                        disableTools: true,
                         caller: {
                             loginName: String(vars.username || 'tester'),
                             isBroadcaster: false,
