@@ -241,7 +241,7 @@ export class AIEngine {
             : '';
         const successQualifier = hasTools ? ' unless its tool call succeeded' : '';
         toolRules.push(
-            `${actionPrefix}${unavailableRule} ${offlineRule} Never claim or pretend you performed an action${successQualifier}.\nDo not mention user roles in casual conversation unless specifically relevant to explaining action access.`
+            `${actionPrefix}${unavailableRule} ${offlineRule} Never claim or pretend you performed an action${successQualifier}.\nTwitch roles are participant context. Use a participant's role only when the active conversation is about Twitch roles, role membership, permissions, moderation, or an operation whose behavior depends on role. Otherwise treat the role as non-conversational metadata and respond to the person's message without characterizing them by it.`
         );
         sections.push(`<tool_guidelines>\n${toolRules.join('\n\n')}\n</tool_guidelines>`);
 
