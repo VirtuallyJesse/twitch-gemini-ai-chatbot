@@ -662,6 +662,12 @@ export class WebServer {
             if (value?.bot_command_name !== undefined && this.#chatRouter?.reloadAiPrefixes) {
                 this.#chatRouter.reloadAiPrefixes(value.bot_command_name);
             }
+            if (value?.reply_mode !== undefined && this.#chatRouter?.reloadReplyMode) {
+                this.#chatRouter.reloadReplyMode(value.reply_mode);
+            }
+            if (value?.ignore_emote_only_prompts !== undefined && this.#chatRouter?.reloadIgnoreEmoteOnlyPrompts) {
+                this.#chatRouter.reloadIgnoreEmoteOnlyPrompts(value.ignore_emote_only_prompts);
+            }
         } else if (type === 'stream_actions') {
             this.#aiEngine?.reloadStreamActions?.(value);
             this.#helixActions?.reloadSettings?.({ clipCooldownSeconds: value?.clip_cooldown_seconds });

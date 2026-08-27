@@ -43,8 +43,8 @@ export default function StreamActionsTab({
 
   return (
     <div className="space-y-4">
-      <SectionTitle>Stream Actions</SectionTitle>
-      <FieldRow label="Stream Actions" hint="Let chat trigger Twitch actions" noBorder={!value.enabled}>
+      <SectionTitle>Stream actions</SectionTitle>
+      <FieldRow label="Stream actions" hint="Let chat trigger Twitch actions" noBorder={!value.enabled}>
         <Toggle on={value.enabled} onChange={(next) => change('enabled', next)} />
       </FieldRow>
 

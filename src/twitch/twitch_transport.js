@@ -66,6 +66,15 @@ export class HelixApiError extends Error {
     }
 }
 
+export class InvalidReplyParentError extends Error {
+    constructor(dropReason) {
+        super(`Twitch rejected native reply parent: ${JSON.stringify(dropReason || {})}`);
+        this.name = 'InvalidReplyParentError';
+        this.code = 'INVALID_REPLY_PARENT';
+        this.dropReason = dropReason || null;
+    }
+}
+
 export class AuthMismatchError extends Error {
     constructor(expected, actual) {
         super(`Authorization rejected: expected account "${expected}" but got "${actual}". Log into the correct Twitch account and try again.`);
@@ -253,12 +262,25 @@ function chunkMessage(text, maxLength) {
 
 function normalizeIrcMessage(channel, tags, text, self) {
     tags = tags || {};
+    const replyParentMessageId = String(tags['reply-parent-msg-id'] || '');
+    const isReply = [
+        'reply-parent-msg-id',
+        'reply-parent-user-id',
+        'reply-parent-user-login',
+        'reply-parent-display-name'
+    ].some((key) => Object.hasOwn(tags, key));
     return {
         channel: channelKey(channel),
+        messageId: String(tags.id || ''),
         username: tags['display-name'] || tags.username || '',
         loginName: cleanName(tags.username || ''),
         text: String(text ?? ''),
         tags,
+        isReply,
+        replyParentMessageId,
+        replyParentUserId: String(tags['reply-parent-user-id'] || ''),
+        replyParentLogin: cleanName(tags['reply-parent-user-login'] || ''),
+        replyParentDisplayName: String(tags['reply-parent-display-name'] || ''),
         isMod: tags.mod === true || tags.mod === '1',
         isBroadcaster: !!(tags.badges && tags.badges.broadcaster),
         self: !!self
@@ -671,15 +693,34 @@ class HelixClient {
     }
 
     /** Send chat via App Access Token - preserves the official Chatbot badge. */
-    async sendChatMessage({ broadcasterId, senderId, message }) {
-        const data = await this.request('/chat/messages', {
-            method: 'POST',
-            useAppToken: true,
-            body: { broadcaster_id: broadcasterId, sender_id: senderId, message }
-        });
+    async sendChatMessage({ broadcasterId, senderId, message, replyParentMessageId = '' }) {
+        const body = { broadcaster_id: broadcasterId, sender_id: senderId, message };
+        if (replyParentMessageId) body.reply_parent_message_id = replyParentMessageId;
+        let data;
+        try {
+            data = await this.request('/chat/messages', {
+                method: 'POST',
+                useAppToken: true,
+                body
+            });
+        } catch (error) {
+            const messageText = String(error?.data?.message || '');
+            if (error instanceof HelixApiError
+                && error.status === 400
+                && /reply_parent_message_id/i.test(messageText)
+                && /(?:not valid|invalid)/i.test(messageText)) {
+                throw new InvalidReplyParentError(error.data);
+            }
+            throw error;
+        }
         const result = data?.data?.[0];
         if (!result) throw new Error('Twitch chat API returned no result.');
-        if (!result.is_sent) throw new Error(`Twitch rejected chat message: ${JSON.stringify(result.drop_reason || {})}`);
+        if (!result.is_sent) {
+            if (result.drop_reason?.code === 'invalid_reply_parent') {
+                throw new InvalidReplyParentError(result.drop_reason);
+            }
+            throw new Error(`Twitch rejected chat message: ${JSON.stringify(result.drop_reason || {})}`);
+        }
         return result;
     }
 
@@ -1015,7 +1056,7 @@ export class TwitchTransport {
     #logHandlers = [];
     #statusHandlers = [];
     #eventHandlers = [];
-    #commandPrefixes = { startsWith: [], wordPrefixed: [] };
+    #messageClassifier = () => ({ kind: 'none' });
     #orders = new Map(); // channelKey -> last assigned local order
 
     constructor(options = {}) {
@@ -1143,14 +1184,14 @@ export class TwitchTransport {
      * fact from observation: the transcript row arrives only when the
      * bot-token EventSub session reports Twitch's own record of the message.
      */
-    async send(channel, message) {
+    async send(channel, message, { replyParentMessageId = '' } = {}) {
         const flat = String(message ?? '').replace(/\s+/g, ' ').trim();
         if (!flat) return { sent: 0 };
         const chunks = chunkMessage(flat, this.#maxMessageLength);
         let sent = 0;
         for (const chunk of chunks) {
             if (sent > 0) await delay(this.#chunkDelayMs);
-            await this.#sendChunk(channel, chunk);
+            await this.#sendChunk(channel, chunk, { replyParentMessageId });
             sent++;
         }
         return { sent };
@@ -1221,19 +1262,14 @@ export class TwitchTransport {
         this.#ignored = new Set((usernames || []).map(cleanName).filter(Boolean));
     }
 
-    /**
-     * Hot-applies the command-trigger policy used to keep command lines out of
-     * ambient chat logs. Supplied by the ChatRouter, which owns the live trigger
-     * configuration. `startsWith` triggers match bare prefixes (AI/media style);
-     * `wordPrefixed` triggers must match as a whole word (custom-command style),
-     * mirroring how the router routes each family.
-     */
-    setCommandPrefixes({ startsWith = [], wordPrefixed = [] } = {}) {
-        const clean = (list) => [...new Set((list || [])
-            .map(prefix => String(prefix || '').trim().toLowerCase())
-            .filter(Boolean))];
-        this.#commandPrefixes = { startsWith: clean(startsWith), wordPrefixed: clean(wordPrefixed) };
+    /** ChatRouter-owned synchronous invocation policy for ambient projection. */
+    setMessageClassifier(classifier) {
+        this.#messageClassifier = typeof classifier === 'function'
+            ? classifier
+            : () => ({ kind: 'none' });
     }
+
+    get botUserId() { return this.#botId; }
 
     /**
      * Hot-reloads the active channel list: diffs additions/removals, resolves Helix IDs,
@@ -1528,11 +1564,16 @@ export class TwitchTransport {
         }
     }
 
-    async #sendChunk(channel, chunk) {
+    async #sendChunk(channel, chunk, { replyParentMessageId = '' } = {}) {
         const broadcasterId = this.#channelIdMap[cleanName(channel)];
         if (!broadcasterId) throw new Error(`No broadcaster ID resolved for channel "${channel}".`);
         if (!this.#botId) throw new Error('Bot user ID is not resolved; call start() before send().');
-        await this.#helix.sendChatMessage({ broadcasterId, senderId: this.#botId, message: chunk });
+        await this.#helix.sendChatMessage({
+            broadcasterId,
+            senderId: this.#botId,
+            message: chunk,
+            replyParentMessageId
+        });
     }
 
     /* ── observation path ──────────────────────────────────── */
@@ -1552,9 +1593,14 @@ export class TwitchTransport {
             username: msg.username,
             text: msg.text,
             tags: msg.tags || {},
-            id: msg.tags?.id || '',
+            id: msg.messageId,
             timestamp: Number(msg.tags?.['tmi-sent-ts']) || this.#nowFn(),
             authoredByBot: false,
+            isReply: msg.isReply,
+            replyParentMessageId: msg.replyParentMessageId,
+            replyParentUserId: msg.replyParentUserId,
+            replyParentLogin: msg.replyParentLogin,
+            replyParentDisplayName: msg.replyParentDisplayName,
             isMod: msg.isMod,
             isBroadcaster: msg.isBroadcaster
         });
@@ -1636,22 +1682,36 @@ export class TwitchTransport {
             return;
         }
 
-        if (!this.#isAmbientExcluded(entry.message)) {
+        const viewerMessage = {
+            channel: key,
+            messageId: id,
+            username: obs.username,
+            loginName: obs.loginName,
+            text: obs.text,
+            tags: obs.tags,
+            isReply: !!obs.isReply,
+            replyParentMessageId: String(obs.replyParentMessageId || ''),
+            replyParentUserId: String(obs.replyParentUserId || ''),
+            replyParentLogin: cleanName(obs.replyParentLogin || ''),
+            replyParentDisplayName: String(obs.replyParentDisplayName || ''),
+            isMod: !!obs.isMod,
+            isBroadcaster: !!obs.isBroadcaster,
+            self: false
+        };
+        let invocation = { kind: 'none' };
+        try {
+            invocation = this.#messageClassifier(viewerMessage) || invocation;
+        } catch (err) {
+            console.error('[TwitchTransport] Message classification failed:', err.message);
+        }
+
+        if (invocation.kind === 'none') {
             this.#buffers.append(key, entry);
         }
 
         for (const handler of this.#messageHandlers) {
             try {
-                const result = handler({
-                    channel: key,
-                    username: obs.username,
-                    loginName: obs.loginName,
-                    text: obs.text,
-                    tags: obs.tags,
-                    isMod: !!obs.isMod,
-                    isBroadcaster: !!obs.isBroadcaster,
-                    self: false
-                });
+                const result = handler({ ...viewerMessage, invocation });
                 if (result && typeof result.catch === 'function') {
                     result.catch(err => console.error('[TwitchTransport] Message handler failed:', err.message));
                 }
@@ -1668,13 +1728,6 @@ export class TwitchTransport {
             return { text: textForLogs, emotes: emoteIdMap };
         }
         return { text: String(text ?? ''), emotes: {} };
-    }
-
-    #isAmbientExcluded(messageText) {
-        const lowered = String(messageText ?? '').toLowerCase().trim();
-        return this.#commandPrefixes.startsWith.some(prefix => prefix && lowered.startsWith(prefix))
-            || this.#commandPrefixes.wordPrefixed.some(prefix => prefix
-                && (lowered === prefix || lowered.startsWith(`${prefix} `)));
     }
 
     #nextLocalOrder(key) {

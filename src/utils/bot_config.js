@@ -23,6 +23,8 @@ export const FACTORY = Object.freeze({
         ignored_usernames: Object.freeze(['streamelements', 'nightbot']),
         ai_history_length: 10,
         chat_context_length: 10,
+        reply_mode: 'off',
+        ignore_emote_only_prompts: true,
         enable_emote_appending: true,
         bot_command_name: '!gemini,@yourbotusername',
         highlight_bot_responses: true
@@ -267,6 +269,8 @@ export function createFactoryDefaults(env = {}) {
             ignored_usernames: Object.freeze(envIgnored.length ? envIgnored : [...FACTORY.bot_settings.ignored_usernames]),
             ai_history_length: Number(env.AI_HISTORY_LENGTH) || FACTORY.bot_settings.ai_history_length,
             chat_context_length: Number(env.CHAT_CONTEXT_LENGTH) || FACTORY.bot_settings.chat_context_length,
+            reply_mode: FACTORY.bot_settings.reply_mode,
+            ignore_emote_only_prompts: FACTORY.bot_settings.ignore_emote_only_prompts,
             enable_emote_appending: boolVal(env.ENABLE_EMOTE_APPENDING, FACTORY.bot_settings.enable_emote_appending),
             bot_command_name: env.BOT_COMMAND_NAME || FACTORY.bot_settings.bot_command_name,
             highlight_bot_responses: boolVal(env.HIGHLIGHT_BOT_RESPONSES, FACTORY.bot_settings.highlight_bot_responses)
@@ -466,6 +470,12 @@ export function sanitizeConfig(type, raw, context = {}) {
             if ('chat_context_length' in raw) {
                 const l = Number(raw.chat_context_length);
                 if (Number.isFinite(l) && l >= 0) out.chat_context_length = l;
+            }
+            if ('reply_mode' in raw && ['off', 'tag', 'reply'].includes(raw.reply_mode)) {
+                out.reply_mode = raw.reply_mode;
+            }
+            if ('ignore_emote_only_prompts' in raw) {
+                out.ignore_emote_only_prompts = Boolean(raw.ignore_emote_only_prompts);
             }
             if ('enable_emote_appending' in raw) out.enable_emote_appending = Boolean(raw.enable_emote_appending);
             if ('bot_command_name' in raw && raw.bot_command_name) out.bot_command_name = String(raw.bot_command_name).trim();

@@ -39,7 +39,7 @@ export default function ConfigurationTab({
 
   return (
     <div className="space-y-4">
-      <SectionTitle>Connection & Channels</SectionTitle>
+      <SectionTitle>Connection & channels</SectionTitle>
       <FieldRow label="Bot account">
         <span className="rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11.5px] text-muted">
           {botUsername ? botUsername.replace(/^@/, '') : 'Not configured'}
@@ -85,8 +85,23 @@ export default function ConfigurationTab({
         </div>
       </div>
 
+      <SectionTitle>Chat behavior</SectionTitle>
+      <FieldRow label="Bot command" hint="Triggers for AI responses in chat">
+        <input value={value.bot_command_name} onChange={(event) => change('bot_command_name', event.target.value)} placeholder="!gemini,@yourbotusername" className={`w-52 ${inputCls}`} />
+      </FieldRow>
+      <FieldRow label="Reply behavior">
+        <select value={value.reply_mode} onChange={(event) => change('reply_mode', event.target.value as BotSettings['reply_mode'])} className={selectCls}>
+          <option value="off">Off</option><option value="tag">Tag user</option><option value="reply">Twitch reply</option>
+        </select>
+      </FieldRow>
+      <FieldRow label="Response cooldown (sec)">
+        <input type="number" min={0} max={60} value={value.cooldown_duration} onChange={(event) => change('cooldown_duration', Math.max(0, parseInt(event.target.value, 10) || 0))} className={`w-24 ${inputCls}`} />
+      </FieldRow>
+      <FieldRow label="Ignore emote-only prompts"><Toggle on={value.ignore_emote_only_prompts} onChange={(next) => change('ignore_emote_only_prompts', next)} /></FieldRow>
+      <FieldRow label="Append channel emotes to responses" noBorder><Toggle on={value.enable_emote_appending} onChange={(next) => change('enable_emote_appending', next)} /></FieldRow>
+
       <SectionTitle>AI & search</SectionTitle>
-      <FieldRow label="Gemini Model">
+      <FieldRow label="Gemini model">
         <select value={value.model_name} onChange={(event) => change('model_name', event.target.value)} className={selectCls}>
           <option value="gemini-3.7-flash">Gemini 3.7 Flash</option><option value="gemini-3.6-flash">Gemini 3.6 Flash</option><option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
         </select>
@@ -96,16 +111,10 @@ export default function ConfigurationTab({
           <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
         </select>
       </FieldRow>
-      <FieldRow label="Bot Command Prefix" hint="Trigger word for AI responses in chat">
-        <input value={value.bot_command_name} onChange={(event) => change('bot_command_name', event.target.value)} placeholder="!gemini,@yourbotusername" className={`w-52 ${inputCls}`} />
-      </FieldRow>
-      <FieldRow label="Response Cooldown (sec)">
-        <input type="number" min={0} max={60} value={value.cooldown_duration} onChange={(event) => change('cooldown_duration', Math.max(0, parseInt(event.target.value, 10) || 0))} className={`w-24 ${inputCls}`} />
-      </FieldRow>
-      <FieldRow label="Conversation Memory" hint="Dialogue turns the bot remembers per channel">
+      <FieldRow label="Conversation memory" hint="Dialogue turns the bot remembers per channel">
         <input type="number" min={0} max={30} value={value.ai_history_length} onChange={(event) => change('ai_history_length', Math.max(0, parseInt(event.target.value, 10) || 0))} className={`w-24 ${inputCls}`} />
       </FieldRow>
-      <FieldRow label="Chat Context Length" hint="Recent messages the bot can see">
+      <FieldRow label="Chat context" hint="Recent messages the bot can see">
         <input type="number" min={1} max={50} value={value.chat_context_length} onChange={(event) => change('chat_context_length', Math.max(1, parseInt(event.target.value, 10) || 10))} className={`w-24 ${inputCls}`} />
       </FieldRow>
       <FieldRow label="Web search" noBorder={value.search_grounding !== 'tavily'}>
@@ -121,8 +130,7 @@ export default function ConfigurationTab({
         </FieldRow>
       )}
 
-      <SectionTitle>Emotes & display</SectionTitle>
-      <FieldRow label="Auto-Append Emotes" hint="Append channel emotes to bot responses"><Toggle on={value.enable_emote_appending} onChange={(next) => change('enable_emote_appending', next)} /></FieldRow>
+      <SectionTitle>Display</SectionTitle>
       <FieldRow label="Highlight bot replies in dashboard" noBorder><Toggle on={value.highlight_bot_responses} onChange={(next) => change('highlight_bot_responses', next)} /></FieldRow>
       <ResetTabButton onReset={() => dispatch({ type: 'domain.reset', domain: 'bot_settings' })} disabled={busy} />
     </div>

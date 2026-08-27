@@ -220,6 +220,36 @@ function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
     return !!isBroadcaster || !!isMod;
 }
 
+const REPLY_MODES = new Set(['off', 'tag', 'reply']);
+
+function normalizeReplyMode(value) {
+    return REPLY_MODES.has(value) ? value : 'off';
+}
+
+function deliveryActor(trigger = {}) {
+    trigger = trigger || {};
+    const username = String(trigger.username || trigger.displayName || '').replace(/^@/, '').trim();
+    const loginName = cleanName(trigger.loginName || trigger.login || '');
+    return {
+        username: username || loginName,
+        loginName,
+        targets: new Set([username, loginName].map(cleanName).filter(Boolean))
+    };
+}
+
+function stripLeadingTargetTag(text, actor) {
+    const value = String(text ?? '').trim();
+    const match = value.match(/^@([a-z0-9_]+)[,:;]?(?=\s|$)/i);
+    if (!match || !actor.targets.has(cleanName(match[1]))) return value;
+    return value.slice(match[0].length).trimStart();
+}
+
+function addLeadingTargetTag(text, actor) {
+    const value = String(text ?? '').trim();
+    if (!actor.username || stripLeadingTargetTag(value, actor) !== value) return value;
+    return `@${actor.username} ${value}`.trim();
+}
+
 export class ChatRouter {
     #communityGifts = new Map();
     #systemInstructions = '';
@@ -241,6 +271,8 @@ export class ChatRouter {
         communityGiftWindowMs = 30_000,
         prefixes = {},
         mediaCommands = null,
+        replyMode = 'off',
+        ignoreEmoteOnlyPrompts = true,
         clock = Date.now
     } = {}) {
         if (!aiEngine || !mediaPipeline || !emotePool) {
@@ -258,6 +290,8 @@ export class ChatRouter {
         this.clock = clock;
         this.chatContextLength = chatContextLength;
         this.maxMessageLength = maxMessageLength;
+        this.replyMode = normalizeReplyMode(replyMode);
+        this.ignoreEmoteOnlyPrompts = ignoreEmoteOnlyPrompts !== false;
         this.communityGiftWindowMs = communityGiftWindowMs;
         this.transport = null;
 
@@ -301,6 +335,14 @@ export class ChatRouter {
         this.cooldowns.duration = typeof seconds === 'number' ? seconds : 1;
     }
 
+    reloadReplyMode(value) {
+        this.replyMode = normalizeReplyMode(value);
+    }
+
+    reloadIgnoreEmoteOnlyPrompts(value) {
+        this.ignoreEmoteOnlyPrompts = value !== false;
+    }
+
     #rebuildMediaRouting() {
         const entries = [];
         for (const type of MEDIA_TYPES) {
@@ -313,7 +355,6 @@ export class ChatRouter {
             this.prefixLists[type] = enabled;
         }
         this.matcher = new CommandMatcher(this.prefixLists.ai, entries);
-        this.#syncAmbientExclusions();
     }
 
     /**
@@ -337,35 +378,36 @@ export class ChatRouter {
         if (next.length === 0) return;
         this.prefixLists.ai = next;
         this.matcher = new CommandMatcher(next, this.matcher.media);
-        this.#syncAmbientExclusions();
     }
 
     /**
-     * Every trigger that must stay out of ambient chat logs, grouped by the
-     * matching semantics each family uses in routing: AI and media commands
-     * match bare prefixes; custom command triggers must match as a whole word.
-     * The transport owns the buffer; the router owns the live trigger config.
+     * Classifies invocation intent once for both ambient projection and routing.
+     * Native reply identity is a transport-normalized fact; only the direct
+     * parent Twitch user ID participates in bot-target detection.
      */
-    #ambientExclusions() {
-        return {
-            startsWith: [
-                ...this.prefixLists.ai,
-                ...this.prefixLists.image,
-                ...this.prefixLists.video,
-                ...this.prefixLists.tts,
-                ...this.prefixLists.music
-            ],
-            wordPrefixed: [...this.customCommands.commands.keys()]
-        };
-    }
+    classify(message = {}, botUserId = this.transport?.botUserId) {
+        const text = String(message.text ?? '');
+        const lower = text.toLowerCase();
 
-    #syncAmbientExclusions() {
-        if (typeof this.transport?.setCommandPrefixes !== 'function') return;
-        try {
-            this.transport.setCommandPrefixes(this.#ambientExclusions());
-        } catch (err) {
-            console.warn('[ChatRouter] Failed to sync ambient command exclusions:', err?.message || err);
+        if (message.isReply) {
+            const parentUserId = String(message.replyParentUserId || '');
+            if (!parentUserId || !botUserId || parentUserId !== String(botUserId)) {
+                return { kind: 'none' };
+            }
         }
+
+        const custom = this.customCommands.match(text);
+        if (custom) return { kind: 'custom', command: custom.cmd, custom };
+
+        const media = this.matcher.matchMedia(lower);
+        if (media) return { kind: 'media', command: media.cmd, mediaType: media.mediaType, media };
+
+        const aiCommand = this.matcher.matchAi(lower);
+        if (aiCommand || message.isReply) {
+            return { kind: 'ai', command: aiCommand || null };
+        }
+
+        return { kind: 'none' };
     }
 
     #buildHarnessInstructions() {
@@ -385,7 +427,7 @@ export class ChatRouter {
             throw new Error('attach(transport) requires a transport instance');
         }
         this.transport = transport;
-        this.#syncAmbientExclusions();
+        transport.setMessageClassifier?.((message) => this.classify(message, transport.botUserId));
         let listening = true;
 
         const onMessage = (message) => {
@@ -420,7 +462,6 @@ export class ChatRouter {
      */
     reloadCustomCommands(source) {
         this.customCommands.reload(source);
-        this.#syncAmbientExclusions();
     }
 
     /**
@@ -455,6 +496,46 @@ export class ChatRouter {
         return this.systemInstructions || '';
     }
 
+    async #deliverResponse(transport, {
+        channel,
+        text,
+        trigger = {},
+        decorateAi = false
+    }) {
+        trigger = trigger || {};
+        const actor = deliveryActor(trigger);
+        const messageId = String(trigger.messageId || '');
+        const effectiveMode = this.replyMode === 'reply' && !messageId
+            ? (actor.username ? 'tag' : 'off')
+            : this.replyMode;
+
+        const prepare = (mode) => {
+            let delivered = String(text ?? '').trim();
+            if (mode === 'tag') delivered = addLeadingTargetTag(delivered, actor);
+            if (mode === 'reply') delivered = stripLeadingTargetTag(delivered, actor);
+            if (decorateAi) {
+                delivered = this.emotePool.decorateReply(channel, delivered, {
+                    maxLength: this.maxMessageLength
+                });
+            }
+            return delivered;
+        };
+
+        const delivered = prepare(effectiveMode);
+        const options = effectiveMode === 'reply'
+            ? { replyParentMessageId: messageId }
+            : undefined;
+        try {
+            await transport.send(channel, delivered, options);
+            return delivered;
+        } catch (error) {
+            if (effectiveMode !== 'reply' || error?.code !== 'INVALID_REPLY_PARENT') throw error;
+            const fallback = prepare(actor.username ? 'tag' : 'off');
+            await transport.send(channel, fallback);
+            return fallback;
+        }
+    }
+
     /**
      * Route one inbound chat message. Safe for hermetic tests via transportOverride.
      * Throws synchronously if no transport is available.
@@ -472,8 +553,12 @@ export class ChatRouter {
         const text = message.text ?? '';
 
         try {
-            const lower = text.toLowerCase();
-            const aiCommand = this.matcher.matchAi(lower);
+            const invocation = message.invocation || this.classify(message, transport.botUserId);
+            if (invocation.kind === 'none') {
+                return { kind: 'none', channel, sent: false };
+            }
+
+            const aiCommand = invocation.kind === 'ai' ? invocation.command : null;
 
             // Prompt-specific emote pass: command removal + emote-only detection.
             // The transport already recorded the transcript with its own pass.
@@ -486,7 +571,7 @@ export class ChatRouter {
                 });
 
             // 2. Custom command matching & RBAC
-            const custom = this.customCommands.match(text);
+            const custom = invocation.kind === 'custom' ? invocation.custom : null;
             if (custom) {
                 if (!userHasRole(message, custom.role)) {
                     return { kind: 'unauthorized', channel, command: custom.cmd, sent: false };
@@ -503,32 +588,40 @@ export class ChatRouter {
                     };
                 }
 
-                await transport.send(channel, custom.response);
+                const reply = await this.#deliverResponse(transport, {
+                    channel,
+                    text: custom.response,
+                    trigger: message
+                });
                 return {
                     kind: 'custom',
                     channel,
                     command: custom.cmd,
                     sent: true,
-                    reply: custom.response
+                    reply
                 };
             }
 
             // 3. Media command matching
-            const media = this.matcher.matchMedia(lower);
+            const media = invocation.kind === 'media' ? invocation.media : null;
             if (media) {
                 if (media.enabled === false) {
-                    const reply = this.#safeErrorReply('MEDIA_COMMAND_DISABLED');
-                    if (transport && reply) await transport.send(channel, reply);
-                    return { kind: 'media_disabled', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply && transport) };
+                    const safeReply = this.#safeErrorReply('MEDIA_COMMAND_DISABLED');
+                    const reply = transport && safeReply
+                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message })
+                        : '';
+                    return { kind: 'media_disabled', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined };
                 }
 
                 const access = this.mediaCommands?.[media.mediaType]?.access
                     || this.mediaCommands?.access
                     || 'everyone';
                 if (!mediaAccessAllowed(message, access)) {
-                    const reply = this.#safeErrorReply('MEDIA_ACCESS_DENIED');
-                    if (transport && reply) await transport.send(channel, reply);
-                    return { kind: 'media_denied', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply && transport) };
+                    const safeReply = this.#safeErrorReply('MEDIA_ACCESS_DENIED');
+                    const reply = transport && safeReply
+                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message })
+                        : '';
+                    return { kind: 'media_denied', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined };
                 }
 
                 const prompt = this.matcher.mediaPrompt(text, media.cmd);
@@ -538,7 +631,7 @@ export class ChatRouter {
                         return this.#sendCooldown(transport, channel, cooldown, {
                             command: media.cmd,
                             mediaType: media.mediaType
-                        });
+                        }, message);
                     }
                 }
 
@@ -550,27 +643,31 @@ export class ChatRouter {
                     command: media.cmd,
                     options: buildMediaOptions(this.mediaCommands?.[media.mediaType])
                 });
-                await transport.send(channel, result.replyText);
+                const reply = await this.#deliverResponse(transport, {
+                    channel,
+                    text: result.replyText,
+                    trigger: message
+                });
                 return {
                     kind: 'media',
                     channel,
                     command: media.cmd,
                     mediaType: media.mediaType,
                     sent: true,
-                    reply: result.replyText
+                    reply
                 };
             }
 
             // 4. AI conversational command matching
-            if (aiCommand) {
-                if (isEmoteOnly) {
+            if (invocation.kind === 'ai') {
+                if (isEmoteOnly && this.ignoreEmoteOnlyPrompts) {
                     console.log(`Command ${aiCommand} ignored: emote-only message`);
                     return { kind: 'emote_only', channel, command: aiCommand, sent: false };
                 }
 
                 const cooldown = this.cooldowns.checkAndConsume(channel);
                 if (cooldown.onCooldown) {
-                    return this.#sendCooldown(transport, channel, cooldown, { command: aiCommand });
+                    return this.#sendCooldown(transport, channel, cooldown, { command: aiCommand }, message);
                 }
 
                 const { channelContext, recentLogs } = await transport.getContext(channel, {
@@ -590,33 +687,35 @@ export class ChatRouter {
                         isMod: !!message.isMod
                     }
                 });
-                const reply = this.emotePool.decorateReply(channel, rawResponse, {
-                    maxLength: this.maxMessageLength
+                const reply = await this.#deliverResponse(transport, {
+                    channel,
+                    text: rawResponse,
+                    trigger: message,
+                    decorateAi: true
                 });
-                await transport.send(channel, reply);
                 return { kind: 'ai', channel, command: aiCommand, sent: true, reply };
             }
 
             return { kind: 'none', channel, sent: false };
         } catch (error) {
             console.error('[ChatRouter] Failed to handle chat message:', error);
-            return this.#sendSafeError(transport, channel, error);
+            return this.#sendSafeError(transport, channel, error, message);
         }
     }
 
-    async #sendCooldown(transport, channel, cooldown, extra = {}) {
+    async #sendCooldown(transport, channel, cooldown, extra = {}, trigger = {}) {
         const reply = this.errorHandler?.format?.('COOLDOWN_ACTIVE', {
             remainingTime: cooldown.remaining
         });
 
         if (transport && reply) {
-            await transport.send(channel, reply);
+            const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger });
             return {
                 kind: 'cooldown',
                 channel,
                 sent: true,
                 remaining: cooldown.remaining,
-                reply,
+                reply: delivered,
                 ...extra
             };
         }
@@ -630,12 +729,12 @@ export class ChatRouter {
         };
     }
 
-    async #sendSafeError(transport, channel, error) {
+    async #sendSafeError(transport, channel, error, trigger = {}) {
         try {
             const reply = this.#safeErrorReply(error);
             if (transport && reply) {
-                await transport.send(channel, reply);
-                return { kind: 'error', channel, sent: true, reply, error: error?.message };
+                const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger });
+                return { kind: 'error', channel, sent: true, reply: delivered, error: error?.message };
             }
             return { kind: 'error', channel, sent: false, reply: reply || undefined, error: error?.message };
         } catch (sendError) {
@@ -739,9 +838,7 @@ export class ChatRouter {
                             }
                         });
                         if (raw && String(raw).trim()) {
-                            reply = this.emotePool.decorateReply(channel, raw, {
-                                maxLength: this.maxMessageLength
-                            });
+                            reply = raw;
                             source = 'ai';
                         }
                     } catch {
@@ -758,8 +855,13 @@ export class ChatRouter {
                     return { kind: 'event', channel, eventKind, sent: false, source };
                 }
 
-                await transport.send(channel, reply);
-                return { kind: 'event', channel, eventKind, sent: true, reply, source };
+                const delivered = await this.#deliverResponse(transport, {
+                    channel,
+                    text: reply,
+                    trigger: event.user,
+                    decorateAi: source === 'ai'
+                });
+                return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source };
             }
 
             const aiEnabled = policy.ai_enabled !== false;
@@ -791,9 +893,7 @@ export class ChatRouter {
                         }
                     });
                     if (raw && String(raw).trim()) {
-                        reply = this.emotePool.decorateReply(channel, raw, {
-                            maxLength: this.maxMessageLength
-                        });
+                        reply = raw;
                         source = 'ai';
                     }
                 } catch {
@@ -810,8 +910,13 @@ export class ChatRouter {
                 return { kind: 'event', channel, eventKind, sent: false, source };
             }
 
-            await transport.send(channel, reply);
-            return { kind: 'event', channel, eventKind, sent: true, reply, source };
+            const delivered = await this.#deliverResponse(transport, {
+                channel,
+                text: reply,
+                trigger: event.user,
+                decorateAi: source === 'ai'
+            });
+            return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source };
         } catch (error) {
             console.error('[ChatRouter] Failed to handle event:', error);
             // Last resort: try fallback one more time, still never leak the error.
@@ -822,15 +927,15 @@ export class ChatRouter {
                     if (rewardCfg?.fallback_template) {
                         const reply = interpolate(rewardCfg.fallback_template, eventVars(event)).trim();
                         if (transport && reply) {
-                            await transport.send(channel, reply);
-                            return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                            const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger: event.user });
+                            return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source: 'fallback' };
                         }
                     }
                 } else if (policy?.fallback_template) {
                     const reply = interpolate(policy.fallback_template, eventVars(event)).trim();
                     if (transport && reply) {
-                        await transport.send(channel, reply);
-                        return { kind: 'event', channel, eventKind, sent: true, reply, source: 'fallback' };
+                        const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger: event.user });
+                        return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source: 'fallback' };
                     }
                 }
             } catch { /* ignore */ }

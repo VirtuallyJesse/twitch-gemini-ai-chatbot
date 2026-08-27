@@ -147,6 +147,8 @@ export interface BotSettings {
   ignored_usernames: string[];
   ai_history_length: number;
   chat_context_length: number;
+  reply_mode: 'off' | 'tag' | 'reply';
+  ignore_emote_only_prompts: boolean;
   enable_emote_appending: boolean;
   bot_command_name: string;
   highlight_bot_responses: boolean;

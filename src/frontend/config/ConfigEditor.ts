@@ -25,6 +25,8 @@ const AUTOSAVED_BOT_FIELDS = new Set<keyof BotSettings>([
   'thinking_level',
   'search_grounding',
   'tavily_search_depth',
+  'reply_mode',
+  'ignore_emote_only_prompts',
   'enable_emote_appending',
   'highlight_bot_responses',
 ]);
