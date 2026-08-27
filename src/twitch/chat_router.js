@@ -831,6 +831,7 @@ export class ChatRouter {
                                 EVENT_ALERT_HARNESS
                             ],
                             overrideFileContext: this.#flaggedPersona(channel),
+                            disableTools: true,
                             caller: {
                                 loginName: event.user?.login || '',
                                 isBroadcaster: false,
@@ -886,6 +887,7 @@ export class ChatRouter {
                             EVENT_ALERT_HARNESS
                         ],
                         overrideFileContext: this.#flaggedPersona(channel),
+                        disableTools: true,
                         caller: {
                             loginName: event.user?.login || '',
                             isBroadcaster: false,

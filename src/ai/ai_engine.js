@@ -267,8 +267,9 @@ export class AIEngine {
         }
 
         // 5. Tool guidelines & permissions (placed near the end for strong attention)
+        const hasTools = Array.isArray(tools) && tools.length > 0;
         const toolRules = [];
-        if (!tools || tools.length === 0) {
+        if (!hasTools) {
             toolRules.push(
                 'Do not attempt to browse URLs, search the web, or invoke external tools. Answer directly from internal knowledge and the context already provided.'
             );
@@ -280,8 +281,12 @@ export class AIEngine {
         const offlineRule = channelContext?.isLive === false
             ? 'The channel is known to be offline, which may explain why a live-only action is unavailable.'
             : '';
+        const actionPrefix = hasTools
+            ? 'Available Stream Action tools already reflect the current settings, caller access, and stream state. If an action tool is available, execute it to fulfill a valid request. '
+            : '';
+        const successQualifier = hasTools ? ' unless its tool call succeeded' : '';
         toolRules.push(
-            `Available Stream Action tools already reflect the current settings, caller access, and stream state. If an action tool is available, execute it to fulfill a valid request. ${unavailableRule} ${offlineRule} Never claim or pretend you performed an action unless its tool call succeeded.\nDo not mention user roles in casual conversation unless specifically relevant to explaining action access.`
+            `${actionPrefix}${unavailableRule} ${offlineRule} Never claim or pretend you performed an action${successQualifier}.\nDo not mention user roles in casual conversation unless specifically relevant to explaining action access.`
         );
         sections.push(`<tool_guidelines>\n${toolRules.join('\n\n')}\n</tool_guidelines>`);
 
@@ -346,9 +351,9 @@ export class AIEngine {
     /**
      * Picks SDK grounding tools and custom tool declarations for this turn.
      */
-    #selectTools({ allUrls, imageUrl, disableMultimedia, caller, channelContext }) {
+    #selectTools({ allUrls, imageUrl, disableMultimedia, disableTools, caller, channelContext }) {
         const hasWebpageUrls = allUrls.some(url => url !== imageUrl && !YT_URL_RE.test(url));
-        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia, caller, channelContext });
+        return this.#toolDispatcher.compileTools({ hasWebpageUrls, disableMultimedia, disableTools, caller, channelContext });
     }
 
     /**
@@ -656,6 +661,7 @@ export class AIEngine {
         harnessInstructions,
         ephemeralContext,
         disableMultimedia,
+        disableTools,
         overrideFileContext,
         caller,
         started
@@ -680,7 +686,7 @@ export class AIEngine {
         }
 
         const { userParts, allUrls, imageUrl } = await this.#buildUserParts(prompt, { disableMultimedia });
-        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia, caller, channelContext });
+        const tools = this.#selectTools({ allUrls, imageUrl, disableMultimedia, disableTools, caller, channelContext });
 
         const systemInstruction = await this.#compileSystemInstruction({
             prompt,
@@ -936,6 +942,7 @@ export class AIEngine {
         ephemeralContext = null,
         overrideFileContext = null,
         disableMultimedia = false,
+        disableTools = false,
         caller = null
     } = {}) {
         const started = Date.now();
@@ -950,6 +957,7 @@ export class AIEngine {
                 harnessInstructions,
                 ephemeralContext,
                 disableMultimedia,
+                disableTools,
                 overrideFileContext,
                 caller,
                 started

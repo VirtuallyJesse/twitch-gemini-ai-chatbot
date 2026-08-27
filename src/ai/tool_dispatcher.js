@@ -117,7 +117,8 @@ export class ToolDispatcher {
         return true;
     }
 
-    compileTools({ hasWebpageUrls = false, disableMultimedia = false, caller, channelContext } = {}) {
+    compileTools({ hasWebpageUrls = false, disableMultimedia = false, disableTools = false, caller, channelContext } = {}) {
+        if (disableTools) return undefined;
         if (disableMultimedia) return undefined;
 
         const compiled = [];
