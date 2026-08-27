@@ -30,6 +30,6 @@ services:
       - key: TAVILY_API_KEY
         value: "your-tavily-api-key"       # Optional: enables live web search
       - key: POLLINATIONS_API_KEY
-        value: "your-pollinations-api-key" # Optional: enables !image !video !tts !song
+        value: "your-pollinations-api-key" # Optional: adds Pollinations media models
       - key: YOUTUBE_API_KEY
         value: "your-youtube-api-key"      # Optional: adds YouTube titles/descriptions to prompts
