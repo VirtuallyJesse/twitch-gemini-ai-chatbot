@@ -233,15 +233,12 @@ export class AIEngine {
         const unavailableRule = privilegedCaller
             ? 'If a requested Stream Action is not declared, explain that it is unavailable right now.'
             : 'If a requested privileged Stream Action is not declared, explain that it requires the broadcaster or a moderator.';
-        const offlineRule = channelContext?.isLive === false
-            ? 'The channel is known to be offline, which may explain why a live-only action is unavailable.'
-            : '';
         const actionPrefix = hasTools
             ? 'Available Stream Action tools already reflect the current settings, caller access, and stream state. If an action tool is available, execute it to fulfill a valid request. '
             : '';
         const successQualifier = hasTools ? ' unless its tool call succeeded' : '';
         toolRules.push(
-            `${actionPrefix}${unavailableRule} ${offlineRule} Never claim or pretend you performed an action${successQualifier}.\nTwitch roles are participant context. Use a participant's role only when the active conversation is about Twitch roles, role membership, permissions, moderation, or an operation whose behavior depends on role. Otherwise treat the role as non-conversational metadata and respond to the person's message without characterizing them by it.`
+            `${actionPrefix}${unavailableRule} Never claim or pretend you performed an action${successQualifier}.\nTwitch roles are participant context. Use a participant's role only when the active conversation is about Twitch roles, role membership, permissions, moderation, or an operation whose behavior depends on role. Otherwise treat the role as non-conversational metadata and respond to the person's message without characterizing them by it.`
         );
         sections.push(`<tool_guidelines>\n${toolRules.join('\n\n')}\n</tool_guidelines>`);
 
