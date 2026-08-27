@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import ErrorHandler, { BotError } from '../utils/error_handler.js';
-import { ImageDownloader } from './image_downloader.js';
+import { ImageDownloader } from '../utils/image_downloader.js';
 import { ToolDispatcher } from './tool_dispatcher.js';
 
 const DEFAULT_MODEL = 'gemini-3.7-flash';

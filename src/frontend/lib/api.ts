@@ -3,7 +3,7 @@ import type {
   BotStatus,
   ChannelBadgeCatalog,
   ConfigDomain,
-  PollinationsCatalog,
+  MediaCatalog,
   RawChatHistoryPage,
   RawMediaEntry,
   ViewerInfo,
@@ -92,8 +92,8 @@ class ApiClient {
     return this.request<{ type: ConfigDomain; value: T }>(`/api/config/defaults/${type}`);
   }
 
-  async getPollinationsModels(): Promise<PollinationsCatalog> {
-    return this.request<PollinationsCatalog>('/api/models/pollinations');
+  async getMediaCatalog(): Promise<MediaCatalog> {
+    return this.request<MediaCatalog>('/api/media/catalog');
   }
 
   async getAvatars(

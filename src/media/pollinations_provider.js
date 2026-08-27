@@ -1,266 +1,211 @@
+import { BotError } from '../utils/error_handler.js';
+
 const POLLINATIONS_BASE = 'https://gen.pollinations.ai';
+const CATALOG_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = Object.freeze({ image: 120_000, video: 180_000, tts: 120_000, music: 180_000 });
+const TTS_VOICES = Object.freeze(['charlotte', 'adam', 'bella', 'rachel', 'alloy', 'echo', 'nova', 'shimmer', 'onyx']);
 
-const DEFAULT_TIMEOUT_MS = {
-    image: 120_000,
-    video: 180_000,
-    tts: 120_000,
-    music: 180_000
-};
-
-const ERROR_LABEL = {
-    image: 'Image',
-    video: 'Video',
-    tts: 'Audio',
-    music: 'Music'
-};
-
-/**
- * Offline-safe model/voice catalog served to the dashboard's Commands tab
- * whenever upstream discovery is unavailable. Defaults here are sanctioned
- * swaps (gptimage→flux, seedance→wan-fast) mirrored by factory config.
- */
-export const POLLINATIONS_FALLBACK_MODELS = Object.freeze({
-    image: {
-        defaultModel: 'flux',
-        models: ['flux']
-    },
-    video: {
-        defaultModel: 'wan-fast',
-        models: ['wan-fast']
-    },
-    tts: {
-        defaultModel: 'elevenlabs',
-        defaultVoice: 'charlotte',
-        models: ['elevenlabs'],
-        voices: {
-            elevenlabs: ['charlotte', 'adam', 'bella', 'rachel', 'alloy', 'echo', 'nova', 'shimmer', 'onyx']
-        }
-    },
-    music: {
-        defaultModel: 'elevenmusic',
-        models: ['elevenmusic']
-    }
+export const POLLINATIONS_FALLBACK_CATALOG = Object.freeze({
+    image: Object.freeze([{ provider: 'pollinations', id: 'flux' }]),
+    video: Object.freeze([{ provider: 'pollinations', id: 'wan-fast', durations: Object.freeze([5, 10, 15]) }]),
+    tts: Object.freeze([{ provider: 'pollinations', id: 'elevenlabs', voices: TTS_VOICES, defaultVoice: 'charlotte' }]),
+    music: Object.freeze([{ provider: 'pollinations', id: 'elevenmusic', durations: Object.freeze([15, 30, 60]) }])
 });
+
+function cloneCatalog(catalog) {
+    return Object.fromEntries(['image', 'video', 'tts', 'music'].map((type) => [
+        type,
+        (catalog[type] || []).map((model) => ({
+            ...model,
+            ...(model.voices ? { voices: [...model.voices] } : {}),
+            ...(model.durations ? { durations: [...model.durations] } : {})
+        }))
+    ]));
+}
 
 function endpointType(type) {
     return type === 'tts' || type === 'music' ? 'audio' : type;
 }
 
-function defaultParams(type, models, ttsVoice, musicDuration, options = {}) {
-    if (type === 'image') {
-        return { model: options.model || models.image, nologo: true, enhance: true };
+function requestParams(type, target) {
+    if (type === 'image') return { model: target.model, nologo: true, enhance: true };
+    if (type === 'video') return { model: target.model, ...(target.duration ? { duration: target.duration } : {}) };
+    if (type === 'tts') return { model: target.model, ...(target.voice ? { voice: target.voice } : {}) };
+    return { model: target.model, ...(target.duration ? { duration: target.duration } : {}) };
+}
+
+function modelId(item) {
+    return String(item?.name || item?.id || item || '').trim();
+}
+
+function descriptorsFromDiscovery(imageModels, videoModels, audioModels) {
+    const result = { image: null, video: null, tts: null, music: null };
+    if (Array.isArray(imageModels)) {
+        result.image = imageModels.map(modelId).filter(Boolean).map((id) => ({ provider: 'pollinations', id }));
     }
-    if (type === 'video') {
-        const duration = options.duration || options.duration_cap || 5;
-        return { model: options.model || models.video, duration };
+    if (Array.isArray(videoModels)) {
+        result.video = videoModels.map(modelId).filter(Boolean).map((id) => ({ provider: 'pollinations', id, durations: [5, 10, 15] }));
     }
-    if (type === 'tts') {
-        const params = { model: options.model || models.tts };
-        // An explicit per-request voice wins; otherwise the trusted boot
-        // default applies even when the model itself was overridden.
-        const voice = options.voice || ttsVoice;
-        if (voice) {
-            params.voice = voice;
+    if (Array.isArray(audioModels)) {
+        const tts = [];
+        const music = [];
+        for (const item of audioModels) {
+            const id = modelId(item);
+            if (!id) continue;
+            const lower = id.toLowerCase();
+            const title = String(item?.title || '').toLowerCase();
+            const description = String(item?.description || '').toLowerCase();
+            if (Array.isArray(item?.output_modalities) && !item.output_modalities.includes('audio')) continue;
+            if (['transcribe', 'whisper', 'scribe', 'isolator', 'changer', 'dialogue']
+                .some((token) => lower.includes(token) || title.includes(token))) continue;
+            if (Array.isArray(item?.voices) && item.voices.length > 0) {
+                tts.push({ provider: 'pollinations', id, voices: [...item.voices], defaultVoice: item.voices[0] });
+            } else if (lower.includes('music') || lower.includes('lyria') || lower.includes('sfx') || description.includes('music') || item?.category === 'music') {
+                music.push({ provider: 'pollinations', id, durations: [15, 30, 60] });
+            } else {
+                tts.push({ provider: 'pollinations', id });
+            }
         }
-        return params;
+        result.tts = tts;
+        result.music = music;
     }
-    const duration = options.duration || options.duration_cap || musicDuration;
-    const params = { model: options.model || models.music };
-    if (duration) {
-        params.duration = duration;
+    return result;
+}
+
+function responseError(status, type, body) {
+    const params = { mediaType: type };
+    if (status === 400) return new BotError('POLLINATIONS_BAD_REQUEST', { status, params });
+    if (status === 401 || status === 403) return new BotError(`HTTP_${status}`, { status, params });
+    if (status === 429) return new BotError('POLLINATIONS_RATE_LIMITED', { status, params });
+    if (status === 502) return new BotError('POLLINATIONS_BAD_GATEWAY', { status, params });
+    if (status === 503 || status === 521) return new BotError('POLLINATIONS_SERVER_DOWN', { status, params });
+    if (status === 504) return new BotError('POLLINATIONS_GATEWAY_TIMEOUT', { status, params });
+    if (status === 404 || /model.+(?:not found|unsupported)/i.test(body)) {
+        return new BotError('MEDIA_MODEL_UNAVAILABLE', { status, params });
     }
-    return params;
+    return new BotError('POLLINATIONS_GENERIC_ERROR', { status, params: { modelType: type } });
 }
 
 export class PollinationsProvider {
-    #catalogCache;
+    #catalogState;
+    #catalogRefresh = null;
 
     constructor({
         apiKey = '',
         fetchImpl = globalThis.fetch.bind(globalThis),
         baseUrl = POLLINATIONS_BASE,
-        imageModel = 'flux',
-        videoModel = 'wan-fast',
-        ttsModel = 'elevenlabs',
-        ttsVoice = 'charlotte',
-        musicModel = 'elevenmusic',
-        musicDuration = 30,
-        timeoutMsByType = {}
+        timeoutMsByType = {},
+        now = () => Date.now(),
+        catalogTtlMs = CATALOG_TTL_MS
     } = {}) {
-        this.name = 'pollinations';
+        this.id = 'pollinations';
+        this.name = this.id;
         this.apiKey = apiKey;
         this.fetchImpl = fetchImpl;
         this.baseUrl = baseUrl;
-        this.ttsVoice = ttsVoice;
-        this.musicDuration = musicDuration;
-        this.models = {
-            image: imageModel,
-            video: videoModel,
-            tts: ttsModel,
-            music: musicModel
-        };
         this.timeoutMs = { ...DEFAULT_TIMEOUT_MS, ...timeoutMsByType };
-        this.capabilities = {
-            mediaTypes: new Set(['image', 'video', 'tts', 'music'])
-        };
-        this.#catalogCache = { timestamp: 0, data: null };
+        this.now = now;
+        this.catalogTtlMs = catalogTtlMs;
+        this.capabilities = { mediaTypes: new Set(['image', 'video', 'tts', 'music']) };
+        this.#catalogState = { data: { image: null, video: null, tts: null, music: null }, successAt: 0, failedAt: 0 };
     }
 
-    /**
-     * Model/voice catalog for the dashboard's Commands tab. Queries the public
-     * category endpoints with a 1h TTL cache and degrades to the fallback
-     * catalog on any upstream failure, so the route never throws.
-     */
+    supports(type) {
+        return this.capabilities.mediaTypes.has(type);
+    }
+
+    #degradedCatalog(discovered = null) {
+        const result = {};
+        for (const type of ['image', 'video', 'tts', 'music']) {
+            if (Array.isArray(discovered?.[type])) this.#catalogState.data[type] = discovered[type];
+            result[type] = this.#catalogState.data[type] ?? POLLINATIONS_FALLBACK_CATALOG[type];
+        }
+        return cloneCatalog(result);
+    }
+
+    async #discoverCatalog() {
+        const requests = await Promise.allSettled([
+            this.fetchImpl(`${this.baseUrl}/image/models`, { headers: { Accept: 'application/json' } }),
+            this.fetchImpl(`${this.baseUrl}/video/models`, { headers: { Accept: 'application/json' } }),
+            this.fetchImpl(`${this.baseUrl}/audio/models`, { headers: { Accept: 'application/json' } })
+        ]);
+        const values = [];
+        let anySuccess = false;
+        for (const request of requests) {
+            if (request.status === 'fulfilled' && request.value.ok) {
+                values.push(await request.value.json());
+                anySuccess = true;
+            } else values.push(null);
+        }
+        if (!anySuccess) throw new Error('Pollinations catalog discovery unavailable');
+        return descriptorsFromDiscovery(...values);
+    }
+
     async catalog() {
-        const now = Date.now();
-        if (this.#catalogCache.data && (now - this.#catalogCache.timestamp < 3600000)) {
-            return this.#catalogCache.data;
-        }
-
-        try {
-            const [imgRes, vidRes, audRes] = await Promise.allSettled([
-                this.fetchImpl(`${this.baseUrl}/image/models`, { headers: { Accept: 'application/json' } }),
-                this.fetchImpl(`${this.baseUrl}/video/models`, { headers: { Accept: 'application/json' } }),
-                this.fetchImpl(`${this.baseUrl}/audio/models`, { headers: { Accept: 'application/json' } })
-            ]);
-
-            const imageModels = imgRes.status === 'fulfilled' && imgRes.value.ok ? await imgRes.value.json() : null;
-            const videoModels = vidRes.status === 'fulfilled' && vidRes.value.ok ? await vidRes.value.json() : null;
-            const audioModels = audRes.status === 'fulfilled' && audRes.value.ok ? await audRes.value.json() : null;
-
-            const result = {
-                image: {
-                    defaultModel: POLLINATIONS_FALLBACK_MODELS.image.defaultModel,
-                    models: Array.isArray(imageModels) ? imageModels.map(m => m.name || m.id || m) : POLLINATIONS_FALLBACK_MODELS.image.models
-                },
-                video: {
-                    defaultModel: POLLINATIONS_FALLBACK_MODELS.video.defaultModel,
-                    models: Array.isArray(videoModels) ? videoModels.map(m => m.name || m.id || m) : POLLINATIONS_FALLBACK_MODELS.video.models
-                },
-                tts: {
-                    defaultModel: POLLINATIONS_FALLBACK_MODELS.tts.defaultModel,
-                    defaultVoice: POLLINATIONS_FALLBACK_MODELS.tts.defaultVoice,
-                    models: [],
-                    voices: {}
-                },
-                music: {
-                    defaultModel: POLLINATIONS_FALLBACK_MODELS.music.defaultModel,
-                    models: POLLINATIONS_FALLBACK_MODELS.music.models
-                }
-            };
-
-            if (Array.isArray(audioModels)) {
-                const ttsList = [];
-                const musicList = [];
-                const voicesMap = {};
-
-                // Filter out models that output text (e.g. STT models)
-                const isTextOutput = (item) =>
-                    Array.isArray(item.output_modalities) && !item.output_modalities.includes('audio');
-
-                // Filter out non-generative utilities (transcription, voice isolator/changer)
-                const isUtility = (nameLower, titleLower) =>
-                    ['transcribe', 'whisper', 'scribe', 'isolator', 'changer', 'dialogue']
-                        .some((p) => nameLower.includes(p) || titleLower.includes(p));
-
-                for (const item of audioModels) {
-                    if (isTextOutput(item)) continue;
-                    const name = item.name || item.id || item;
-                    const nameLower = String(name).toLowerCase();
-                    const titleLower = String(item.title || '').toLowerCase();
-                    const descLower = String(item.description || '').toLowerCase();
-                    if (isUtility(nameLower, titleLower)) continue;
-
-                    if (item.voices && Array.isArray(item.voices) && item.voices.length > 0) {
-                        ttsList.push(name);
-                        voicesMap[name] = item.voices;
-                    } else if (
-                        nameLower.includes('music') ||
-                        nameLower.includes('audio') ||
-                        nameLower.includes('lyria') ||
-                        nameLower.includes('sfx') ||
-                        descLower.includes('music') ||
-                        item.category === 'music'
-                    ) {
-                        musicList.push(name);
-                    } else {
-                        ttsList.push(name);
-                    }
-                }
-
-                result.tts.models = ttsList.length ? ttsList : POLLINATIONS_FALLBACK_MODELS.tts.models;
-                result.tts.voices = Object.keys(voicesMap).length ? voicesMap : POLLINATIONS_FALLBACK_MODELS.tts.voices;
-                if (musicList.length) result.music.models = musicList;
-            } else {
-                result.tts.models = POLLINATIONS_FALLBACK_MODELS.tts.models;
-                result.tts.voices = POLLINATIONS_FALLBACK_MODELS.tts.voices;
+        const now = this.now();
+        if (this.#catalogState.successAt && now - this.#catalogState.successAt < this.catalogTtlMs) return this.#degradedCatalog();
+        if (this.#catalogState.failedAt && now - this.#catalogState.failedAt < this.catalogTtlMs) return this.#degradedCatalog();
+        if (this.#catalogRefresh) return this.#catalogRefresh;
+        this.#catalogRefresh = (async () => {
+            try {
+                const discovered = await this.#discoverCatalog();
+                this.#catalogState.successAt = this.now();
+                this.#catalogState.failedAt = 0;
+                return this.#degradedCatalog(discovered);
+            } catch (error) {
+                this.#catalogState.failedAt = this.now();
+                console.warn('[Pollinations] Model discovery failed:', error?.message || error);
+                return this.#degradedCatalog();
+            } finally {
+                this.#catalogRefresh = null;
             }
-
-            this.#catalogCache = { timestamp: now, data: result };
-            return result;
-        } catch (err) {
-            console.warn('[Pollinations] Model discovery failed, using fallback:', err.message);
-            return POLLINATIONS_FALLBACK_MODELS;
-        }
+        })();
+        return this.#catalogRefresh;
     }
 
-    async generate({ type, prompt, options = {}, signal } = {}) {
-        if (!this.capabilities.mediaTypes.has(type)) {
-            throw new Error(`Pollinations does not support media type: ${type}`);
+    async generate({ type, prompt, target = {}, signal } = {}) {
+        if (!this.supports(type)) {
+            throw new BotError('MEDIA_PROVIDER_UNAVAILABLE', { params: { provider: this.id, mediaType: type } });
         }
+        if (!target.model) throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
 
-        const params = defaultParams(
-            type,
-            this.models,
-            this.ttsVoice,
-            this.musicDuration,
-            options
-        );
-
+        const params = requestParams(type, target);
         let cleanPrompt = String(prompt || '');
         const kind = endpointType(type);
         let mode = `text-to-${kind}`;
         const urlMatch = cleanPrompt.match(/(https?:\/\/[^\s]+)/);
         if (urlMatch) {
             params.image = urlMatch[0];
-            cleanPrompt = cleanPrompt.replace(urlMatch[0], '').trim();
+            cleanPrompt = cleanPrompt.replace(urlMatch[0], '').trim() || 'variation';
             mode = `image-to-${kind}`;
-            if (!cleanPrompt) cleanPrompt = 'variation';
         }
 
         const url = `${this.baseUrl}/${kind}/${encodeURIComponent(cleanPrompt)}?${new URLSearchParams(params)}`;
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs[type]);
+        let timedOut = false;
+        const timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs[type]);
         const onExternalAbort = () => controller.abort();
-
         if (signal) {
-            if (signal.aborted) {
-                clearTimeout(timeoutId);
-                const err = new Error('Aborted');
-                err.name = 'AbortError';
-                throw err;
-            }
+            if (signal.aborted) { clearTimeout(timeoutId); throw new BotError('REQUEST_ABORTED'); }
             signal.addEventListener('abort', onExternalAbort, { once: true });
         }
 
         try {
-            console.log(`[Pollinations] Requesting ${type}...`);
-            const res = await this.fetchImpl(url, {
+            const response = await this.fetchImpl(url, {
                 headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {},
                 signal: controller.signal
             });
-            if (!res.ok) {
-                throw new Error(
-                    `Pollinations ${ERROR_LABEL[type]} HTTP ${res.status}: ${await res.text()}`
-                );
-            }
-            const buffer = Buffer.from(await res.arrayBuffer());
+            if (!response.ok) throw responseError(response.status, type, await response.text().catch(() => ''));
             return {
-                buffer,
-                mimeType: res.headers.get('content-type') || `${kind}/*`,
+                buffer: Buffer.from(await response.arrayBuffer()),
+                mimeType: response.headers.get('content-type') || `${kind}/*`,
                 sourceUrl: url,
                 mode
             };
+        } catch (error) {
+            if (error instanceof BotError) throw error;
+            if (error?.name === 'AbortError') throw new BotError(timedOut ? 'REQUEST_TIMEOUT' : 'REQUEST_ABORTED', { cause: error });
+            throw error;
         } finally {
             clearTimeout(timeoutId);
             signal?.removeEventListener('abort', onExternalAbort);

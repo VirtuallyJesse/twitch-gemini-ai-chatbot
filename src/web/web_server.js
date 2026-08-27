@@ -680,6 +680,7 @@ export class WebServer {
             }
             if (value?.media) {
                 this.#chatRouter?.reloadMediaCommands?.(value.media);
+                this.#mediaPipeline?.reloadTargets?.(value.media);
             }
         } else if (type === 'event_alerts') {
             this.#chatRouter?.reloadEventAlerts?.(value);
@@ -959,11 +960,10 @@ export class WebServer {
             });
         });
 
-        this.#app.get('/api/models/pollinations', async (_req, res) => {
-            // Catalog lives behind the media pipeline (PollinationsProvider).
-            // Degrade to an empty body when none is configured or capable.
+        this.#app.get('/api/media/catalog', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
             const data = await this.#mediaPipeline?.catalog?.();
-            res.json(data || {});
+            res.json(data || { image: [], video: [], tts: [], music: [] });
         });
 
         this.#app.get('/api/config', async (req, res) => {

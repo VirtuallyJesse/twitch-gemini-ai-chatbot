@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Activity, AlertTriangle, Bell, Loader2, Sliders, Sparkles, Terminal, X } from 'lucide-react';
-import type { BotSettings, ConfigDomain, PollinationsCatalog } from '../lib/types';
+import type { BotSettings, ConfigDomain, MediaCatalog } from '../lib/types';
 import { api } from '../lib/api';
 import { channelLabel } from '../lib/channel';
 import { setBotHighlight, useBotHighlight } from '../lib/settings';
@@ -40,7 +40,8 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
   const canonicalChannels = useRef<string[] | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('config');
   const [showExitConfirm, setShowExitConfirm] = useState(false);
-  const [catalog, setCatalog] = useState<PollinationsCatalog | null>(null);
+  const [catalog, setCatalog] = useState<MediaCatalog | null>(null);
+  const catalogRequested = useRef(false);
   const [editor] = useState(() => new ConfigEditor({
     persistence: new HttpConfigPersistence(),
     onCommitted: ({ domain, value }) => {
@@ -65,15 +66,20 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
 
   useEffect(() => {
     void editor.start();
-    let currentSession = true;
-    api.getPollinationsModels().then((value) => {
-      if (currentSession) setCatalog(value);
-    }).catch(() => {});
     return () => {
-      currentSession = false;
       editor.terminate();
     };
   }, [editor]);
+
+  useEffect(() => {
+    if (activeTab !== 'commands' || catalogRequested.current) return;
+    catalogRequested.current = true;
+    api.getMediaCatalog().then((value) => {
+      setCatalog(value);
+    }).catch(() => {
+      setCatalog({ image: [], video: [], tts: [], music: [] });
+    });
+  }, [activeTab]);
 
   useEffect(() => {
     if (snapshot.closeDisposition === 'close') onClose();
@@ -127,7 +133,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
       }
       case 'commands': {
         const value = snapshot.domains.commands.value;
-        return value && <CommandsTab value={value} catalog={catalog} busy={busy} dispatch={dispatch} />;
+        return value && <CommandsTab value={value} catalog={catalog} catalogLoading={catalog === null} busy={busy} dispatch={dispatch} />;
       }
       case 'alerts': {
         const value = snapshot.domains.event_alerts.value;

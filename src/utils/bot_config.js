@@ -76,10 +76,10 @@ When not doing a command, follow these rules to define your personality:
 
     commands: Object.freeze({
         media: Object.freeze({
-            image: Object.freeze({ enabled: true, command: '!image', aliases: Object.freeze([]), model: 'flux', access: 'everyone' }),
-            video: Object.freeze({ enabled: true, command: '!video', aliases: Object.freeze([]), model: 'wan-fast', duration_cap: 10, access: 'everyone' }),
-            tts: Object.freeze({ enabled: true, command: '!tts', aliases: Object.freeze([]), model: 'elevenlabs', voice: 'charlotte', access: 'everyone' }),
-            music: Object.freeze({ enabled: true, command: '!song', aliases: Object.freeze([]), model: 'elevenmusic', duration_cap: 30, access: 'everyone' }),
+            image: Object.freeze({ enabled: true, command: '!image', aliases: Object.freeze([]), provider: 'pollinations', model: 'flux', access: 'everyone' }),
+            video: Object.freeze({ enabled: true, command: '!video', aliases: Object.freeze([]), provider: 'pollinations', model: 'wan-fast', duration: 10, access: 'everyone' }),
+            tts: Object.freeze({ enabled: true, command: '!tts', aliases: Object.freeze([]), provider: 'pollinations', model: 'elevenlabs', voice: 'charlotte', access: 'everyone' }),
+            music: Object.freeze({ enabled: true, command: '!song', aliases: Object.freeze([]), provider: 'pollinations', model: 'elevenmusic', duration: 30, access: 'everyone' }),
             access: 'everyone'
         }),
         custom: Object.freeze([
@@ -175,6 +175,8 @@ When not doing a command, follow these rules to define your personality:
         MEDIA_PROMPT_REQUIRED: '@{username} Please provide a description for the {mediaType}.',
         MEDIA_ACCESS_DENIED: '🔒 That command is restricted on this channel.',
         MEDIA_COMMAND_DISABLED: '⛔ That command is turned off right now.',
+        MEDIA_PROVIDER_UNAVAILABLE: "🔧 {provider} isn't available for {mediaType} generation right now.",
+        MEDIA_MODEL_UNAVAILABLE: '🔧 The selected {mediaType} model is unavailable. Ask the bot owner to choose another.',
         MEDIA_NO_DATA: '🔧 {service} Error. No {mediaType} data returned. Try again.',
         MEDIA_FALLBACK_RESPONSE: "Here's your {mediaType} {username}: {url}",
         COOLDOWN_ACTIVE: 'Cooldown active. Please wait {remainingTime} seconds before sending another message.',
@@ -530,8 +532,24 @@ export function sanitizeConfig(type, raw, context = {}) {
                 const m = raw.media;
                 for (const key of MEDIA_COMMAND_KEYS) {
                     if (m[key] && typeof m[key] === 'object') {
-                        out.media[key] = { ...out.media[key], ...m[key] };
-                        out.media[key].command = exactTrigger(out.media[key].command) || FACTORY.commands.media[key].command;
+                        const source = m[key];
+                        const factory = FACTORY.commands.media[key];
+                        const provider = source.provider === undefined ? factory.provider : source.provider;
+                        const model = source.model === undefined ? factory.model : source.model;
+                        if (!['pollinations', 'google'].includes(provider)) {
+                            throw invalid(`commands.media.${key}.provider must be pollinations or google`);
+                        }
+                        if (typeof model !== 'string' || !model.trim()) {
+                            throw invalid(`commands.media.${key}.model must be a non-empty string`);
+                        }
+                        out.media[key] = {
+                            enabled: 'enabled' in source ? Boolean(source.enabled) : factory.enabled,
+                            command: exactTrigger(source.command ?? factory.command) || factory.command,
+                            aliases: [],
+                            provider,
+                            model: model.trim(),
+                            access: ACCESS_LEVELS.has(source.access) ? source.access : factory.access
+                        };
                         const aliasSource = Array.isArray(m[key].aliases)
                             ? m[key].aliases
                             : String(m[key].aliases ?? '').split(',');
@@ -545,11 +563,18 @@ export function sanitizeConfig(type, raw, context = {}) {
                             aliases.push(a);
                         }
                         out.media[key].aliases = aliases;
-                        if ('duration_cap' in out.media[key]) {
-                            out.media[key].duration_cap = Number(out.media[key].duration_cap) || FACTORY.commands.media[key].duration_cap;
+                        if ('voice' in source) {
+                            if (typeof source.voice !== 'string' || !source.voice.trim()) {
+                                throw invalid(`commands.media.${key}.voice must be a non-empty string`);
+                            }
+                            out.media[key].voice = source.voice.trim();
                         }
-                        if (!ACCESS_LEVELS.has(out.media[key].access)) {
-                            out.media[key].access = FACTORY.commands.media[key].access;
+                        if ('duration' in source) {
+                            const duration = Number(source.duration);
+                            if (!Number.isFinite(duration) || duration <= 0) {
+                                throw invalid(`commands.media.${key}.duration must be greater than zero`);
+                            }
+                            out.media[key].duration = duration;
                         }
                     }
                 }

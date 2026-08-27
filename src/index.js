@@ -5,6 +5,7 @@ import { MediaUploader } from './media/media_uploader.js';
 import { MediaPipeline } from './media/media_pipeline.js';
 import ErrorHandler from './utils/error_handler.js';
 import { PollinationsProvider } from './media/pollinations_provider.js';
+import { GoogleProvider } from './media/google_provider.js';
 import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
 import { ConfigStore, createFactoryDefaults } from './utils/bot_config.js';
@@ -98,16 +99,12 @@ function isUsableSecret(value) {
 const mediaProviders = [];
 if (isUsableSecret(env.POLLINATIONS_API_KEY)) {
     mediaProviders.push(new PollinationsProvider({
-        apiKey: env.POLLINATIONS_API_KEY,
-        imageModel: env.POLLINATIONS_IMAGE_MODEL || 'flux',
-        videoModel: env.POLLINATIONS_VIDEO_MODEL || 'wan-fast',
-        ttsModel: env.POLLINATIONS_TTS_MODEL || 'elevenlabs',
-        ttsVoice: env.POLLINATIONS_TTS_VOICE || 'charlotte',
-        musicModel: env.POLLINATIONS_MUSIC_MODEL || 'elevenmusic'
+        apiKey: env.POLLINATIONS_API_KEY
     }));
 } else {
     console.log('[Media] Pollinations disabled (missing or placeholder API key).');
 }
+mediaProviders.push(new GoogleProvider({ apiKeys: googleApiKeys, vertexAI }));
 
 const transport = new TwitchTransport({
     clientId: env.TWITCH_CLIENT_ID || '',
@@ -150,6 +147,7 @@ const aiEngine = new AIEngine({
 
 const mediaPipeline = new MediaPipeline({
     providers: mediaProviders,
+    targets: bootConfig.commands?.media,
     uploader: mediaUploader,
     storage,
     aiEngine,
@@ -200,7 +198,7 @@ const { port } = await server.start(Number(env.PORT) || 3000);
 const dashboardUrl = env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
 const channelList = channels.length > 0 ? channels.join(', ') : 'None yet — add channels from the dashboard';
 const storageMode = storage.isPersistent ? 'Upstash Redis (Persistent)' : 'In-Memory (Persistence disabled)';
-const mediaMode = mediaProviders.length > 0 ? 'Pollinations.ai (Active)' : 'Disabled';
+const mediaMode = mediaProviders.map((provider) => provider.id).join(', ') || 'Disabled';
 const effectiveSearchMode = bootConfig.bot_settings?.search_grounding || searchSlot;
 const searchMode = effectiveSearchMode ? String(effectiveSearchMode).toUpperCase() : 'Off';
 const effectiveModel = bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.7-flash';

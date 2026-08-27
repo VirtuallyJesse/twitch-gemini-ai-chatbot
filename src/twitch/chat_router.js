@@ -205,15 +205,6 @@ function mediaAccessAllowed(message, access) {
     }
 }
 
-function buildMediaOptions(cfg) {
-    if (!cfg || typeof cfg !== 'object') return {};
-    const options = {};
-    if (cfg.model) options.model = cfg.model;
-    if (cfg.voice) options.voice = cfg.voice;
-    if (cfg.duration_cap) options.duration_cap = Number(cfg.duration_cap);
-    return options;
-}
-
 function userHasRole({ isBroadcaster, isMod } = {}, requiredRole) {
     if (!requiredRole || requiredRole === 'all') return true;
     if (requiredRole === 'broadcaster') return !!isBroadcaster;
@@ -359,7 +350,7 @@ export class ChatRouter {
 
     /**
      * Hot-reloads generative media command settings (names, aliases, enabled flags,
-     * models, voices, duration caps, access) from config:commands.media.
+     * trigger, aliases, enabled state, and access from config:commands.media.
      * @param {object} media sanitized commands.media object
      */
     reloadMediaCommands(media) {
@@ -640,8 +631,7 @@ export class ChatRouter {
                     user: message.tags,
                     prompt,
                     mediaType: media.mediaType,
-                    command: media.cmd,
-                    options: buildMediaOptions(this.mediaCommands?.[media.mediaType])
+                    command: media.cmd
                 });
                 const reply = await this.#deliverResponse(transport, {
                     channel,

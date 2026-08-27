@@ -35,6 +35,8 @@ const KEY_CATEGORY = {
     POLLINATIONS_GATEWAY_TIMEOUT: 'server',
     POLLINATIONS_GENERIC_ERROR: 'server',
     MEDIA_NO_DATA: 'server',
+    MEDIA_PROVIDER_UNAVAILABLE: 'server',
+    MEDIA_MODEL_UNAVAILABLE: 'validation',
     VIDEO_UPLOAD_EMPTY: 'server',
     VIDEO_UPLOAD_TIMEOUT: 'server',
     VIDEO_UPLOAD_FAILED: 'server',

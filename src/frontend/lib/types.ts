@@ -86,6 +86,8 @@ export interface RawMediaEntry {
   prompt: string;
   mediaUrl: string;
   mediaType: 'image' | 'video' | 'tts' | 'music' | 'audio';
+  provider?: 'pollinations' | 'google';
+  model?: string;
 }
 
 export interface RawChatEntry {
@@ -172,9 +174,10 @@ export interface MediaCommandConfig {
   enabled: boolean;
   command: string;
   aliases: string[];
-  model?: string;
+  provider: 'pollinations' | 'google';
+  model: string;
   voice?: string;
-  duration_cap?: number;
+  duration?: number;
   access?: CommandAccess;
 }
 
@@ -220,9 +223,17 @@ export interface AllConfig {
   overrides?: Record<string, boolean>;
 }
 
-export interface PollinationsCatalog {
-  image: { defaultModel: string; models: string[] };
-  video: { defaultModel: string; models: string[] };
-  tts: { defaultModel: string; defaultVoice: string; models: string[]; voices: Record<string, string[]> };
-  music: { defaultModel: string; models: string[] };
+export interface MediaModel {
+  provider: 'pollinations' | 'google';
+  id: string;
+  voices?: string[];
+  defaultVoice?: string;
+  durations?: number[];
+}
+
+export interface MediaCatalog {
+  image: MediaModel[];
+  video: MediaModel[];
+  tts: MediaModel[];
+  music: MediaModel[];
 }
