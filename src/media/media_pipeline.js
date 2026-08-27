@@ -9,6 +9,24 @@ const MEDIA_TYPE_HARNESS = [
     { key: 'music', bullet: 'Generating music' }
 ];
 
+const MEDIA_URL_POSITIONS = ['start', 'middle', 'end'];
+
+const MEDIA_PRESENTATION_HARNESS = [
+    '<media_delivery>',
+    'Write the single Twitch chat message that accompanies the completed media.',
+    'Treat the request as part of the ongoing conversation. If recent chat provides a relevant joke, role, invented detail, or callback, prefer that as the main angle.',
+    'Add one brief, fresh thought rather than simply restating or renaming elements of the requested scene.',
+    'Base commentary only on the request and conversation; do not imply you inspected the generated media.',
+    'Include the exact generated media URL from runtime context exactly once.',
+    '</media_delivery>'
+].join('\n');
+
+const URL_PLACEMENT_HARNESS = {
+    start: 'Place the generated media URL before the commentary body.',
+    middle: 'Place the generated media URL at a natural boundary within the commentary, normally between clauses or sentences.',
+    end: 'Place the generated media URL after the commentary body.'
+};
+
 function providerId(provider) {
     return String(provider?.id || provider?.name || '').trim();
 }
@@ -58,17 +76,6 @@ function resolveUsername(user) {
 
 function byteLength(value) {
     return value?.byteLength ?? value?.length ?? 0;
-}
-
-function displayMediaType(mediaType) {
-    return mediaType === 'tts' ? 'TTS audio' : mediaType;
-}
-
-function normalizeMediaRequest(prompt) {
-    return String(prompt || '')
-        .replace(/https?:\/\/\S+/g, '[original-url]')
-        .replace(/\s+/g, ' ')
-        .trim();
 }
 
 function extractText(result) {
@@ -149,6 +156,7 @@ function fitReplyAroundUrl(replyText, url, maxLength = 499) {
 
 export class MediaPipeline {
     #onMediaSaved = null;
+    #urlPlacementByChannel = new Map();
 
     constructor({
         providers = [],
@@ -270,7 +278,14 @@ export class MediaPipeline {
         }
     }
 
-    async #presentMedia({ channel, username, prompt, mediaType, mediaUrl }) {
+    #claimUrlPlacement(channel) {
+        const key = String(channel || '').replace(/^#/, '').trim().toLowerCase() || '__default__';
+        const index = this.#urlPlacementByChannel.get(key) || 0;
+        this.#urlPlacementByChannel.set(key, (index + 1) % MEDIA_URL_POSITIONS.length);
+        return MEDIA_URL_POSITIONS[index];
+    }
+
+    async #presentMedia({ channel, username, prompt, mediaType, mediaUrl, conversationPrompt }) {
         const fallback = this.errorHandler.format('MEDIA_FALLBACK_RESPONSE', {
             mediaType,
             username,
@@ -279,21 +294,19 @@ export class MediaPipeline {
 
         let presentation;
         try {
-            const originalRequest = normalizeMediaRequest(prompt);
-
-            const presentationTask = [
-                `Deliver the completed ${displayMediaType(mediaType)} requested by ${username}.`,
-                `Prompt: "${originalRequest}"`,
-                'React to the concept with brief commentary, banter, or a witty reaction.',
-                'Do not echo, parrot, or restate the prompt text (avoid "Here is your [prompt]").',
-                'Include the media URL. It may appear at the beginning, between sentences, or at the end. Keep placement natural.'
-            ].join('\n');
+            const originalRequest = String(prompt || '').trim();
+            const urlPlacement = this.#claimUrlPlacement(channel);
 
             const result = await this.aiEngine?.generate(
-                presentationTask,
+                conversationPrompt,
                 {
                     disableMultimedia: true,
+                    recordMemory: false,
                     channel,
+                    harnessInstructions: [
+                        MEDIA_PRESENTATION_HARNESS,
+                        URL_PLACEMENT_HARNESS[urlPlacement]
+                    ].join('\n\n'),
                     mediaDelivery: {
                         mediaType,
                         requester: username,
@@ -337,6 +350,7 @@ export class MediaPipeline {
         prompt,
         mediaType,
         command,
+        conversationPrompt,
     }) {
         const username = resolveUsername(user);
         const cleanPrompt = typeof prompt === 'string' ? prompt.trim() : '';
@@ -416,7 +430,8 @@ export class MediaPipeline {
                 username,
                 prompt: cleanPrompt,
                 mediaType,
-                mediaUrl
+                mediaUrl,
+                conversationPrompt: conversationPrompt || `${command} ${cleanPrompt}`.trim()
             });
 
             return {

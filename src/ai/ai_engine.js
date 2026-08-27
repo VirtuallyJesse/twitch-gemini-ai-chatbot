@@ -166,6 +166,24 @@ export class AIEngine {
         this.histories.delete(key);
     }
 
+    /**
+     * Records a conversational turn that was completed outside generate(), such
+     * as a media response after Twitch accepts the exact delivered text.
+     */
+    commitConversationTurn(channel, { userParts, modelParts } = {}) {
+        if (!Array.isArray(userParts) || userParts.length === 0) {
+            throw new TypeError('commitConversationTurn requires non-empty userParts');
+        }
+        if (!Array.isArray(modelParts) || modelParts.length === 0) {
+            throw new TypeError('commitConversationTurn requires non-empty modelParts');
+        }
+
+        this.#checkHistoryLength(channel);
+        const history = this.getHistory(channel);
+        history.push({ role: 'user', parts: structuredClone(userParts) });
+        history.push({ role: 'model', parts: structuredClone(modelParts) });
+    }
+
     #checkHistoryLength(channel) {
         const history = this.getHistory(channel);
         while (history.length / 2 > this.historyLength) {
@@ -663,6 +681,7 @@ export class AIEngine {
         disableTools,
         overrideFileContext,
         caller,
+        recordMemory,
         started
     }) {
         this.#logHeader('GEMINI REQUEST');
@@ -928,8 +947,10 @@ export class AIEngine {
         console.log(`\n   ${COLORS.green}✓ Complete${COLORS.reset} │ ${agentResponse.length} chars │ ${elapsed}s`);
         this.#logFooter();
 
-        history.push({ role: 'user', parts: memoryUserParts });
-        history.push({ role: 'model', parts: latestSuccessfulParts });
+        if (recordMemory) {
+            history.push({ role: 'user', parts: memoryUserParts });
+            history.push({ role: 'model', parts: latestSuccessfulParts });
+        }
 
         return agentResponse;
     }
@@ -949,7 +970,8 @@ export class AIEngine {
         overrideFileContext = null,
         disableMultimedia = false,
         disableTools = false,
-        caller = null
+        caller = null,
+        recordMemory = true
     } = {}) {
         const started = Date.now();
 
@@ -966,6 +988,7 @@ export class AIEngine {
                 disableTools,
                 overrideFileContext,
                 caller,
+                recordMemory,
                 started
             });
         } catch (error) {

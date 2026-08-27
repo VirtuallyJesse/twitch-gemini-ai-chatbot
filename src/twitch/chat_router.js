@@ -15,6 +15,11 @@ const DEFAULT_PREFIXES = {
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
 const channelKey = (channel) => `#${cleanName(channel)}`;
 
+function frameConversationalMessage(message, text) {
+    const role = message.isBroadcaster ? 'broadcaster' : message.isMod ? 'moderator' : 'viewer';
+    return `Message from (role:${role}) ${message.loginName}: ${text}`;
+}
+
 const DEFAULT_EVENT_ALERTS = FACTORY.event_alerts;
 
 function interpolate(template, vars) {
@@ -614,6 +619,7 @@ export class ChatRouter {
                 }
 
                 const prompt = this.matcher.mediaPrompt(text, media.cmd);
+                const conversationPrompt = frameConversationalMessage(message, text);
                 if (prompt) {
                     const cooldown = this.cooldowns.checkAndConsume(channel);
                     if (cooldown.onCooldown) {
@@ -629,13 +635,20 @@ export class ChatRouter {
                     user: message.tags,
                     prompt,
                     mediaType: media.mediaType,
-                    command: media.cmd
+                    command: media.cmd,
+                    conversationPrompt
                 });
                 const reply = await this.#deliverResponse(transport, {
                     channel,
                     text: result.replyText,
                     trigger: message
                 });
+                if (result.success) {
+                    this.aiEngine.commitConversationTurn(channel, {
+                        userParts: [{ text: conversationPrompt }],
+                        modelParts: [{ text: reply }]
+                    });
+                }
                 return {
                     kind: 'media',
                     channel,
@@ -661,8 +674,7 @@ export class ChatRouter {
                 const { channelContext, recentLogs } = await transport.getContext(channel, {
                     logCount: this.chatContextLength
                 });
-                const role = message.isBroadcaster ? 'broadcaster' : message.isMod ? 'moderator' : 'viewer';
-                const prompt = `Message from (role:${role}) ${message.loginName}: ${textForAi}`;
+                const prompt = frameConversationalMessage(message, textForAi);
                 const rawResponse = await this.aiEngine.generate(prompt, {
                     channel,
                     channelContext,
