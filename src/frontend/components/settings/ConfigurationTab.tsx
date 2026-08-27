@@ -4,11 +4,13 @@ import type { ConfigIntent } from '../../config/ConfigEditor';
 import type { BotSettings } from '../../lib/types';
 import { channelLabel, normChannel } from '../../lib/channel';
 import { FieldRow, inputCls, ResetTabButton, SectionTitle, selectCls, Toggle } from './SettingsPrimitives';
+import { channelJoinControls } from '../../lib/botStatusPresentation';
 
 interface Props {
   value: BotSettings;
   busy: boolean;
   botUsername: string;
+  botAuthorized: boolean;
   dispatch: (intent: ConfigIntent) => void;
 }
 
@@ -16,10 +18,12 @@ export default function ConfigurationTab({
   value,
   busy,
   botUsername,
+  botAuthorized,
   dispatch,
 }: Props) {
   const [newChannel, setNewChannel] = useState('');
   const [newIgnoredUser, setNewIgnoredUser] = useState('');
+  const joinControls = channelJoinControls(botAuthorized);
   const change = <K extends keyof BotSettings>(field: K, next: BotSettings[K]) => {
     dispatch({ type: 'bot-setting.changed', field, value: next });
   };
@@ -46,7 +50,7 @@ export default function ConfigurationTab({
         </span>
       </FieldRow>
       <div className="py-2 border-b border-line/30">
-        <div className="text-[12.5px] font-medium text-ink">Joined channels</div>
+        <div className="text-[12.5px] font-medium text-ink">Configured channels</div>
         {value.channels.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {value.channels.map((channel) => {
@@ -62,9 +66,10 @@ export default function ConfigurationTab({
           </div>
         )}
         <div className="mt-2 flex gap-1.5">
-          <input value={newChannel} onChange={(event) => setNewChannel(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addChannel()} placeholder="add channel name…" className={`w-44 ${inputCls}`} />
-          <button onClick={addChannel} className="flex cursor-pointer items-center gap-1 rounded-md border border-line bg-bg px-2.5 py-1.5 text-[11.5px] font-medium text-muted transition-colors hover:border-accent/50 hover:text-ink"><Plus size={12} />Join</button>
+          <input disabled={joinControls.disabled} value={newChannel} onChange={(event) => setNewChannel(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addChannel()} placeholder="add channel name…" className={`w-44 disabled:cursor-not-allowed disabled:opacity-50 ${inputCls}`} />
+          <button disabled={joinControls.disabled} onClick={addChannel} className="flex cursor-pointer items-center gap-1 rounded-md border border-line bg-bg px-2.5 py-1.5 text-[11.5px] font-medium text-muted transition-colors hover:border-accent/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-line disabled:hover:text-muted"><Plus size={12} />Join</button>
         </div>
+        {joinControls.helper && <p className="mt-1.5 text-[11px] text-amber-400">{joinControls.helper}</p>}
       </div>
       <div className="py-2">
         <div className="text-[12.5px] font-medium text-ink">Ignored users</div>

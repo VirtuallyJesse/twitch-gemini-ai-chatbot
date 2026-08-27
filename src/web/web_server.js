@@ -278,6 +278,28 @@ export class WebServer {
         return sent;
     }
 
+    async #currentBotStatus() {
+        const status = this.#transport.auth.getStatus();
+        const channelStatuses = await this.#transport.getChannelAuthStatuses();
+        return {
+            ...status,
+            channelStatuses,
+            botUsername: this.#botUsername,
+            authorized: this.#transport.auth.isAuthorized(),
+            connected: Boolean(this.#transport.connected),
+            storageConfigured: Boolean(this.#storage.configured)
+        };
+    }
+
+    async #broadcastBotStatus() {
+        if (!this.#live) return;
+        try {
+            this.broadcast({ type: 'bot:status', ...await this.#currentBotStatus() });
+        } catch (error) {
+            console.error('[WebServer] Failed to broadcast bot status:', error.message);
+        }
+    }
+
     #mountWebSocket() {
         this.#app.ws('/ws', (ws) => {
             ws.isAlive = true;
@@ -382,6 +404,7 @@ export class WebServer {
                 } else if (type === 'auth_required') {
                     console.log('[Twitch] Authorization required. Bot runtime is waiting.');
                 }
+                void this.#broadcastBotStatus();
             });
             this.#transportStatusUnsub = typeof unsub === 'function' ? unsub : null;
         }
@@ -625,16 +648,15 @@ export class WebServer {
             // Ticket-10 contract: a saved list — even empty — wins, so presence
             // of the key (not truthiness) gates the live sync below. Provider
             // traffic only happens when the effective channel set changed;
-            // unrelated saves and cosmetic reorders stay quota-frugal.
+            // IRC reconciliation still runs because desired equality is not
+            // proof that Twitch confirmed membership.
             if (Array.isArray(value?.channels) && typeof this.#transport?.syncChannels === 'function') {
                 const desired = new Set(value.channels.map(channelKey).filter(k => k && k !== '#'));
                 const current = new Set((this.#transport.channels || []).map(channelKey));
                 const changed = desired.size !== current.size || [...desired].some(k => !current.has(k));
-                if (changed) {
-                    await this.#transport.syncChannels(value.channels);
-                    if (this.#emotePool?.sync && this.#transport?.channels) {
-                        await this.#emotePool.sync(this.#transport.channels, this.#transport.channelIdMap);
-                    }
+                await this.#transport.syncChannels(value.channels);
+                if (changed && this.#emotePool?.sync && this.#transport?.channels) {
+                    await this.#emotePool.sync(this.#transport.channels, this.#transport.channelIdMap);
                 }
             }
             if (Array.isArray(value?.ignored_usernames) && typeof this.#transport?.setIgnoredUsernames === 'function') {
@@ -902,7 +924,7 @@ export class WebServer {
 
             try {
                 await this.#transport.auth.handleCallback(String(code), redirectUri);
-                this.broadcast({ type: 'auth:bot', authorized: true });
+                await this.#broadcastBotStatus();
                 const autoCloseScript = `
                 <script>
                     try {
@@ -1085,16 +1107,7 @@ export class WebServer {
         });
 
         this.#app.get(['/auth/status', '/api/status'], async (_req, res) => {
-            const status = this.#transport.auth.getStatus();
-            const channelStatuses = await this.#transport.getChannelAuthStatuses();
-            res.json({
-                ...status,
-                channelStatuses,
-                botUsername: this.#botUsername,
-                authorized: this.#transport.auth.isAuthorized(),
-                connected: Boolean(this.#transport.connected),
-                storageConfigured: Boolean(this.#storage.configured)
-            });
+            res.json(await this.#currentBotStatus());
         });
 
         this.#app.get('/api/channels', (_req, res) => res.json(this.#transport.channels));

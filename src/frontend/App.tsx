@@ -16,6 +16,7 @@ import { registerChannelBadges } from './lib/badges';
 import { hydrateBadgeCatalogs } from './lib/badgeHydration';
 import { timeAgo } from './lib/time';
 import { normChannel } from './lib/channel';
+import { botAuthorization } from './lib/botStatusPresentation';
 import { createGalleryAvatarHydrator } from './lib/avatars';
 import { formatRawChatEntry } from './lib/chatLogs';
 import {
@@ -214,10 +215,10 @@ export default function App() {
       if (data?.channel && data?.badges) registerChannelBadges(data.channel, data.badges);
     });
 
-    const unsubBotAuth = wsClient.on<{ authorized: boolean }>('auth:bot', (data) => {
+    const unsubBotStatus = wsClient.on<BotStatus>('bot:status', (data) => {
       if (data) {
-        setBotStatus((prev) => (prev ? { ...prev, authorized: data.authorized } : null));
-        api.getStatus().then((s) => s && setBotStatus(s));
+        setBotStatus(data);
+        if (data.channelStatuses) setChannelStatuses(data.channelStatuses);
       }
     });
 
@@ -276,7 +277,7 @@ export default function App() {
       unsubMedia();
       unsubEmotes();
       unsubBadges();
-      unsubBotAuth();
+      unsubBotStatus();
       unsubBroadcaster();
       unsubConfig();
       window.removeEventListener('message', handleWindowMessage);
@@ -348,10 +349,11 @@ export default function App() {
       >
         <Sidebar
           botUsername={botStatus?.botUsername || ''}
-          botAuthorized={botStatus?.authorized ?? true}
+          botAuthorized={botAuthorization(botStatus)}
           botConnected={Boolean(botStatus?.connected)}
           wsConnected={wsConnected}
           channels={channels}
+          joinedChannels={botStatus?.joinedChannels || []}
           activeChannel={activeChannel}
           onSelectChannel={handleSelectChannel}
           channelStatuses={channelStatuses}
@@ -412,6 +414,7 @@ export default function App() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         botUsername={botStatus?.botUsername || ''}
+        botAuthorized={botAuthorization(botStatus)}
         activeChannel={activeChannel}
         channelStatuses={channelStatuses}
         onChannelsChange={(newChans) => {

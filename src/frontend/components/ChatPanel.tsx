@@ -16,6 +16,7 @@ import {
   Settings2,
   AlertCircle,
   ExternalLink,
+  WifiOff,
 } from 'lucide-react';
 import type { ChatEventKind, LogEntry } from '../lib/types';
 import { parseChat, type Token } from '../lib/parseChat';
@@ -25,6 +26,7 @@ import { stringToColor } from '../lib/color';
 import { ChatBadge } from './Badges';
 import Emote from './Emote';
 import type { ChatChannelHistory } from '../lib/chatHistory';
+import { channelStatusGlyph } from '../lib/botStatusPresentation';
 import {
   captureChatAnchor,
   chatViewportNeedsFill,
@@ -237,6 +239,7 @@ function NoChannels({ onOpenSettings }: { onOpenSettings?: () => void }) {
 
 interface Props {
   channels: string[];
+  joinedChannels: string[];
   activeChannel: string;
   onSelectChannel: (c: string) => void;
   channelStatuses: Record<string, { authorized?: boolean }>;
@@ -250,6 +253,7 @@ interface Props {
 
 export default function ChatPanel({
   channels,
+  joinedChannels,
   activeChannel,
   onSelectChannel,
   channelStatuses,
@@ -257,7 +261,7 @@ export default function ChatPanel({
   histories,
   onLoadOlder,
   botUsername,
-  botAuthorized = true,
+  botAuthorized = false,
   onOpenSettings,
 }: Props) {
   const [atBottom, setAtBottom] = useState(true);
@@ -392,6 +396,7 @@ export default function ChatPanel({
           const chanNorm = normChannel(chan);
           const isActive = chanNorm === activeNorm;
           const chanLinked = channelStatuses[chanNorm]?.authorized ?? channelStatuses[`#${chanNorm}`]?.authorized ?? false;
+          const glyph = channelStatusGlyph(chanNorm, joinedChannels, chanLinked);
           return (
             <button
               key={chan}
@@ -400,7 +405,9 @@ export default function ChatPanel({
                 isActive ? 'text-ink' : 'text-muted hover:text-ink'
               }`}
             >
-              {!chanLinked ? (
+              {glyph === 'membership-missing' ? (
+                <WifiOff size={11} className="text-amber-400" strokeWidth={2.4} aria-label="Bot not joined" />
+              ) : glyph === 'broadcaster-unlinked' ? (
                 <Unlink size={11} className="text-amber-400" strokeWidth={2.4} aria-label="Broadcaster not linked" />
               ) : (
                 <Hash size={11} className={isActive ? 'text-accent' : 'text-faint'} strokeWidth={2.4} />

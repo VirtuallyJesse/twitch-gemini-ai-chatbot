@@ -3,6 +3,7 @@ import type { LogEntry, ViewerInfo } from '../lib/types';
 import ChatPanel from './ChatPanel';
 import Avatar from './Avatar';
 import type { ChatChannelHistory } from '../lib/chatHistory';
+import { connectionStatus } from '../lib/botStatusPresentation';
 
 interface Props {
   botUsername?: string;
@@ -10,6 +11,7 @@ interface Props {
   botConnected: boolean;
   wsConnected: boolean;
   channels: string[];
+  joinedChannels: string[];
   activeChannel: string;
   onSelectChannel: (c: string) => void;
   channelStatuses: Record<string, { authorized?: boolean }>;
@@ -23,10 +25,11 @@ interface Props {
 
 export default function Sidebar({
   botUsername = 'Twitch Bot',
-  botAuthorized = true,
+  botAuthorized = false,
   botConnected = false,
   wsConnected = false,
   channels,
+  joinedChannels,
   activeChannel,
   onSelectChannel,
   channelStatuses,
@@ -38,6 +41,7 @@ export default function Sidebar({
   onLogout,
 }: Props) {
   const cleanUsername = botUsername.replace(/^@/, '');
+  const connection = connectionStatus({ wsConnected, botAuthorized, botConnected, channels, joinedChannels });
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
       {/* top — brand + live connection status */}
@@ -48,23 +52,23 @@ export default function Sidebar({
         <div className="min-w-0 leading-none">
           <div className="text-[14px] font-semibold text-ink truncate">{cleanUsername}</div>
           <div className="mt-1 flex items-center gap-1.5">
-            {!wsConnected ? (
+            {connection.tone === 'offline' ? (
               <>
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-rose-400" />
-                <span className="text-[10.5px] text-muted">Offline</span>
+                <span className="text-[10.5px] text-muted">{connection.label}</span>
               </>
-            ) : !botAuthorized ? (
+            ) : connection.tone === 'warning' ? (
               <>
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-400" />
-                <span className="text-[10.5px] text-amber-400">Setup required</span>
+                <span className="text-[10.5px] text-amber-400">{connection.label}</span>
               </>
-            ) : !botConnected ? (
+            ) : connection.tone === 'connecting' ? (
               <>
                 <span className="relative flex h-1.5 w-1.5">
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60" />
                   <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-400" />
                 </span>
-                <span className="text-[10.5px] text-muted">Connecting…</span>
+                <span className="text-[10.5px] text-muted">{connection.label}</span>
               </>
             ) : (
               <>
@@ -73,7 +77,7 @@ export default function Sidebar({
                   <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
                 </span>
                 <span className="text-[10.5px] text-muted">
-                  Connected · {channels.length} channel{channels.length === 1 ? '' : 's'}
+                  {connection.label}
                 </span>
               </>
             )}
@@ -85,6 +89,7 @@ export default function Sidebar({
       <div className="min-h-0 flex-1">
         <ChatPanel
           channels={channels}
+          joinedChannels={joinedChannels}
           activeChannel={activeChannel}
           onSelectChannel={onSelectChannel}
           channelStatuses={channelStatuses}

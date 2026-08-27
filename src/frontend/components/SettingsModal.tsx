@@ -19,6 +19,7 @@ interface Props {
   open: boolean;
   onClose: () => void;
   botUsername?: string;
+  botAuthorized?: boolean;
   activeChannel?: string;
   channelStatuses: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   onChannelsChange?: (channels: string[]) => void;
@@ -35,7 +36,7 @@ const TAB_DOMAINS: Record<TabKey, ConfigDomain> = {
   errors: 'error_messages',
 };
 
-function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = '', channelStatuses, onChannelsChange }: Omit<Props, 'open'>) {
+function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = false, activeChannel = '', channelStatuses, onChannelsChange }: Omit<Props, 'open'>) {
   const highlightBots = useBotHighlight();
   const canonicalChannels = useRef<string[] | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('config');
@@ -121,7 +122,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', activeChannel = 
     switch (activeTab) {
       case 'config': {
         const value = snapshot.domains.bot_settings.value;
-        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} dispatch={dispatch} />;
+        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} botAuthorized={botAuthorized} dispatch={dispatch} />;
       }
       case 'persona': {
         const value = snapshot.domains.system_instructions.value;

@@ -929,8 +929,16 @@ class HelixClient {
 class IrcBridge {
     #client;
     #connected = false;
+    #desiredChannels = [];
+    #joinedChannels = new Set();
+    #reconcilePromise = null;
+    #reconcileRequested = false;
+    #connectReconcilePromise = null;
+    #onStatus;
 
     constructor({ botUsername, channels, tokenVault, ircClientFactory, onMessage, onStatus }) {
+        this.#desiredChannels = this.#normalizeChannels(channels);
+        this.#onStatus = onStatus;
         this.#client = ircClientFactory({
             connection: { reconnect: true, secure: true },
             identity: {
@@ -938,16 +946,34 @@ class IrcBridge {
                 // Dynamic provider: every (re)connect resolves the freshest user token.
                 password: async () => `oauth:${await tokenVault.getUserToken()}`
             },
-            channels
+            channels: []
         });
         this.#client.on('message', (channel, tags, text, self) => onMessage(normalizeIrcMessage(channel, tags, text, self)));
         this.#client.on('connected', (address, port) => {
             this.#connected = true;
             onStatus({ type: 'connected', address, port });
+            this.#connectReconcilePromise = this.#queueReconcile();
         });
         this.#client.on('disconnected', reason => {
             this.#connected = false;
+            this.#joinedChannels.clear();
+            this.#connectReconcilePromise = null;
             onStatus({ type: 'disconnected', reason });
+        });
+        this.#client.on('join', (channel, _username, self) => {
+            if (!self) return;
+            const key = channelKey(channel);
+            if (!key || key === '#' || this.#joinedChannels.has(key)) return;
+            this.#joinedChannels.add(key);
+            onStatus({ type: 'joined', channel: key });
+            if (!this.#desiredChannels.includes(key)) void this.#queueReconcile();
+        });
+        this.#client.on('part', (channel, _username, self) => {
+            if (!self) return;
+            const key = channelKey(channel);
+            if (!this.#joinedChannels.delete(key)) return;
+            onStatus({ type: 'parted', channel: key });
+            if (this.#desiredChannels.includes(key)) void this.#queueReconcile();
         });
     }
 
@@ -955,30 +981,77 @@ class IrcBridge {
         return this.#connected || this.#client?.readyState?.() === 'OPEN';
     }
 
-    async connect() {
-        await this.#client.connect(); // identity password provider resolves the user token during auth
-        this.#connected = true;
+    get joinedChannels() {
+        return [...this.#joinedChannels];
     }
 
-    async join(channel) {
-        if (typeof this.#client?.join === 'function') {
+    async connect() {
+        await this.#client.connect(); // identity password provider resolves the user token during auth
+        if (!this.#connected) {
+            this.#connected = true;
+            this.#onStatus({ type: 'connected' });
+            this.#connectReconcilePromise = this.#queueReconcile();
+        }
+        await this.#connectReconcilePromise;
+    }
+
+    async syncChannels(channels) {
+        const next = this.#normalizeChannels(channels);
+        const changed = next.length !== this.#desiredChannels.length
+            || next.some((channel, index) => channel !== this.#desiredChannels[index]);
+        this.#desiredChannels = next;
+        if (!this.connected) return;
+        if (this.#reconcilePromise && changed) this.#reconcileRequested = true;
+        await this.#queueReconcile();
+    }
+
+    #normalizeChannels(channels) {
+        return [...new Set((channels || []).map(channelKey).filter(key => key && key !== '#'))];
+    }
+
+    #queueReconcile() {
+        if (!this.connected) return Promise.resolve();
+        if (this.#reconcilePromise) return this.#reconcilePromise;
+        this.#reconcilePromise = (async () => {
             try {
-                console.log(`[TwitchTransport] Joining IRC channel: ${channel}`);
-                await this.#client.join(channel);
-            } catch (err) {
-                console.error(`[TwitchTransport] IRC join failed for ${channel}:`, err.message || err);
+                do {
+                    this.#reconcileRequested = false;
+                    await this.#reconcileOnce();
+                } while (this.#reconcileRequested && this.connected);
+            } finally {
+                this.#reconcilePromise = null;
             }
+        })();
+        return this.#reconcilePromise;
+    }
+
+    async #reconcileOnce() {
+        const desired = new Set(this.#desiredChannels);
+        const toJoin = this.#desiredChannels.filter(channel => !this.#joinedChannels.has(channel));
+        const toPart = [...this.#joinedChannels].filter(channel => !desired.has(channel));
+        await Promise.all([
+            ...toJoin.map(channel => this.#requestJoin(channel)),
+            ...toPart.map(channel => this.#requestPart(channel))
+        ]);
+    }
+
+    async #requestJoin(channel) {
+        if (typeof this.#client?.join !== 'function') return;
+        try {
+            console.log(`[TwitchTransport] Joining IRC channel: ${channel}`);
+            await this.#client.join(channel);
+        } catch (err) {
+            console.error(`[TwitchTransport] IRC join failed for ${channel}:`, err.message || err);
         }
     }
 
-    async part(channel) {
-        if (typeof this.#client?.part === 'function') {
-            try {
-                console.log(`[TwitchTransport] Parting IRC channel: ${channel}`);
-                await this.#client.part(channel);
-            } catch (err) {
-                console.error(`[TwitchTransport] IRC part failed for ${channel}:`, err.message || err);
-            }
+    async #requestPart(channel) {
+        if (typeof this.#client?.part !== 'function') return;
+        try {
+            console.log(`[TwitchTransport] Parting IRC channel: ${channel}`);
+            await this.#client.part(channel);
+        } catch (err) {
+            console.error(`[TwitchTransport] IRC part failed for ${channel}:`, err.message || err);
         }
     }
 
@@ -988,7 +1061,11 @@ class IrcBridge {
         } catch (err) {
             console.error('[TwitchTransport] IRC disconnect failed:', err.message);
         }
-        this.#connected = false;
+        if (this.#connected || this.#joinedChannels.size > 0) {
+            this.#connected = false;
+            this.#joinedChannels.clear();
+            this.#onStatus({ type: 'disconnected', reason: 'client disconnected' });
+        }
     }
 }
 
@@ -1082,7 +1159,7 @@ export class TwitchTransport {
 
         this.#clientId = clientId;
         this.#botUsername = cleanName(botUsername);
-        this.#channels = (channels || []).map(channelKey).filter(key => key !== '#');
+        this.#channels = [...new Set((channels || []).map(channelKey).filter(key => key !== '#'))];
         this.#ignored = new Set((ignoredUsernames || []).map(cleanName).filter(Boolean));
         this.#maxMessageLength = maxMessageLength;
         this.#chunkDelayMs = chunkDelayMs;
@@ -1277,12 +1354,15 @@ export class TwitchTransport {
      * @param {string[]} channels
      */
     async syncChannels(channels) {
-        const nextKeys = (channels || []).map(channelKey).filter(k => k && k !== '#');
+        const nextKeys = [...new Set((channels || []).map(channelKey).filter(k => k && k !== '#'))];
         const oldKeys = new Set(this.#channels);
         const toAdd = nextKeys.filter(k => !oldKeys.has(k));
         const toRemove = this.#channels.filter(k => !nextKeys.includes(k));
+        const configuredChanged = toAdd.length > 0 || toRemove.length > 0;
 
         this.#channels = nextKeys;
+        await this.#irc.syncChannels(nextKeys);
+        if (!configuredChanged) return this.channels;
 
         if (toAdd.length > 0) {
             const logins = toAdd.map(cleanName);
@@ -1295,7 +1375,6 @@ export class TwitchTransport {
         }
 
         for (const ch of toAdd) {
-            await this.#irc.join(ch);
             if (this.#running) {
                 await this.#subscribeEventSubChannel(ch);
                 await this.#subscribeBotChatChannel(ch);
@@ -1303,7 +1382,6 @@ export class TwitchTransport {
         }
 
         for (const ch of toRemove) {
-            await this.#irc.part(ch);
             await this.#unsubscribeBotChatChannel(ch);
             this.#unsubscribeEventSubChannel(ch);
         }
@@ -1317,10 +1395,12 @@ export class TwitchTransport {
             await this.#badges.syncChannels(activeIds);
         }
 
+        this.#emitStatus({ type: 'channels_synced' });
         return this.channels;
     }
 
     get channels() { return [...this.#channels]; }
+    get joinedChannels() { return this.#irc.joinedChannels; }
     get connected() { return this.#irc.connected; }
     get botId() { return this.#botId; }
     get channelIdMap() { return { ...this.#channelIdMap }; }
@@ -1413,6 +1493,7 @@ export class TwitchTransport {
             botUsername: this.#botUsername,
             botId: this.#botId,
             channels: this.channels,
+            joinedChannels: this.joinedChannels,
             channelIdMap: this.channelIdMap
         };
     }
