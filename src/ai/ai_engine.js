@@ -32,13 +32,12 @@ const responseTooLongInstruction = (maxLength, retryTarget) =>
 
 export class AIEngine {
     #imageDownloader;
-    #clientFor;
+    #clients;
     #toolDispatcher;
     #injectedSearchProvider;
 
     constructor({
-        apiKeys,
-        vertexAI = false,
+        googleBackend,
         modelName = DEFAULT_MODEL,
         fileContext = 'You are a helpful Twitch Chatbot.',
         historyLength = 5,
@@ -54,16 +53,20 @@ export class AIEngine {
         errorHandler = new ErrorHandler(),
         imageDownloader = null,
         fetchImpl = (...a) => globalThis.fetch(...a),
-        genAIClient = null,
+        clientFactory = (options) => new GoogleGenAI(options),
         modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS,
         verbose = false
     } = {}) {
-        this.apiKeys = (Array.isArray(apiKeys) ? apiKeys : String(apiKeys ?? '').split(','))
-            .map(k => String(k).trim()).filter(Boolean);
-        if (this.apiKeys.length === 0) {
-            throw new Error('No API keys provided');
-        }
-        this.vertexAI = vertexAI === true;
+        this.googleBackend = googleBackend;
+        this.#clients = googleBackend?.kind === 'vertex'
+            ? [clientFactory({
+                vertexai: true,
+                project: googleBackend.projectId,
+                location: 'global'
+            })]
+            : (googleBackend?.apiKeys || []).filter(Boolean)
+                .map((apiKey) => clientFactory({ apiKey }));
+        if (this.#clients.length === 0) throw new Error('No Google backend configured');
 
         this.modelName = modelName;
         this.fileContext = fileContext;
@@ -90,14 +93,6 @@ export class AIEngine {
 
         // Private internal collaborator
         this.#imageDownloader = imageDownloader ?? new ImageDownloader({ fetchImpl });
-        this.#clientFor = typeof genAIClient === 'function'
-            ? genAIClient
-            : genAIClient
-                ? () => genAIClient
-                : (apiKey, useVertexAI) => new GoogleGenAI(
-                    useVertexAI ? { apiKey, vertexai: true } : { apiKey }
-                );
-
         this.#toolDispatcher = new ToolDispatcher({
             tools,
             searchProvider: this.searchProvider,
@@ -393,7 +388,7 @@ export class AIEngine {
             this.#logVerboseRequest({ contents, config });
         }
 
-        const client = this.#clientFor(this.apiKeys[keyIndex], this.vertexAI);
+        const client = this.#clients[keyIndex];
         let result;
         try {
             result = await client.models.generateContent({
@@ -447,8 +442,8 @@ export class AIEngine {
         const startingKeyIndex = this.currentKeyIndex;
         const failures = [];
 
-        for (let visited = 0; visited < this.apiKeys.length; visited++) {
-            const keyIndex = (startingKeyIndex + visited) % this.apiKeys.length;
+        for (let visited = 0; visited < this.#clients.length; visited++) {
+            const keyIndex = (startingKeyIndex + visited) % this.#clients.length;
             let attemptTools = generationState.googleGroundingDisabled
                 ? this.#toolDispatcher.withoutGoogleSearch(tools)
                 : tools;
@@ -513,8 +508,8 @@ export class AIEngine {
                 throw outcome.error;
             }
 
-            if (visited + 1 < this.apiKeys.length) {
-                const nextKeyIndex = (keyIndex + 1) % this.apiKeys.length;
+            if (visited + 1 < this.#clients.length) {
+                const nextKeyIndex = (keyIndex + 1) % this.#clients.length;
                 this.#logModelAttemptFailure(
                     outcome.error,
                     keyIndex,

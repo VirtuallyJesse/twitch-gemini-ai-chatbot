@@ -9,6 +9,7 @@ import { GoogleProvider } from './media/google_provider.js';
 import { TavilySearchProvider } from './ai/tavily_search_provider.js';
 import { Storage } from './utils/storage.js';
 import { ConfigStore, createFactoryDefaults } from './utils/bot_config.js';
+import { resolveGoogleBackend } from './utils/google_backend.js';
 import { TwitchTransport } from './twitch/twitch_transport.js';
 import { ChatRouter } from './twitch/chat_router.js';
 import { createHelixTools } from './twitch/helix_actions.js';
@@ -18,16 +19,14 @@ const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
 const csv = (v) => String(v || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
-const geminiApiKeys = String(env.GEMINI_API_KEY || '').split(',').map((key) => key.trim()).filter(Boolean);
-const vertexApiKeys = String(env.VERTEX_API_KEY || '').split(',').map((key) => key.trim()).filter(Boolean);
-if ((geminiApiKeys.length > 0) === (vertexApiKeys.length > 0)) {
-    console.error('[Startup] Configure exactly one Google credential family: GEMINI_API_KEY or VERTEX_API_KEY.');
+let googleBackend;
+try {
+    googleBackend = resolveGoogleBackend(env);
+} catch (error) {
+    console.error(`[Startup] ${error.message}`);
     process.exit(1);
 }
-
-const vertexAI = vertexApiKeys.length > 0;
-const googleApiKeys = vertexAI ? vertexApiKeys : geminiApiKeys;
-console.log(`[AI] Google backend: ${vertexAI ? 'Vertex AI' : 'Gemini API'}`);
+console.log(`[AI] Google backend: ${googleBackend.kind === 'vertex' ? 'Vertex AI' : 'Gemini API'}`);
 
 const storage = new Storage({
     redisUrl: env.UPSTASH_REDIS_URL,
@@ -104,7 +103,7 @@ if (isUsableSecret(env.POLLINATIONS_API_KEY)) {
 } else {
     console.log('[Media] Pollinations disabled (missing or placeholder API key).');
 }
-mediaProviders.push(new GoogleProvider({ apiKeys: googleApiKeys, vertexAI }));
+mediaProviders.push(new GoogleProvider({ googleBackend }));
 
 const transport = new TwitchTransport({
     clientId: env.TWITCH_CLIENT_ID || '',
@@ -125,8 +124,7 @@ const helixActionSuite = createHelixTools({
 const helixTools = helixActionSuite.tools;
 
 const aiEngine = new AIEngine({
-    apiKeys: googleApiKeys,
-    vertexAI,
+    googleBackend,
     modelName: bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.7-flash',
     fileContext: bootConfig.system_instructions,
     historyLength: parseInt(bootConfig.bot_settings?.ai_history_length || env.AI_HISTORY_LENGTH, 10) || 10,

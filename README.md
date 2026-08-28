@@ -432,9 +432,9 @@ To update:
 
 <br>
 
-Yes, set `VERTEX_API_KEY` instead of `GEMINI_API_KEY`; never configure both at the same time. `VERTEX_API_KEY` accepts comma-separated keys and uses the same rotation behavior, but additional keys should not be treated as additional permanent free quota.
+Yes, set `VERTEX_PROJECT_ID` instead of `GEMINI_API_KEY`; never configure both at the same time. [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) must already be available to the process.
 
-> Google owns the provisioning, IAM, and billing requirements. See the [Vertex AI quickstart](https://cloud.google.com/vertex-ai/generative-ai/docs/start/quickstart) and [Google Cloud API-key documentation](https://cloud.google.com/docs/authentication/api-keys) for the current setup details.
+> Google owns project setup, authentication, IAM, billing, and model access. See the [Vertex AI documentation](https://cloud.google.com/vertex-ai/generative-ai/docs/overview) for setup details.
 
 </details>
 

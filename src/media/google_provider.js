@@ -1,4 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
+import { randomUUID } from 'node:crypto';
+import { readFile, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BotError } from '../utils/error_handler.js';
 import { ImageDownloader } from '../utils/image_downloader.js';
 
@@ -7,7 +11,7 @@ const VIDEO_TIMEOUT_MS = 7 * 60 * 1000;
 const VIDEO_POLL_MS = 10_000;
 const ROTATE_STATUSES = new Set([401, 403, 429, 503]);
 
-export const GOOGLE_TTS_VOICES = Object.freeze([
+const GOOGLE_TTS_VOICES = Object.freeze([
     'Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir', 'Leda', 'Orus', 'Aoede',
     'Callirrhoe', 'Autonoe', 'Enceladus', 'Iapetus', 'Umbriel', 'Algieba',
     'Despina', 'Erinome', 'Algenib', 'Rasalgethi', 'Laomedeia', 'Achernar',
@@ -15,20 +19,8 @@ export const GOOGLE_TTS_VOICES = Object.freeze([
     'Vindemiatrix', 'Sadachbia', 'Sadaltager', 'Sulafat'
 ]);
 
-export const GOOGLE_FALLBACK_CATALOG = Object.freeze({
-    image: Object.freeze([{ provider: 'google', id: 'gemini-3.1-flash-image' }]),
-    video: Object.freeze([{ provider: 'google', id: 'veo-3.1-lite-generate-preview', durations: Object.freeze([4, 6, 8]) }]),
-    tts: Object.freeze([{
-        provider: 'google',
-        id: 'gemini-3.1-flash-tts-preview',
-        voices: GOOGLE_TTS_VOICES,
-        defaultVoice: 'Kore'
-    }]),
-    music: Object.freeze([{ provider: 'google', id: 'lyria-3-clip-preview' }])
-});
-
-const VERTEX_EXPRESS_CATALOG = Object.freeze({
-    image: Object.freeze([{ provider: 'google', id: 'gemini-3.1-flash-image' }]),
+const EMPTY_CATALOG = Object.freeze({
+    image: Object.freeze([]),
     video: Object.freeze([]),
     tts: Object.freeze([]),
     music: Object.freeze([])
@@ -46,34 +38,39 @@ function cloneCatalog(catalog) {
 }
 
 function canonicalModelId(model) {
-    return String(model?.name || model?.id || model || '').replace(/^models\//, '').trim();
+    const name = String(model?.name || model?.id || model || '').trim();
+    const marker = '/models/';
+    if (name.includes(marker)) return name.slice(name.lastIndexOf(marker) + marker.length);
+    return name.replace(/^models\//, '').split('/').at(-1);
 }
 
 function isImageModel(id) {
-    return /^gemini-(?:2\.5-flash-image|3(?:\.\d+)?-(?:flash(?:-lite)?|pro)-image)(?:-preview)?$/.test(id);
+    return /^gemini-\d+(?:\.\d+)*-(?:flash(?:-lite)?|pro)-image(?:-[a-z0-9]+)*$/.test(id);
 }
 
 function isVeoModel(id) {
-    return /^veo-3(?:\.1)?-(?:lite-|fast-)?generate(?:-[a-z0-9]+)*$/.test(id);
+    return /^veo-\d+(?:\.\d+)*-(?:(?:lite|fast)-)?generate(?:-[a-z0-9]+)*$/.test(id);
 }
 
 function isOmniVideoModel(id) {
-    return /^gemini-(?:[\d.]+-)?(?:flash-)?omni(?:-[a-z0-9.]+)*$/.test(id);
+    return /^gemini-(?:\d+(?:\.\d+)*-)?(?:(?:flash|pro)(?:-lite)?-)?omni(?:-[a-z0-9.]+)*$/.test(id);
 }
 
 function isTtsModel(id) {
-    return /^gemini-(?:[\d.]+-)(?:flash|pro)-tts(?:-preview)?$/.test(id);
+    return /^gemini-\d+(?:\.\d+)*-(?:flash|pro)(?:-lite)?-tts(?:-[a-z0-9]+)*$/.test(id);
 }
 
 function isMusicModel(id) {
-    return /^lyria-3-(?:clip|pro)-preview$/.test(id);
+    return /^lyria-\d+(?:\.\d+)*-(?:clip|pro)(?:-[a-z0-9]+)*$/.test(id);
 }
 
-export function classifyGoogleModels(models) {
+function classifyGoogleModels(models) {
     const catalog = { image: [], video: [], tts: [], music: [] };
+    const seen = new Set();
     for (const model of models || []) {
         const id = canonicalModelId(model);
-        if (!id) continue;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
         if (isImageModel(id)) catalog.image.push({ provider: 'google', id });
         else if (isVeoModel(id)) catalog.video.push({ provider: 'google', id, durations: [4, 6, 8] });
         else if (isOmniVideoModel(id)) catalog.video.push({ provider: 'google', id });
@@ -142,6 +139,11 @@ function firstInlineMedia(response, prefix) {
     return null;
 }
 
+function pcmSampleRate(mimeType) {
+    const match = String(mimeType || '').match(/(?:^|;)\s*rate=(\d+)/i);
+    return match ? Number(match[1]) : 24_000;
+}
+
 function interactionMedia(interaction, kind) {
     const direct = interaction?.[`output_${kind}`] || interaction?.[`output${kind[0].toUpperCase()}${kind.slice(1)}`];
     if (direct?.data) {
@@ -193,9 +195,8 @@ export class GoogleProvider {
     #catalogRefresh = null;
 
     constructor({
-        apiKeys = [],
-        vertexAI = false,
-        clientFactory = (apiKey, useVertexAI) => new GoogleGenAI(useVertexAI ? { apiKey, vertexai: true } : { apiKey }),
+        googleBackend,
+        clientFactory = (options) => new GoogleGenAI(options),
         imageDownloader = null,
         fetchImpl = globalThis.fetch.bind(globalThis),
         now = () => Date.now(),
@@ -206,23 +207,34 @@ export class GoogleProvider {
     } = {}) {
         this.id = 'google';
         this.name = this.id;
-        this.vertexAI = vertexAI === true;
-        this.clients = apiKeys.filter(Boolean).map((key) => ({ key, client: clientFactory(key, this.vertexAI) }));
+        this.googleBackend = googleBackend;
+        this.clients = googleBackend?.kind === 'vertex'
+            ? [{
+                client: clientFactory({
+                    vertexai: true,
+                    project: googleBackend.projectId,
+                    location: 'global'
+                }),
+                regionalClient: clientFactory({
+                    vertexai: true,
+                    project: googleBackend.projectId,
+                    location: 'us-central1'
+                })
+            }]
+            : (googleBackend?.apiKeys || []).filter(Boolean)
+                .map((key) => {
+                    const client = clientFactory({ apiKey: key });
+                    return { key, client, regionalClient: client };
+                });
         this.activeKeyIndex = 0;
-        this.fetchImpl = fetchImpl;
         this.imageDownloader = imageDownloader ?? new ImageDownloader({ fetchImpl });
         this.now = now;
         this.sleep = sleep;
         this.catalogTtlMs = catalogTtlMs;
         this.videoTimeoutMs = videoTimeoutMs;
         this.videoPollMs = videoPollMs;
-        this.capabilities = { mediaTypes: new Set(this.vertexAI ? ['image'] : ['image', 'video', 'tts', 'music']) };
-        this.authoritativeModels = null;
+        this.capabilities = { mediaTypes: new Set(['image', 'video', 'tts', 'music']) };
         this.#catalogState = { data: null, successAt: 0, failedAt: 0 };
-        if (this.vertexAI) {
-            this.authoritativeModels = Object.fromEntries(Object.entries(VERTEX_EXPRESS_CATALOG)
-                .map(([type, models]) => [type, new Set(models.map((model) => model.id))]));
-        }
     }
 
     supports(type) {
@@ -250,30 +262,27 @@ export class GoogleProvider {
     }
 
     async #discover() {
-        return this.#withRotation(async ({ client }) => classifyGoogleModels(
-            await modelList(await client.models.list())
+        return this.#withRotation(async (entry) => classifyGoogleModels(
+            await modelList(await (entry.regionalClient || entry.client).models.list())
         ));
     }
 
     async catalog() {
-        if (this.vertexAI) return cloneCatalog(VERTEX_EXPRESS_CATALOG);
         const now = this.now();
         if (this.#catalogState.data && now - this.#catalogState.successAt < this.catalogTtlMs) return cloneCatalog(this.#catalogState.data);
         if (this.#catalogState.failedAt && now - this.#catalogState.failedAt < this.catalogTtlMs) {
-            return cloneCatalog(this.#catalogState.data || GOOGLE_FALLBACK_CATALOG);
+            return cloneCatalog(this.#catalogState.data || EMPTY_CATALOG);
         }
         if (this.#catalogRefresh) return this.#catalogRefresh;
         this.#catalogRefresh = (async () => {
             try {
                 const catalog = await this.#discover();
                 this.#catalogState = { data: catalog, successAt: this.now(), failedAt: 0 };
-                this.authoritativeModels = Object.fromEntries(Object.entries(catalog)
-                    .map(([type, models]) => [type, new Set(models.map((model) => model.id))]));
                 return cloneCatalog(catalog);
             } catch (error) {
                 this.#catalogState.failedAt = this.now();
                 console.warn('[Google Media] Model discovery failed:', error?.message || error);
-                return cloneCatalog(this.#catalogState.data || GOOGLE_FALLBACK_CATALOG);
+                return cloneCatalog(this.#catalogState.data || EMPTY_CATALOG);
             } finally {
                 this.#catalogRefresh = null;
             }
@@ -286,10 +295,6 @@ export class GoogleProvider {
             throw new BotError('MEDIA_PROVIDER_UNAVAILABLE', { params: { provider: this.id, mediaType: type } });
         }
         if (!target?.model) throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
-        const known = this.authoritativeModels?.[type];
-        if (known && !known.has(target.model)) {
-            throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
-        }
     }
 
     async #referenceInput(prompt, type) {
@@ -325,29 +330,40 @@ export class GoogleProvider {
     async #videoBuffer(entry, video) {
         if (video?.videoBytes) return Buffer.from(video.videoBytes, 'base64');
         if (!video?.uri) return null;
-        const response = await this.fetchImpl(video.uri, { headers: { 'x-goog-api-key': entry.key } });
-        if (!response.ok) throw Object.assign(new Error('Google video download failed'), { status: response.status });
-        return Buffer.from(await response.arrayBuffer());
+        const client = entry.regionalClient || entry.client;
+        const downloadPath = join(tmpdir(), `twitch-google-video-${randomUUID()}.mp4`);
+        try {
+            await client.files.download({ file: video, downloadPath });
+            return await readFile(downloadPath);
+        } finally {
+            await unlink(downloadPath).catch(() => {});
+        }
     }
 
     async #generateVeo(prompt, target) {
         const input = await this.#referenceInput(prompt, 'video');
-        const established = await this.#withRotation(async (entry) => ({
-            entry,
-            operation: await entry.client.models.generateVideos({
-                model: target.model,
-                prompt: input.prompt,
-                ...(input.image ? { image: { imageBytes: input.image.data, mimeType: input.image.mimeType } } : {}),
-                config: { numberOfVideos: 1, ...(target.duration ? { durationSeconds: target.duration } : {}) }
-            })
-        }), 'video');
+        const established = await this.#withRotation(async (entry) => {
+            const client = entry.regionalClient || entry.client;
+            return {
+                entry,
+                client,
+                operation: await client.models.generateVideos({
+                    model: target.model,
+                    source: {
+                        prompt: input.prompt,
+                        ...(input.image ? { image: { imageBytes: input.image.data, mimeType: input.image.mimeType } } : {})
+                    },
+                    config: { numberOfVideos: 1, ...(target.duration ? { durationSeconds: target.duration } : {}) }
+                })
+            };
+        }, 'video');
         const deadline = this.now() + this.videoTimeoutMs;
         let operation = established.operation;
         while (!operation?.done) {
             if (this.now() >= deadline) throw new BotError('REQUEST_TIMEOUT');
             await this.sleep(this.videoPollMs);
             try {
-                operation = await established.entry.client.operations.getVideosOperation({ operation });
+                operation = await established.client.operations.getVideosOperation({ operation });
             } catch (error) {
                 throw translateGoogleError(error, 'video');
             }
@@ -357,6 +373,32 @@ export class GoogleProvider {
         const buffer = await this.#videoBuffer(established.entry, video);
         if (!buffer?.length) throw new BotError('MEDIA_NO_DATA', { params: { service: this.id, mediaType: 'video' } });
         return { buffer, mimeType: video?.mimeType || 'video/mp4' };
+    }
+
+    async #generateTts(prompt, target) {
+        return this.#withRotation(async ({ client }) => {
+            const response = await client.models.generateContent({
+                model: target.model,
+                contents: String(prompt || ''),
+                config: {
+                    responseModalities: ['AUDIO'],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: target.voice || 'Kore' }
+                        }
+                    }
+                }
+            });
+            const media = firstInlineMedia(response, 'audio');
+            if (!media?.buffer?.length) {
+                throw new BotError('MEDIA_NO_DATA', { params: { service: this.id, mediaType: 'tts' } });
+            }
+            if (!/pcm|l16/i.test(media.mimeType)) return media;
+            return {
+                buffer: pcmToWav(media.buffer, { sampleRate: pcmSampleRate(media.mimeType) }),
+                mimeType: 'audio/wav'
+            };
+        }, 'tts');
     }
 
     async #generateInteraction(type, prompt, target) {
@@ -369,10 +411,7 @@ export class GoogleProvider {
                 ]
                 : input.prompt;
             const request = { model: target.model, input: interactionInput };
-            if (type === 'tts') {
-                request.response_format = { type: 'audio' };
-                request.generation_config = { speech_config: [{ voice: target.voice || 'Kore' }] };
-            } else if (type === 'video') {
+            if (type === 'video') {
                 request.response_format = { type: 'video' };
             } else if (type === 'music' && target.model.includes('-pro-')) {
                 request.response_format = { type: 'audio' };
@@ -381,12 +420,6 @@ export class GoogleProvider {
             const kind = type === 'video' ? 'video' : 'audio';
             const media = interactionMedia(interaction, kind);
             if (!media?.buffer?.length) throw new BotError('MEDIA_NO_DATA', { params: { service: this.id, mediaType: type } });
-            if (type === 'tts') {
-                return {
-                    buffer: pcmToWav(media.buffer, { sampleRate: media.sampleRate || 24_000, channels: media.channels || 1 }),
-                    mimeType: 'audio/wav'
-                };
-            }
             return { buffer: media.buffer, mimeType: media.mimeType || (type === 'video' ? 'video/mp4' : 'audio/mpeg') };
         }, type);
     }
@@ -397,7 +430,7 @@ export class GoogleProvider {
             if (type === 'image') return await this.#generateImage(prompt, target);
             if (type === 'video' && isVeoModel(target.model)) return await this.#generateVeo(prompt, target);
             if (type === 'video' && isOmniVideoModel(target.model)) return await this.#generateInteraction(type, prompt, target);
-            if (type === 'tts' && isTtsModel(target.model)) return await this.#generateInteraction(type, prompt, target);
+            if (type === 'tts' && isTtsModel(target.model)) return await this.#generateTts(prompt, target);
             if (type === 'music' && isMusicModel(target.model)) return await this.#generateInteraction(type, prompt, target);
             throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
         } catch (error) {
