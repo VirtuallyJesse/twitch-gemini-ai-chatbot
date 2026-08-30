@@ -16,6 +16,7 @@
 
 <div align="center">
 <img src="assets/features.png" alt="Features Overview" width="100%">
+<img src="assets/dashboard.png" alt="Features Overview" width="100%">
 </div>
 
 ---
