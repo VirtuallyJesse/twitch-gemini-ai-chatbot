@@ -264,13 +264,20 @@ export class EmotePool {
   }
 
   decorateReply(channel, rawReply, { appendEmote = true, maxLength = null } = {}) {
-    let out = String(rawReply ?? '').replace(/(?<!\S)emote:/g, '').replace(/\s+/g, ' ').trim();
+    const raw = String(rawReply ?? '');
+    const hasTaggedEmote = /(?<!\S)emote:\S+/.test(raw);
+    const view = this.#view(channel);
+    const hasBareEmote = Boolean(view.space) && raw.split(URL_SPLIT).some(segment => {
+      if (/^https?:\/\//.test(segment)) return false;
+      view.space.lastIndex = 0;
+      return view.space.test(segment);
+    });
+    let out = raw.replace(/(?<!\S)emote:/g, '').replace(/\s+/g, ' ').trim();
     if (!out) return out;
 
-    const view = this.#view(channel);
     out = this.#spaceEmotes(view, out);
 
-    if (appendEmote && this.#cfg.appendEnabled) {
+    if (appendEmote && this.#cfg.appendEnabled && !hasTaggedEmote && !hasBareEmote) {
       const emote = this.#randomEmote(view);
       if (emote && (!maxLength || out.length + emote.length + 1 <= maxLength)) {
         out = `${out} ${emote}`;
@@ -284,12 +291,12 @@ export class EmotePool {
       '<emotes>',
       'emote:NAME identifies a Twitch emote in supplied context.',
       'Treat emote:NAME tokens as opaque unless the user\'s request makes the emote relevant.',
-      'You may only reproduce emotes observed in supplied context, preserving their exact spelling and case.'
+      'You may reproduce emotes observed in supplied context when relevant or explicitly requested, preserving their exact spelling and case. Do not invent emotes.'
     ];
 
     if (this.#cfg.appendEnabled) {
       parts.push(
-        'The application automatically selects and appends an emote after your response when possible. Do not append an emote yourself. You do not choose the appended emote and should not claim to know why a particular emote was selected.'
+        'The application may automatically append a channel emote to your response. You do not choose an automatically appended emote and should not claim to know why a particular emote was selected.'
       );
     }
 
