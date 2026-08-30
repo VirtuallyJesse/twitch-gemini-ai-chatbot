@@ -305,11 +305,26 @@ export class ToolDispatcher {
     }
 
     async #executeOne(fc, context) {
+        const trace = context?.trace;
+        const started = performance.now();
+        trace?.event?.('tool.started', { name: fc.name });
         const tool = this.#lookupTool(fc.name);
         if (!tool) {
+            trace?.event?.('tool.finished', {
+                name: fc.name,
+                outcome: 'failed',
+                durationMs: performance.now() - started,
+                reason: 'unknown tool'
+            });
             return this.#functionResponse(fc, { error: `Unknown tool: ${fc.name}` });
         }
         if (!this.#allowedForCaller(tool, context?.caller)) {
+            trace?.event?.('tool.finished', {
+                name: tool.name,
+                outcome: 'failed',
+                durationMs: performance.now() - started,
+                reason: 'permission denied'
+            });
             return this.#functionResponse(fc, { error: 'You do not have permission to use this tool.' });
         }
 
@@ -326,9 +341,21 @@ export class ToolDispatcher {
                 })),
                 this.#timeoutPromise(controller.signal, tool.name, timeoutMs)
             ]);
+            trace?.event?.('tool.finished', {
+                name: tool.name,
+                outcome: payload?.error ? 'failed' : 'succeeded',
+                durationMs: performance.now() - started,
+                reason: payload?.error ? String(payload.error) : undefined
+            });
             return this.#safeFunctionResponse(fc, payload);
         } catch (err) {
             const timedOut = controller.signal.aborted;
+            trace?.event?.('tool.finished', {
+                name: tool.name,
+                outcome: 'failed',
+                durationMs: performance.now() - started,
+                reason: timedOut ? `timed out after ${timeoutMs}ms` : (err?.message || String(err))
+            });
             if (timedOut && tool.tokenTier) {
                 return this.#functionResponse(fc, {
                     error: 'HELIX_ACTION_TIMEOUT',

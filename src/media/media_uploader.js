@@ -152,7 +152,7 @@ export class MediaUploader {
         return data.link.trim();
     }
 
-    async upload(buffer, { mediaType, mimeType, signal } = {}) {
+    async upload(buffer, { mediaType, mimeType, signal, trace } = {}) {
         const kind = UPLOAD_KIND[mediaType];
 
         if (!kind) {
@@ -167,12 +167,38 @@ export class MediaUploader {
         const normalizedMime = normalizeMimeType(mimeType, kind);
         const filename = `generated.${extensionFor(normalizedMime, kind)}`;
 
+        let started = performance.now();
+        trace?.event?.('upload.started', { host: 'primary' });
         try {
-            return await this.#uploadPrimary(buffer, normalizedMime, filename, kind, signal);
+            const url = await this.#uploadPrimary(buffer, normalizedMime, filename, kind, signal);
+            trace?.event?.('upload.succeeded', {
+                host: 'primary',
+                durationMs: performance.now() - started,
+                url
+            });
+            return url;
         } catch (primaryError) {
+            trace?.event?.('upload.failed', {
+                host: 'primary',
+                durationMs: performance.now() - started,
+                reason: primaryError?.message || String(primaryError)
+            });
+            started = performance.now();
+            trace?.event?.('upload.started', { host: 'fallback' });
             try {
-                return await this.#uploadFallback(buffer, normalizedMime, filename, kind, signal);
+                const url = await this.#uploadFallback(buffer, normalizedMime, filename, kind, signal);
+                trace?.event?.('upload.succeeded', {
+                    host: 'fallback',
+                    durationMs: performance.now() - started,
+                    url
+                });
+                return url;
             } catch (fallbackError) {
+                trace?.event?.('upload.failed', {
+                    host: 'fallback',
+                    durationMs: performance.now() - started,
+                    reason: fallbackError?.message || String(fallbackError)
+                });
                 throw new Error(
                     `${capitalize(kind)} upload failed: ` +
                     `Primary (${primaryError.message}), ` +

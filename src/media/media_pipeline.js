@@ -11,6 +11,13 @@ const MEDIA_TYPE_HARNESS = [
 
 const MEDIA_URL_POSITIONS = ['start', 'middle', 'end'];
 
+const DEFAULT_MEDIA_MIME = {
+    image: 'image/png',
+    video: 'video/mp4',
+    tts: 'audio/mpeg',
+    music: 'audio/mpeg'
+};
+
 const MEDIA_PRESENTATION_HARNESS = [
     '<media_delivery>',
     'Write the single Twitch chat message that accompanies the completed media.',
@@ -76,6 +83,11 @@ function resolveUsername(user) {
 
 function byteLength(value) {
     return value?.byteLength ?? value?.length ?? 0;
+}
+
+function normalizeMimeType(value, mediaType) {
+    const mimeType = String(value || '').split(';')[0].trim().toLowerCase();
+    return mimeType.includes('/') ? mimeType : (DEFAULT_MEDIA_MIME[mediaType] || 'application/octet-stream');
 }
 
 function extractText(result) {
@@ -285,7 +297,7 @@ export class MediaPipeline {
         return MEDIA_URL_POSITIONS[index];
     }
 
-    async #presentMedia({ channel, username, prompt, mediaType, mediaUrl, conversationPrompt }) {
+    async #presentMedia({ channel, username, prompt, mediaType, mediaUrl, conversationPrompt, trace }) {
         const fallback = this.errorHandler.format('MEDIA_FALLBACK_RESPONSE', {
             mediaType,
             username,
@@ -293,36 +305,50 @@ export class MediaPipeline {
         });
 
         let presentation;
+        const started = performance.now();
+        trace?.event?.('media.presentation.started');
         try {
             const originalRequest = String(prompt || '').trim();
             const urlPlacement = this.#claimUrlPlacement(channel);
 
+            const generationOptions = {
+                disableMultimedia: true,
+                recordMemory: false,
+                channel,
+                harnessInstructions: [
+                    MEDIA_PRESENTATION_HARNESS,
+                    URL_PLACEMENT_HARNESS[urlPlacement]
+                ].join('\n\n'),
+                mediaDelivery: {
+                    mediaType,
+                    requester: username,
+                    originalRequest,
+                    generatedUrl: mediaUrl
+                },
+                ...(trace ? { trace } : {})
+            };
             const result = await this.aiEngine?.generate(
                 conversationPrompt,
-                {
-                    disableMultimedia: true,
-                    recordMemory: false,
-                    channel,
-                    harnessInstructions: [
-                        MEDIA_PRESENTATION_HARNESS,
-                        URL_PLACEMENT_HARNESS[urlPlacement]
-                    ].join('\n\n'),
-                    mediaDelivery: {
-                        mediaType,
-                        requester: username,
-                        originalRequest,
-                        generatedUrl: mediaUrl
-                    }
-                }
+                generationOptions
             );
 
             if (isPresentationFailure(result, this.errorHandler)) {
+                trace?.markFailed?.('media presentation failed');
                 presentation = fallback;
             } else {
                 presentation = extractText(result).trim() || fallback;
             }
+            trace?.event?.('media.presentation.finished', {
+                outcome: isPresentationFailure(result, this.errorHandler) ? 'failed' : 'succeeded',
+                durationMs: performance.now() - started
+            });
         } catch (error) {
             console.error('[Media] Presentation generation failed:', error);
+            trace?.markFailed?.(error?.message || 'media presentation failed');
+            trace?.event?.('media.presentation.finished', {
+                outcome: 'failed',
+                durationMs: performance.now() - started
+            });
             presentation = fallback;
         }
 
@@ -351,23 +377,34 @@ export class MediaPipeline {
         mediaType,
         command,
         conversationPrompt,
+        trace = null
     }) {
         const username = resolveUsername(user);
         const cleanPrompt = typeof prompt === 'string' ? prompt.trim() : '';
 
         if (!cleanPrompt) {
+            trace?.markRejected?.('missing media prompt');
             return {
                 success: false,
                 replyText: this.errorHandler.format('MEDIA_PROMPT_REQUIRED', {
                     username,
                     mediaType
                 }),
-                mediaEntry: null
+                mediaEntry: null,
+                traceOutcome: 'rejected',
+                traceReason: 'missing media prompt'
             };
         }
 
         try {
             const { target, provider } = this.#resolveTarget(mediaType);
+            const { provider: selectedProvider, model, ...options } = target || {};
+            trace?.event?.('media.target', {
+                mediaType,
+                provider: selectedProvider,
+                model,
+                options
+            });
             if (!provider) {
                 throw new BotError('MEDIA_PROVIDER_UNAVAILABLE', {
                     params: { provider: target?.provider || 'media provider', mediaType }
@@ -379,27 +416,55 @@ export class MediaPipeline {
                 });
             }
 
-            const generated = await provider.generate({
-                type: mediaType,
-                prompt: cleanPrompt,
-                target: { ...target }
+            const generationStarted = performance.now();
+            trace?.event?.('media.generation.started', {
+                provider: selectedProvider,
+                model
             });
+            let generated;
+            try {
+                generated = await provider.generate({
+                    type: mediaType,
+                    prompt: cleanPrompt,
+                    target: { ...target }
+                });
+            } catch (error) {
+                trace?.event?.('media.generation.failed', {
+                    durationMs: performance.now() - generationStarted,
+                    reason: error?.message || String(error)
+                });
+                throw error;
+            }
 
             if (!generated?.buffer || byteLength(generated.buffer) === 0) {
+                trace?.event?.('media.generation.failed', {
+                    durationMs: performance.now() - generationStarted,
+                    reason: 'provider returned no data'
+                });
+                trace?.markFailed?.('provider returned no media data');
                 return {
                     success: false,
                     replyText: this.errorHandler.format('MEDIA_NO_DATA', {
                         service: providerId(provider),
                         mediaType
                     }),
-                    mediaEntry: null
+                    mediaEntry: null,
+                    traceOutcome: 'failed',
+                    traceReason: 'provider returned no media data'
                 };
             }
-
-            const mediaUrl = await this.uploader.upload(generated.buffer, {
-                mediaType,
-                mimeType: generated.mimeType
+            trace?.event?.('media.generation.succeeded', {
+                durationMs: performance.now() - generationStarted,
+                mimeType: normalizeMimeType(generated.mimeType, mediaType),
+                bytes: byteLength(generated.buffer)
             });
+
+            const uploadOptions = {
+                mediaType,
+                mimeType: generated.mimeType,
+                ...(trace ? { trace } : {})
+            };
+            const mediaUrl = await this.uploader.upload(generated.buffer, uploadOptions);
 
             const timestamp = this.now();
             const userId = typeof user === 'object' ? (user['user-id'] || user.userId || user.id || null) : null;
@@ -431,7 +496,8 @@ export class MediaPipeline {
                 prompt: cleanPrompt,
                 mediaType,
                 mediaUrl,
-                conversationPrompt: conversationPrompt || `${command} ${cleanPrompt}`.trim()
+                conversationPrompt: conversationPrompt || `${command} ${cleanPrompt}`.trim(),
+                trace
             });
 
             return {
@@ -441,11 +507,14 @@ export class MediaPipeline {
             };
         } catch (error) {
             console.error(`[Media] ${mediaType} synthesis failed:`, error);
+            trace?.markFailed?.(error?.message || String(error));
 
             return {
                 success: false,
                 replyText: this.errorHandler.format(error),
-                mediaEntry: null
+                mediaEntry: null,
+                traceOutcome: 'failed',
+                traceReason: error?.message || String(error)
             };
         }
     }

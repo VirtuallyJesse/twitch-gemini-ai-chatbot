@@ -14,10 +14,24 @@ import { TwitchTransport } from './twitch/twitch_transport.js';
 import { ChatRouter } from './twitch/chat_router.js';
 import { createHelixTools } from './twitch/helix_actions.js';
 import { WebServer } from './web/web_server.js';
+import { createExecutionTrace } from './utils/execution_trace.js';
 
 const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
 const csv = (v) => String(v || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+const executionTrace = createExecutionTrace({
+    enabled: env.AI_VERBOSE === 'true',
+    redactions: [
+        ...String(env.GEMINI_API_KEY || '').split(','),
+        env.TWITCH_CLIENT_SECRET,
+        env.TWITCH_REFRESH_TOKEN,
+        env.UPSTASH_REDIS_REST_TOKEN,
+        env.TAVILY_API_KEY,
+        env.POLLINATIONS_API_KEY,
+        env.YOUTUBE_API_KEY
+    ]
+});
 
 let googleBackend;
 try {
@@ -139,8 +153,7 @@ const aiEngine = new AIEngine({
     maxResponseLength: 450,
     errorHandler,
     tools: helixTools,
-    streamActionsPolicy: bootConfig.stream_actions,
-    verbose: env.AI_VERBOSE === 'true'
+    streamActionsPolicy: bootConfig.stream_actions
 });
 
 const mediaPipeline = new MediaPipeline({
@@ -169,7 +182,8 @@ const chatRouter = new ChatRouter({
     prefixes: {
         ai: csv(bootConfig.bot_settings?.bot_command_name || env.BOT_COMMAND_NAME || '!gemini,@yourbotusername')
     },
-    mediaCommands: bootConfig.commands?.media
+    mediaCommands: bootConfig.commands?.media,
+    executionTrace
 });
 
 chatRouter.attach(transport);

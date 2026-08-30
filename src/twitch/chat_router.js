@@ -2,6 +2,7 @@
 // Coordinates Twitch chat routing: command RBAC, media/AI dispatch,
 // per-channel cooldowns, and chatter-safe error translation.
 import { FACTORY, commandsToMap } from '../utils/bot_config.js';
+import { NOOP_EXECUTION_TRACE } from '../utils/execution_trace.js';
 import { EVENT_REACTION_HARNESS } from './event_reaction.js';
 
 const DEFAULT_PREFIXES = {
@@ -265,7 +266,8 @@ export class ChatRouter {
         mediaCommands = null,
         replyMode = 'off',
         ignoreEmoteOnlyPrompts = true,
-        clock = Date.now
+        clock = Date.now,
+        executionTrace = NOOP_EXECUTION_TRACE
     } = {}) {
         if (!aiEngine || !mediaPipeline || !emotePool) {
             throw new Error('ChatRouter requires aiEngine, mediaPipeline, and emotePool');
@@ -284,6 +286,7 @@ export class ChatRouter {
         this.maxMessageLength = maxMessageLength;
         this.replyMode = normalizeReplyMode(replyMode);
         this.ignoreEmoteOnlyPrompts = ignoreEmoteOnlyPrompts !== false;
+        this.executionTrace = executionTrace || NOOP_EXECUTION_TRACE;
         this.transport = null;
 
         this.#systemInstructions = typeof systemInstructions === 'string' ? systemInstructions : FACTORY.system_instructions;
@@ -490,7 +493,8 @@ export class ChatRouter {
         channel,
         text,
         trigger = {},
-        decorateAi = false
+        decorateAi = false,
+        trace = null
     }) {
         trigger = trigger || {};
         const actor = deliveryActor(trigger);
@@ -515,13 +519,27 @@ export class ChatRouter {
         const options = effectiveMode === 'reply'
             ? { replyParentMessageId: messageId }
             : undefined;
+        trace?.event('response.intended', { text: delivered });
+        let sendStarted = performance.now();
+        trace?.event('twitch.send.started', { reply: Boolean(options) });
         try {
             await transport.send(channel, delivered, options);
+            trace?.event('twitch.send.accepted', { durationMs: performance.now() - sendStarted });
+            trace?.event('response.delivered', { text: delivered });
             return delivered;
         } catch (error) {
+            trace?.event('twitch.send.failed', {
+                durationMs: performance.now() - sendStarted,
+                reason: error?.message || String(error)
+            });
             if (effectiveMode !== 'reply' || error?.code !== 'INVALID_REPLY_PARENT') throw error;
             const fallback = prepare(actor.username ? 'tag' : 'off');
+            sendStarted = performance.now();
+            trace?.event('response.intended', { text: fallback });
+            trace?.event('twitch.send.started', { reply: false });
             await transport.send(channel, fallback);
+            trace?.event('twitch.send.accepted', { durationMs: performance.now() - sendStarted });
+            trace?.event('response.delivered', { text: fallback });
             return fallback;
         }
     }
@@ -541,12 +559,25 @@ export class ChatRouter {
 
         const channel = message.channel;
         const text = message.text ?? '';
+        let trace = null;
 
         try {
             const invocation = message.invocation || this.classify(message, transport.botUserId);
             if (invocation.kind === 'none') {
                 return { kind: 'none', channel, sent: false };
             }
+            trace = this.executionTrace.begin({
+                kind: invocation.kind,
+                command: invocation.command,
+                mediaType: invocation.mediaType,
+                requester: message.loginName || message.username || message.tags?.username,
+                channel
+            });
+
+            const finish = (result, outcome = null, reason = null) => {
+                trace.terminal(outcome, reason);
+                return result;
+            };
 
             const aiCommand = invocation.kind === 'ai' ? invocation.command : null;
 
@@ -564,32 +595,39 @@ export class ChatRouter {
             const custom = invocation.kind === 'custom' ? invocation.custom : null;
             if (custom) {
                 if (!userHasRole(message, custom.role)) {
-                    return { kind: 'unauthorized', channel, command: custom.cmd, sent: false };
+                    trace.markRejected('access denied');
+                    return finish(
+                        { kind: 'unauthorized', channel, command: custom.cmd, sent: false },
+                        'rejected',
+                        'access denied'
+                    );
                 }
 
                 const cooldown = this.cooldowns.checkAndConsume(channel);
                 if (cooldown.onCooldown) {
-                    return {
+                    trace.markRejected(`cooldown active (${cooldown.remaining}s remaining)`);
+                    return finish({
                         kind: 'cooldown',
                         channel,
                         command: custom.cmd,
                         sent: false,
                         remaining: cooldown.remaining
-                    };
+                    }, 'rejected', 'cooldown active');
                 }
 
                 const reply = await this.#deliverResponse(transport, {
                     channel,
                     text: custom.response,
-                    trigger: message
+                    trigger: message,
+                    trace
                 });
-                return {
+                return finish({
                     kind: 'custom',
                     channel,
                     command: custom.cmd,
                     sent: true,
                     reply
-                };
+                });
             }
 
             // 3. Media command matching
@@ -598,9 +636,14 @@ export class ChatRouter {
                 if (media.enabled === false) {
                     const safeReply = this.#safeErrorReply('MEDIA_COMMAND_DISABLED');
                     const reply = transport && safeReply
-                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message })
+                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message, trace })
                         : '';
-                    return { kind: 'media_disabled', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined };
+                    trace.markRejected('media command disabled');
+                    return finish(
+                        { kind: 'media_disabled', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined },
+                        'rejected',
+                        'media command disabled'
+                    );
                 }
 
                 const access = this.mediaCommands?.[media.mediaType]?.access
@@ -609,9 +652,14 @@ export class ChatRouter {
                 if (!mediaAccessAllowed(message, access)) {
                     const safeReply = this.#safeErrorReply('MEDIA_ACCESS_DENIED');
                     const reply = transport && safeReply
-                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message })
+                        ? await this.#deliverResponse(transport, { channel, text: safeReply, trigger: message, trace })
                         : '';
-                    return { kind: 'media_denied', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined };
+                    trace.markRejected('media access denied');
+                    return finish(
+                        { kind: 'media_denied', channel, command: media.cmd, mediaType: media.mediaType, sent: Boolean(reply), reply: reply || undefined },
+                        'rejected',
+                        'media access denied'
+                    );
                 }
 
                 const prompt = this.matcher.mediaPrompt(text, media.cmd);
@@ -619,10 +667,12 @@ export class ChatRouter {
                 if (prompt) {
                     const cooldown = this.cooldowns.checkAndConsume(channel);
                     if (cooldown.onCooldown) {
-                        return this.#sendCooldown(transport, channel, cooldown, {
+                        const cooldownResult = await this.#sendCooldown(transport, channel, cooldown, {
                             command: media.cmd,
                             mediaType: media.mediaType
-                        }, message);
+                        }, message, trace);
+                        trace.markRejected('cooldown active');
+                        return finish(cooldownResult, 'rejected', 'cooldown active');
                     }
                 }
 
@@ -632,12 +682,14 @@ export class ChatRouter {
                     prompt,
                     mediaType: media.mediaType,
                     command: media.cmd,
-                    conversationPrompt
+                    conversationPrompt,
+                    trace
                 });
                 const reply = await this.#deliverResponse(transport, {
                     channel,
                     text: result.replyText,
-                    trigger: message
+                    trigger: message,
+                    trace
                 });
                 if (result.success) {
                     this.aiEngine.commitConversationTurn(channel, {
@@ -645,7 +697,7 @@ export class ChatRouter {
                         modelParts: [{ text: reply }]
                     });
                 }
-                return {
+                const routeResult = {
                     kind: 'media',
                     channel,
                     command: media.cmd,
@@ -653,18 +705,38 @@ export class ChatRouter {
                     sent: true,
                     reply
                 };
+                if (!result.success) {
+                    const outcome = result.traceOutcome === 'rejected' ? 'rejected' : 'failed';
+                    const reason = result.traceReason || (outcome === 'rejected' ? 'media request rejected' : 'media generation failed');
+                    return finish(routeResult, outcome, reason);
+                }
+                return finish(routeResult);
             }
 
             // 4. AI conversational command matching
             if (invocation.kind === 'ai') {
                 if (isEmoteOnly && this.ignoreEmoteOnlyPrompts) {
                     console.log(`Command ${aiCommand} ignored: emote-only message`);
-                    return { kind: 'emote_only', channel, command: aiCommand, sent: false };
+                    trace.markRejected('emote-only prompt ignored');
+                    return finish(
+                        { kind: 'emote_only', channel, command: aiCommand, sent: false },
+                        'rejected',
+                        'emote-only prompt ignored'
+                    );
                 }
 
                 const cooldown = this.cooldowns.checkAndConsume(channel);
                 if (cooldown.onCooldown) {
-                    return this.#sendCooldown(transport, channel, cooldown, { command: aiCommand }, message);
+                    const cooldownResult = await this.#sendCooldown(
+                        transport,
+                        channel,
+                        cooldown,
+                        { command: aiCommand },
+                        message,
+                        trace
+                    );
+                    trace.markRejected('cooldown active');
+                    return finish(cooldownResult, 'rejected', 'cooldown active');
                 }
 
                 const { channelContext, recentLogs } = await transport.getContext(channel, {
@@ -681,31 +753,37 @@ export class ChatRouter {
                         loginName: message.loginName,
                         isBroadcaster: !!message.isBroadcaster,
                         isMod: !!message.isMod
-                    }
+                    },
+                    trace
                 });
                 const reply = await this.#deliverResponse(transport, {
                     channel,
                     text: rawResponse,
                     trigger: message,
-                    decorateAi: true
+                    decorateAi: true,
+                    trace
                 });
-                return { kind: 'ai', channel, command: aiCommand, sent: true, reply };
+                return finish({ kind: 'ai', channel, command: aiCommand, sent: true, reply });
             }
 
-            return { kind: 'none', channel, sent: false };
+            trace.markRejected('recognized route did not dispatch');
+            return finish({ kind: 'none', channel, sent: false }, 'rejected', 'recognized route did not dispatch');
         } catch (error) {
             console.error('[ChatRouter] Failed to handle chat message:', error);
-            return this.#sendSafeError(transport, channel, error, message);
+            trace?.markFailed(error?.message || String(error));
+            const result = await this.#sendSafeError(transport, channel, error, message, trace);
+            trace?.terminal('failed', error?.message || String(error));
+            return result;
         }
     }
 
-    async #sendCooldown(transport, channel, cooldown, extra = {}, trigger = {}) {
+    async #sendCooldown(transport, channel, cooldown, extra = {}, trigger = {}, trace = null) {
         const reply = this.errorHandler?.format?.('COOLDOWN_ACTIVE', {
             remainingTime: cooldown.remaining
         });
 
         if (transport && reply) {
-            const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger });
+            const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger, trace });
             return {
                 kind: 'cooldown',
                 channel,
@@ -725,11 +803,11 @@ export class ChatRouter {
         };
     }
 
-    async #sendSafeError(transport, channel, error, trigger = {}) {
+    async #sendSafeError(transport, channel, error, trigger = {}, trace = null) {
         try {
             const reply = this.#safeErrorReply(error);
             if (transport && reply) {
-                const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger });
+                const delivered = await this.#deliverResponse(transport, { channel, text: reply, trigger, trace });
                 return { kind: 'error', channel, sent: true, reply: delivered, error: error?.message };
             }
             return { kind: 'error', channel, sent: false, reply: reply || undefined, error: error?.message };

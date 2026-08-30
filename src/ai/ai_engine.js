@@ -12,8 +12,6 @@ const YT_ID_RE = /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-
 const YT_URL_RE = /(https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)[\w-]+|https?:\/\/youtu\.be\/[\w-]+)/;
 const URL_RE = /(https?:\/\/[^\s]+)/g;
 
-const VERBOSE_INLINE_DATA_PREFIX = 32;
-
 // ANSI color codes for formatted console output
 const COLORS = {
     reset: '\x1b[0m',
@@ -54,8 +52,7 @@ export class AIEngine {
         imageDownloader = null,
         fetchImpl = (...a) => globalThis.fetch(...a),
         clientFactory = (options) => new GoogleGenAI(options),
-        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS,
-        verbose = false
+        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS
     } = {}) {
         this.googleBackend = googleBackend;
         this.#clients = googleBackend?.kind === 'vertex'
@@ -86,8 +83,6 @@ export class AIEngine {
         this.modelAttemptTimeoutMs = Number(modelAttemptTimeoutMs) > 0
             ? Number(modelAttemptTimeoutMs)
             : DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS;
-        this.verbose = verbose;
-
         this.currentKeyIndex = 0;
         this.histories = new Map();
 
@@ -368,7 +363,7 @@ export class AIEngine {
     /**
      * Executes generation call via the Google GenAI SDK.
      */
-    async #executeModelCall({ contents, systemInstruction, safetySettings, tools, keyIndex }) {
+    async #executeModelCall({ contents, systemInstruction, safetySettings, tools, keyIndex, trace }) {
         const config = {
             maxOutputTokens: 8192,
             thinkingConfig: {
@@ -384,29 +379,33 @@ export class AIEngine {
             }
         };
 
-        if (this.verbose) {
-            this.#logVerboseRequest({ contents, config });
-        }
-
         const client = this.#clients[keyIndex];
+        const request = {
+            model: this.modelName,
+            contents,
+            config
+        };
+        const call = trace?.nextGeminiCall?.() || 0;
+        const started = performance.now();
+        trace?.event?.('gemini.request', { call, request });
         let result;
         try {
-            result = await client.models.generateContent({
-                model: this.modelName,
-                contents,
-                config
-            });
+            result = await client.models.generateContent(request);
         } catch (error) {
+            trace?.event?.('gemini.failed', {
+                call,
+                durationMs: performance.now() - started,
+                reason: error?.message || String(error)
+            });
             if (error?.name === 'AbortError') {
                 throw new BotError('FETCH_TIMEOUT', { cause: error });
             }
             throw error;
         }
 
-        if (this.verbose) {
-            this.#logVerboseResponse(result);
-        }
-        return result;
+        const durationMs = performance.now() - started;
+        trace?.event?.('gemini.response', { call, response: result });
+        return { result, call, durationMs };
     }
 
     #classifyModelError(error) {
@@ -437,7 +436,8 @@ export class AIEngine {
         safetySettings,
         tools,
         generationState,
-        disableGoogleGrounding
+        disableGoogleGrounding,
+        trace
     }) {
         const startingKeyIndex = this.currentKeyIndex;
         const failures = [];
@@ -452,19 +452,20 @@ export class AIEngine {
             const attempt = async () => {
                 const attemptStarted = Date.now();
                 try {
-                    const result = await this.#executeModelCall({
+                    const completed = await this.#executeModelCall({
                         contents,
                         systemInstruction: attemptSystemInstruction,
                         safetySettings,
                         tools: attemptTools,
-                        keyIndex
+                        keyIndex,
+                        trace
                     });
-                    if (this.verbose) {
-                        console.log(
-                            `   ${COLORS.green}✓ Model turn${COLORS.reset} on key #${keyIndex + 1} after ${this.#attemptDuration(attemptStarted)}`
-                        );
-                    }
-                    return { result, error: null, started: attemptStarted };
+                    trace?.event?.('gemini.attempt.succeeded', {
+                        call: completed.call,
+                        keySlot: keyIndex + 1,
+                        durationMs: completed.durationMs
+                    });
+                    return { result: completed.result, error: null, started: attemptStarted };
                 } catch (error) {
                     return { result: null, error, started: attemptStarted };
                 }
@@ -617,52 +618,6 @@ export class AIEngine {
         console.log(`\n   ${color}─── ${title} ───${COLORS.reset}`);
     }
 
-    /**
-     * Clones a request tree and replaces inlineData.data with a short
-     * prefix + character count so verbose dumps cannot flood the terminal.
-     * Leaves text, thoughtSignature, functionCall, functionResponse, and fileData untouched.
-     */
-    #sanitizeInlineData(value) {
-        if (Array.isArray(value)) {
-            return value.map((item) => this.#sanitizeInlineData(item));
-        }
-        if (!value || typeof value !== 'object') {
-            return value;
-        }
-
-        const out = {};
-        for (const [key, child] of Object.entries(value)) {
-            if (key === 'inlineData' && child && typeof child === 'object' && typeof child.data === 'string') {
-                const data = child.data;
-                out[key] = {
-                    ...child,
-                    data: `${data.slice(0, VERBOSE_INLINE_DATA_PREFIX)}... [${data.length.toLocaleString('en-US')} chars]`
-                };
-                continue;
-            }
-            out[key] = this.#sanitizeInlineData(child);
-        }
-        return out;
-    }
-
-    #logVerboseRequest({ contents, config }) {
-        const { systemInstruction, ...restConfig } = config;
-        this.#logSubsection('Raw Request');
-        console.log(`   ${COLORS.dim}System Instruction:${COLORS.reset}`);
-        for (const line of String(systemInstruction ?? '').split('\n')) {
-            console.log(`   ${line}`);
-        }
-        console.log(JSON.stringify({
-            contents: this.#sanitizeInlineData(contents),
-            ...restConfig
-        }, null, 2));
-    }
-
-    #logVerboseResponse(result) {
-        this.#logSubsection('Raw Response');
-        console.log(JSON.stringify(result, null, 2));
-    }
-
     async #runOnce(prompt, {
         channel,
         channelContext,
@@ -674,7 +629,8 @@ export class AIEngine {
         overrideFileContext,
         caller,
         recordMemory,
-        started
+        started,
+        trace
     }) {
         this.#logHeader('GEMINI REQUEST');
         console.log(`   ${COLORS.dim}Model:${COLORS.reset} ${this.modelName} ${COLORS.dim}│ Grounding:${COLORS.reset} ${this.searchGrounding} ${COLORS.dim}│ Thinking:${COLORS.reset} ${this.thinkingLevel}`);
@@ -757,7 +713,7 @@ export class AIEngine {
             const loop = await this.#toolDispatcher.executeTurnLoop({
                 contents,
                 tools: activeTools,
-                context: { channel, channelContext, caller },
+                context: { channel, channelContext, caller, trace },
                 invokeModel: async ({ contents: turnContents, tools: turnTools }) => {
                     const turnResult = await this.#executeModelTurn({
                         contents: turnContents,
@@ -765,7 +721,8 @@ export class AIEngine {
                         safetySettings,
                         tools: turnTools,
                         generationState,
-                        disableGoogleGrounding
+                        disableGoogleGrounding,
+                        trace
                     });
                     this.#logTurnParts(turnResult);
                     return turnResult;
@@ -785,6 +742,7 @@ export class AIEngine {
         if (result?.toolError) {
             const key = result.errorKey || 'HELIX_ACTION_FAILED';
             const errMsg = this.errorHandler.format(key);
+            trace?.markFailed?.(key);
             console.log(`   ${COLORS.red}✗ Tool Error:${COLORS.reset} ${errMsg} (${key})`);
             this.#logFooter();
             return errMsg;
@@ -798,6 +756,7 @@ export class AIEngine {
                 blockReason: result.promptFeedback.blockReason,
                 promptFeedback: result.promptFeedback
             });
+            trace?.markRejected?.(`Gemini blocked prompt: ${result.promptFeedback.blockReason}`);
             console.log(`   ${COLORS.red}✗ Blocked:${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -811,6 +770,7 @@ export class AIEngine {
                 finishReason,
                 safetyRatings
             });
+            trace?.markRejected?.(`Gemini safety finish: ${finishReason}`);
             console.log(`   ${COLORS.red}✗ Safety:${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -824,6 +784,7 @@ export class AIEngine {
                 console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Model returned thoughts but no final response`);
             }
             const errMsg = this.errorHandler.format('GEMINI_EMPTY_RESPONSE');
+            trace?.markFailed?.('Gemini returned no final response');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -854,7 +815,8 @@ export class AIEngine {
                     safetySettings,
                     tools: this.#toolDispatcher.withoutFunctionDeclarations(activeTools),
                     generationState,
-                    disableGoogleGrounding
+                    disableGoogleGrounding,
+                    trace
                 });
                 const retryExtracted = this.#extractCandidateContent(retryResult);
                 const retryTextPart = retryExtracted.winningTextPart;
@@ -874,6 +836,7 @@ export class AIEngine {
 
         if (!agentResponse || !agentResponse.trim()) {
             const errMsg = this.errorHandler.format('GEMINI_EMPTY_RESPONSE');
+            trace?.markFailed?.('Gemini returned an empty response');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
             this.#logFooter();
             return errMsg;
@@ -963,7 +926,8 @@ export class AIEngine {
         disableMultimedia = false,
         disableTools = false,
         caller = null,
-        recordMemory = true
+        recordMemory = true,
+        trace = null
     } = {}) {
         const started = Date.now();
 
@@ -981,9 +945,11 @@ export class AIEngine {
                 overrideFileContext,
                 caller,
                 recordMemory,
-                started
+                started,
+                trace
             });
         } catch (error) {
+            trace?.markFailed?.(error?.message || String(error));
             this.#logFooter();
             return this.errorHandler.format(error);
         }
