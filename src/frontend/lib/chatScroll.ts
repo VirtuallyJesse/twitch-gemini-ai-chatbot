@@ -8,6 +8,8 @@ export interface ChatViewportMetrics {
   clientHeight: number;
 }
 
+export interface ChatScrollViewport extends ChatScrollMetrics, ChatViewportMetrics {}
+
 const CHAT_SCROLL_ROOM = 24;
 
 export interface ChatScrollAnchor {
@@ -24,5 +26,16 @@ export function restoreChatAnchor(scroller: ChatScrollMetrics, anchor: ChatScrol
 }
 
 export function chatViewportNeedsFill(viewport: ChatViewportMetrics): boolean {
-  return viewport.scrollHeight - viewport.clientHeight < CHAT_SCROLL_ROOM;
+  return (
+    viewport.clientHeight > 0 && viewport.scrollHeight - viewport.clientHeight < CHAT_SCROLL_ROOM
+  );
+}
+
+export function syncChatViewportAfterResize(
+  viewport: ChatScrollViewport,
+  pinnedToLatest: boolean,
+): boolean {
+  if (viewport.clientHeight <= 0) return false;
+  if (pinnedToLatest) viewport.scrollTop = viewport.scrollHeight;
+  return chatViewportNeedsFill(viewport);
 }

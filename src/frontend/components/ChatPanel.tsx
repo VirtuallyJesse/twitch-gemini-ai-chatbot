@@ -31,6 +31,7 @@ import {
   captureChatAnchor,
   chatViewportNeedsFill,
   restoreChatAnchor,
+  syncChatViewportAfterResize,
   type ChatScrollAnchor,
 } from '../lib/chatScroll';
 
@@ -344,11 +345,12 @@ export default function ChatPanel({
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
-      if (canRevealCached && chatViewportNeedsFill(el)) loadOlder();
+      const needsFill = syncChatViewportAfterResize(el, atBottom);
+      if (canRevealCached && needsFill) loadOlder();
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [canRevealCached, loadOlder]);
+  }, [atBottom, canRevealCached, loadOlder]);
 
   const onScroll = () => {
     const el = scrollRef.current;
