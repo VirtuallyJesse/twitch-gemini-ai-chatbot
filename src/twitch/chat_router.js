@@ -245,7 +245,6 @@ function addLeadingTargetTag(text, actor) {
 }
 
 export class ChatRouter {
-    #communityGifts = new Map();
     #systemInstructions = '';
 
     /**
@@ -262,7 +261,6 @@ export class ChatRouter {
         cooldownDuration = 1,
         chatContextLength = 10,
         maxMessageLength = 499,
-        communityGiftWindowMs = 30_000,
         prefixes = {},
         mediaCommands = null,
         replyMode = 'off',
@@ -286,7 +284,6 @@ export class ChatRouter {
         this.maxMessageLength = maxMessageLength;
         this.replyMode = normalizeReplyMode(replyMode);
         this.ignoreEmoteOnlyPrompts = ignoreEmoteOnlyPrompts !== false;
-        this.communityGiftWindowMs = communityGiftWindowMs;
         this.transport = null;
 
         this.#systemInstructions = typeof systemInstructions === 'string' ? systemInstructions : FACTORY.system_instructions;
@@ -314,7 +311,6 @@ export class ChatRouter {
         } else {
             this.matcher = new CommandMatcher(this.prefixLists.ai, entriesFromPrefixLists(this.prefixLists));
         }
-        this.#communityGifts = new Map();
     }
 
     /**
@@ -780,24 +776,11 @@ export class ChatRouter {
                 return { kind: 'threshold', channel, eventKind, sent: false };
             }
 
-            if (eventKind === 'sub_gift' && this.#consumeCommunityGift(channel, event.user)) {
-                return { kind: 'suppressed', channel, eventKind, sent: false, reason: 'community_gift' };
-            }
-
             const cooldown = this.eventCooldowns.checkAndConsume(
                 channel, eventKind, Number(policy.cooldown_seconds) || 0
             );
             if (cooldown.onCooldown) {
                 return { kind: 'cooldown', channel, eventKind, sent: false, remaining: cooldown.remaining };
-            }
-
-            if (eventKind === 'community_sub_gift') {
-                const key = this.#giftBombKey(channel, event.user);
-                const count = Number(event.details?.count) || 1;
-                this.#communityGifts.set(key, {
-                    count,
-                    expiresAt: this.clock() + this.communityGiftWindowMs
-                });
             }
 
             const vars = eventVars(event);
@@ -945,25 +928,6 @@ export class ChatRouter {
         }
     }
 
-    #giftBombKey(channel, user) {
-        const userIdentifier = user?.id || cleanName(user?.login) || 'anonymous';
-        return `${channelKey(channel)}:${userIdentifier}`;
-    }
-
-    #consumeCommunityGift(channel, user) {
-        const key = this.#giftBombKey(channel, user);
-        const bomb = this.#communityGifts.get(key);
-        if (!bomb) return false;
-        if (this.clock() >= bomb.expiresAt || bomb.count <= 0) {
-            this.#communityGifts.delete(key);
-            return false;
-        }
-        bomb.count--;
-        if (bomb.count <= 0) {
-            this.#communityGifts.delete(key);
-        }
-        return true;
-    }
 }
 
 export default ChatRouter;

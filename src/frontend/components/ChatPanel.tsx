@@ -199,7 +199,7 @@ function LinkBanner({ channel, onLink }: { channel: string; onLink: () => void }
         <span className="text-[12px] font-semibold text-ink">Broadcaster not linked</span>
       </div>
       <p className="mt-1 text-[11.5px] leading-snug text-muted">
-        Alerts and mod commands stay off until #{chanName} is linked.
+        Some alerts and channel controls stay off until #{chanName} is linked.
       </p>
       <button
         onClick={onLink}

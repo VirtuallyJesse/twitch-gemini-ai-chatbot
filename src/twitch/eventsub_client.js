@@ -3,8 +3,8 @@
 // Deep module owning Twitch EventSub WebSocket lifecycle, event normalization,
 // message deduplication, and Helix subscription synchronization. Two session
 // families share one private WebSocket engine: isolated per-broadcaster
-// sessions for alert events (broadcaster tokens) and one shared bot-token
-// session observing `channel.chat.message` across every joined channel.
+// sessions for privileged alert events (broadcaster tokens) and one shared
+// bot-token session for public/bot-authorized events across joined channels.
 // Pure dependencies: reads zero process.env.
 
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
@@ -65,40 +65,57 @@ function normalizeNotification(message, nowFn) {
     const base = { id, channel, broadcasterUserId, occurredAt };
 
     switch (type) {
-        case 'channel.subscribe': {
-            if (event.is_gift) {
-                return null;
+        case 'channel.chat.notification': {
+            const noticeType = event.notice_type;
+            const user = actorFrom(event, {
+                anonymous: !!event.chatter_is_anonymous,
+                prefix: 'chatter_user'
+            });
+            if (noticeType === 'sub') {
+                return {
+                    ...base,
+                    kind: 'subscription',
+                    user,
+                    details: {
+                        tier: mapTier(event.sub?.sub_tier),
+                        message: event.message?.text || ''
+                    }
+                };
             }
-            const user = actorFrom(event);
-            return { ...base, kind: 'subscription', user, details: { tier: mapTier(event.tier) } };
-        }
-        case 'channel.subscription.message':
-            return {
-                ...base,
-                kind: 'resub',
-                user: actorFrom(event),
-                details: {
-                    tier: mapTier(event.tier),
-                    months: Number(event.cumulative_months) || 0,
-                    streak: Number(event.streak_months) || 0,
-                    message: event.message?.text || ''
-                }
-            };
-        case 'channel.subscription.gift': {
-            const count = Number(event.total) || 1;
-            const recipient = (event.recipient_user_id || event.recipient_user_name || event.recipient_user_login)
-                ? actorFrom(event, { prefix: 'recipient_user' })
-                : undefined;
-            return {
-                ...base,
-                kind: count > 1 ? 'community_sub_gift' : 'sub_gift',
-                user: actorFrom(event, { anonymous: !!event.is_anonymous }),
-                details: {
-                    tier: mapTier(event.tier),
-                    count,
-                    ...(recipient ? { recipient } : {})
-                }
-            };
+            if (noticeType === 'resub') {
+                return {
+                    ...base,
+                    kind: 'resub',
+                    user,
+                    details: {
+                        tier: mapTier(event.resub?.sub_tier),
+                        months: Number(event.resub?.cumulative_months) || 0,
+                        streak: event.resub?.streak_months == null ? '' : Number(event.resub.streak_months),
+                        message: event.message?.text || ''
+                    }
+                };
+            }
+            if (noticeType === 'sub_gift') {
+                const gift = event.sub_gift || {};
+                if (gift.community_gift_id != null && String(gift.community_gift_id).trim()) return null;
+                const recipient = actorFrom(gift, { prefix: 'recipient_user' });
+                return {
+                    ...base,
+                    kind: 'sub_gift',
+                    user,
+                    details: { tier: mapTier(gift.sub_tier), recipient }
+                };
+            }
+            if (noticeType === 'community_sub_gift') {
+                const gift = event.community_sub_gift || {};
+                return {
+                    ...base,
+                    kind: 'community_sub_gift',
+                    user,
+                    details: { tier: mapTier(gift.sub_tier), count: Number(gift.total) || 1 }
+                };
+            }
+            return null;
         }
         case 'channel.cheer':
             return {
@@ -137,17 +154,13 @@ function normalizeNotification(message, nowFn) {
     }
 }
 
-const SUBSCRIPTION_SPECS = [
-    { type: 'channel.subscribe', version: '1', condition: (id) => ({ broadcaster_user_id: id }) },
-    { type: 'channel.subscription.gift', version: '1', condition: (id) => ({ broadcaster_user_id: id }) },
-    { type: 'channel.subscription.message', version: '1', condition: (id) => ({ broadcaster_user_id: id }) },
+const BROADCASTER_SUBSCRIPTION_SPECS = [
     { type: 'channel.cheer', version: '1', condition: (id) => ({ broadcaster_user_id: id }) },
     {
         type: 'channel.channel_points_custom_reward_redemption.add',
         version: '1',
         condition: (id) => ({ broadcaster_user_id: id })
     },
-    { type: 'channel.raid', version: '1', condition: (id) => ({ to_broadcaster_user_id: id }) },
     {
         type: 'channel.follow',
         version: '2',
@@ -156,7 +169,29 @@ const SUBSCRIPTION_SPECS = [
 ];
 
 const BOT_CHAT_SUBSCRIPTION_TYPE = 'channel.chat.message';
-const BOT_CHAT_SUBSCRIPTION_VERSION = '1';
+const PUBLIC_SUBSCRIPTION_SPECS = [
+    {
+        type: BOT_CHAT_SUBSCRIPTION_TYPE,
+        version: '1',
+        condition: (broadcasterId, botUserId) => ({ broadcaster_user_id: broadcasterId, user_id: botUserId })
+    },
+    {
+        type: 'channel.chat.notification',
+        version: '1',
+        condition: (broadcasterId, botUserId) => ({ broadcaster_user_id: broadcasterId, user_id: botUserId })
+    },
+    {
+        type: 'channel.raid',
+        version: '1',
+        condition: (broadcasterId) => ({ to_broadcaster_user_id: broadcasterId })
+    }
+];
+
+function matchesSubscription(sub, spec, broadcasterId, botUserId) {
+    if (sub?.type !== spec.type || sub?.transport?.method !== 'websocket') return false;
+    const expected = spec.condition(broadcasterId, botUserId);
+    return Object.entries(expected).every(([key, value]) => String(sub?.condition?.[key] || '') === String(value));
+}
 
 /**
  * Normalizes a bot-session `channel.chat.message` notification into the
@@ -562,7 +597,7 @@ class BroadcasterSession {
     async applySubscriptions() {
         const desired = this.#desired;
         if (!desired || !this.#lifecycle.sessionId) return;
-        for (const spec of SUBSCRIPTION_SPECS) {
+        for (const spec of BROADCASTER_SUBSCRIPTION_SPECS) {
             try {
                 await this.#helix.request('/eventsub/subscriptions', {
                     method: 'POST',
@@ -594,29 +629,29 @@ class BroadcasterSession {
 }
 
 /**
- * Shared bot-token chat session. One WebSocket carries
- * `channel.chat.message` subscriptions for every joined channel; access
- * tokens resolve fresh through `getAccessToken` because bot tokens rotate.
+ * Shared public/bot-authorized session. One WebSocket carries every public
+ * subscription spec for every joined channel; access tokens resolve fresh
+ * through `getAccessToken` because bot tokens rotate.
  * The socket exists only while at least one desired channel remains:
  * the first addition connects it, the final removal stops it terminally.
  */
-class BotChatSession {
+class PublicEventSession {
     #botUserId;
     #getAccessToken;
     #helix;
     #lifecycle;
     #desired = new Map(); // broadcasterUserId -> login
-    #appliedIn = new Map(); // broadcasterUserId -> sessionId already subscribed
+    #appliedIn = new Map(); // broadcasterUserId:type -> sessionId already subscribed
 
-    constructor({ helix, botUserId, getAccessToken, onChatMessage, lifecycle }) {
+    constructor({ helix, botUserId, getAccessToken, onNotification, lifecycle }) {
         this.#helix = helix;
         this.#botUserId = String(botUserId || '');
         this.#getAccessToken = getAccessToken;
         this.#lifecycle = new WebSocketSession({
             ...lifecycle,
-            onNotification: (message) => onChatMessage(message),
+            onNotification,
             onResubscribe: () => this.applySubscriptions().catch((err) => {
-                console.warn('[EventSub] Failed to re-subscribe bot chat on reconnect:', err?.message || err);
+                console.warn('[EventSub] Failed to re-subscribe public events on reconnect:', err?.message || err);
             })
         });
     }
@@ -652,49 +687,58 @@ class BotChatSession {
     async applySubscriptions() {
         const sessionId = this.#lifecycle.sessionId;
         if (!sessionId || this.#desired.size === 0) return;
-        const pending = [...this.#desired.keys()].filter((id) => this.#appliedIn.get(id) !== sessionId);
+        const pending = [...this.#desired.keys()].flatMap((broadcasterUserId) =>
+            PUBLIC_SUBSCRIPTION_SPECS
+                .filter((spec) => this.#appliedIn.get(this.#appliedKey(broadcasterUserId, spec)) !== sessionId)
+                .map((spec) => ({ broadcasterUserId, spec }))
+        );
         if (pending.length === 0) return;
         let token = null;
         try {
             token = await this.#getAccessToken();
         } catch (err) {
-            console.warn('[EventSub] Bot chat subscription token unavailable:', err?.message || err);
+            console.warn('[EventSub] Public EventSub token unavailable:', err?.message || err);
             return;
         }
-        for (const broadcasterUserId of pending) {
+        for (const { broadcasterUserId, spec } of pending) {
             const login = this.#desired.get(broadcasterUserId);
             try {
-                await this.#createSubscription(token, broadcasterUserId, sessionId);
-                this.#appliedIn.set(broadcasterUserId, sessionId);
+                await this.#createSubscription(token, broadcasterUserId, sessionId, spec);
+                this.#markApplied(broadcasterUserId, spec, sessionId);
             } catch (err) {
                 const status = err?.status;
                 if (status === 401 || status === 403) {
-                    console.warn(`[EventSub] Skipping ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login}: missing scope (${status})`);
+                    console.warn(`[EventSub] Skipping ${spec.type} for ${login}: missing scope (${status})`);
                     continue;
                 }
                 if (status === 409) {
-                    await this.#recoverFromConflict(token, broadcasterUserId, login, sessionId);
+                    await this.#recoverFromConflict(token, broadcasterUserId, login, sessionId, spec);
                     continue;
                 }
                 console.warn(
-                    `[EventSub] Failed to subscribe ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login}:`,
+                    `[EventSub] Failed to subscribe ${spec.type} for ${login}:`,
                     err?.message || err
                 );
             }
         }
     }
 
-    #createSubscription(token, broadcasterUserId, sessionId) {
+    #appliedKey(broadcasterUserId, spec) {
+        return `${broadcasterUserId}:${spec.type}`;
+    }
+
+    #markApplied(broadcasterUserId, spec, sessionId) {
+        this.#appliedIn.set(this.#appliedKey(broadcasterUserId, spec), sessionId);
+    }
+
+    #createSubscription(token, broadcasterUserId, sessionId, spec) {
         return this.#helix.request('/eventsub/subscriptions', {
             method: 'POST',
             accessToken: token,
             body: {
-                type: BOT_CHAT_SUBSCRIPTION_TYPE,
-                version: BOT_CHAT_SUBSCRIPTION_VERSION,
-                condition: {
-                    broadcaster_user_id: broadcasterUserId,
-                    user_id: this.#botUserId
-                },
+                type: spec.type,
+                version: spec.version,
+                condition: spec.condition(broadcasterUserId, this.#botUserId),
                 transport: { method: 'websocket', session_id: sessionId }
             }
         });
@@ -708,24 +752,24 @@ class BotChatSession {
      * unapplied so the next reconnect resync retries it - never marked applied
      * merely to silence the error.
      */
-    async #recoverFromConflict(token, broadcasterUserId, login, sessionId) {
+    async #recoverFromConflict(token, broadcasterUserId, login, sessionId, spec) {
         let matches;
         try {
-            matches = await this.#findChatSubscriptions(token, broadcasterUserId);
+            matches = await this.#findSubscriptions(token, broadcasterUserId, spec);
         } catch (err) {
-            console.warn(`[EventSub] Failed to inspect conflicting ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login}:`, err?.message || err);
+            console.warn(`[EventSub] Failed to inspect conflicting ${spec.type} for ${login}:`, err?.message || err);
             return false;
         }
 
         if (matches.some((sub) => sub?.status === 'enabled' && String(sub?.transport?.session_id || '') === sessionId)) {
-            this.#appliedIn.set(broadcasterUserId, sessionId);
+            this.#markApplied(broadcasterUserId, spec, sessionId);
             return true;
         }
 
         const staleIds = matches.map((sub) => sub?.id).filter(Boolean);
         if (staleIds.length === 0) {
             console.warn(
-                `[EventSub] Conflicting ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login} has no inspectable subscription; leaving unapplied`
+                `[EventSub] Conflicting ${spec.type} for ${login} has no inspectable subscription; leaving unapplied`
             );
             return false;
         }
@@ -746,19 +790,19 @@ class BotChatSession {
         }
 
         try {
-            await this.#createSubscription(token, broadcasterUserId, sessionId);
+            await this.#createSubscription(token, broadcasterUserId, sessionId, spec);
         } catch (err) {
             console.warn(
-                `[EventSub] Failed to re-create ${BOT_CHAT_SUBSCRIPTION_TYPE} for ${login} after stale cleanup:`,
+                `[EventSub] Failed to re-create ${spec.type} for ${login} after stale cleanup:`,
                 err?.message || err
             );
             return false;
         }
-        this.#appliedIn.set(broadcasterUserId, sessionId);
+        this.#markApplied(broadcasterUserId, spec, sessionId);
         return true;
     }
 
-    async #findChatSubscriptions(token, broadcasterUserId) {
+    async #findSubscriptions(token, broadcasterUserId, spec) {
         const matches = [];
         let after = '';
         do {
@@ -767,10 +811,7 @@ class BotChatSession {
                 accessToken: token
             });
             for (const sub of page?.data || []) {
-                if (sub?.type !== BOT_CHAT_SUBSCRIPTION_TYPE) continue;
-                if (sub?.transport?.method !== 'websocket') continue;
-                if (String(sub?.condition?.broadcaster_user_id || '') !== broadcasterUserId) continue;
-                if (String(sub?.condition?.user_id || '') !== this.#botUserId) continue;
+                if (!matchesSubscription(sub, spec, broadcasterUserId, this.#botUserId)) continue;
                 matches.push(sub);
             }
             after = page?.pagination?.cursor || '';
@@ -787,14 +828,16 @@ class BotChatSession {
     async removeChannel(broadcasterUserId) {
         const id = String(broadcasterUserId ?? '');
         this.#desired.delete(id);
-        this.#appliedIn.delete(id);
+        for (const spec of PUBLIC_SUBSCRIPTION_SPECS) {
+            this.#appliedIn.delete(this.#appliedKey(id, spec));
+        }
         if (!id || !this.#botUserId) return;
 
         let token = null;
         try {
             token = await this.#getAccessToken();
         } catch (err) {
-            console.warn('[EventSub] Bot chat unsubscription token unavailable:', err?.message || err);
+            console.warn('[EventSub] Public EventSub unsubscription token unavailable:', err?.message || err);
             return;
         }
 
@@ -807,13 +850,14 @@ class BotChatSession {
                     accessToken: token
                 });
             } catch (err) {
-                console.warn('[EventSub] Failed to list bot chat subscriptions:', err?.message || err);
+                console.warn('[EventSub] Failed to list public EventSub subscriptions:', err?.message || err);
                 return;
             }
             for (const sub of page?.data || []) {
-                if (sub?.type !== BOT_CHAT_SUBSCRIPTION_TYPE) continue;
-                if (sub?.transport?.method !== 'websocket') continue;
-                if (String(sub?.condition?.broadcaster_user_id || '') !== id) continue;
+                const spec = PUBLIC_SUBSCRIPTION_SPECS.find((candidate) =>
+                    matchesSubscription(sub, candidate, id, this.#botUserId)
+                );
+                if (!spec) continue;
                 if (!sub?.id) continue;
                 try {
                     await this.#helix.request('/eventsub/subscriptions', {
@@ -823,7 +867,7 @@ class BotChatSession {
                     });
                 } catch (err) {
                     if (err?.status !== 404) {
-                        console.warn(`[EventSub] Failed to delete bot chat subscription ${sub.id}:`, err?.message || err);
+                        console.warn(`[EventSub] Failed to delete ${spec.type} subscription ${sub.id}:`, err?.message || err);
                     }
                 }
             }
@@ -851,7 +895,7 @@ export class EventSubClient {
     #dedupeMap = new Map();
     #stopped = false;
 
-    #botSession = null;
+    #publicSession = null;
     #botUserId = null;
     #botTokenProvider = null;
     #botChatHandlers = [];
@@ -923,8 +967,8 @@ export class EventSubClient {
             session.teardown();
         }
         this.#sessions.clear();
-        this.#botSession?.teardown();
-        this.#botSession = null;
+        this.#publicSession?.teardown();
+        this.#publicSession = null;
     }
 
     async subscribeChannel({ broadcasterUserId, broadcasterChannel, accessToken, moderatorUserId }) {
@@ -961,27 +1005,27 @@ export class EventSubClient {
     }
 
     /**
-     * Records the bot identity and token provider for the shared chat
-     * session. Configuration only: no socket opens until the first desired
-     * channel arrives, so a bot with zero joined channels never holds an
-     * idle socket Twitch would close for lack of subscriptions.
+     * Configures the shared public/bot-authorized session. It owns
+     * `channel.chat.message`, `channel.chat.notification`, and `channel.raid`
+     * for every desired channel. Configuration alone opens no socket; the
+     * first channel subscription connects lazily.
      */
-    async startBotChat({ userId, getAccessToken }) {
+    configurePublicSession({ userId, getAccessToken }) {
         this.#stopped = false;
-        if (!userId) throw new Error('EventSubClient.startBotChat requires the bot user id');
+        if (!userId) throw new Error('EventSubClient.configurePublicSession requires the bot user id');
         this.#botUserId = String(userId);
         this.#botTokenProvider = getAccessToken;
     }
 
-    /** Adds one joined channel to the shared bot chat session (connecting it lazily). */
-    async subscribeBotChannel({ broadcasterUserId, broadcasterChannel }) {
+    /** Adds one joined channel to the shared public session (connecting it lazily). */
+    async subscribePublicChannel({ broadcasterUserId, broadcasterChannel }) {
         if (!this.#botUserId || !this.#botTokenProvider) return;
         this.#stopped = false;
-        if (!this.#botSession) this.#botSession = this.#createBotSession();
-        this.#botSession.addChannel(broadcasterUserId, broadcasterChannel);
-        await this.#botSession.ensureConnected();
+        if (!this.#publicSession) this.#publicSession = this.#createPublicSession();
+        this.#publicSession.addChannel(broadcasterUserId, broadcasterChannel);
+        await this.#publicSession.ensureConnected();
         if (this.#stopped) return;
-        await this.#botSession.applySubscriptions();
+        await this.#publicSession.applySubscriptions();
     }
 
     /**
@@ -989,18 +1033,18 @@ export class EventSubClient {
      * socket alive; removing the final one stops the session terminally and
      * releases it, so a later addition starts from a fresh object.
      */
-    async unsubscribeBotChannel(broadcasterUserId) {
-        const session = this.#botSession;
+    async unsubscribePublicChannel(broadcasterUserId) {
+        const session = this.#publicSession;
         if (!session) return;
         await session.removeChannel(broadcasterUserId);
         if (!session.hasDesiredChannels) {
             session.stop();
-            this.#botSession = null;
+            this.#publicSession = null;
         }
     }
 
-    get botChatConnected() {
-        return Boolean(this.#botSession?.connected);
+    get publicSessionConnected() {
+        return Boolean(this.#publicSession?.connected);
     }
 
     #createSession(broadcasterUserId) {
@@ -1021,16 +1065,20 @@ export class EventSubClient {
         });
     }
 
-    #createBotSession() {
-        return new BotChatSession({
+    #createPublicSession() {
+        return new PublicEventSession({
             helix: this.#helix,
             botUserId: this.#botUserId,
             getAccessToken: () => this.#botTokenProvider(),
-            onChatMessage: (message) => {
-                const messageId = message?.metadata?.message_id;
-                if (this.#isDuplicate(messageId)) return;
-                const observation = normalizeBotChatMessage(message, this.#nowFn);
-                if (observation) this.#emitBotChat(observation);
+            onNotification: (message) => {
+                if (message?.metadata?.subscription_type === BOT_CHAT_SUBSCRIPTION_TYPE) {
+                    const messageId = message?.metadata?.message_id;
+                    if (this.#isDuplicate(messageId)) return;
+                    const observation = normalizeBotChatMessage(message, this.#nowFn);
+                    if (observation) this.#emitBotChat(observation);
+                    return;
+                }
+                this.#dispatchNotification(message);
             },
             lifecycle: {
                 wsImpl: this.#wsImpl,

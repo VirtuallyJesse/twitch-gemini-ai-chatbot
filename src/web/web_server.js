@@ -40,7 +40,7 @@ const escapeHtml = (value) =>
         .replace(/>/g, '&gt;');
 
 const SAMPLE_ALERT_VARS = {
-    subscription: { username: 'CoolViewer', tier: 'Tier 1' },
+    subscription: { username: 'CoolViewer', tier: 'Tier 1', message: 'Glad to be here!' },
     resub: { username: 'DriftKing', tier: 'Tier 1', months: 7, streak: 7, message: 'fox supremacy' },
     community_sub_gift: { username: 'QuantumQueen', count: 5, tier: 'Tier 1' },
     sub_gift: { username: 'GenerousGiver', recipient: 'LuckyViewer', tier: 'Tier 1' },

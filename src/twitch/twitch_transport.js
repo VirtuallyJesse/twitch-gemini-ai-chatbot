@@ -2,8 +2,8 @@
 //
 // Deep module owning the entire Twitch transport surface: the sole seam for
 // observed chat. IRC (tmi.js) is authoritative for viewer-authored messages;
-// a bot-token EventSub WebSocket session is authoritative for bot-authored
-// messages; Helix REST (App Access Token -> official Chatbot badge) sends.
+// a shared bot-token EventSub WebSocket session observes bot-authored messages
+// and public alert sources; Helix REST (App Access Token -> official Chatbot badge) sends.
 // One private observation path records every Twitch-observed message - exact
 // identity, message ID, timestamp, local order - before any routing, ambient,
 // or ignored-username policy runs.
@@ -29,7 +29,6 @@ export const TWITCH_AUTH_SCOPES = [
 
 export const TWITCH_BROADCASTER_SCOPES = [
     'channel:manage:broadcast',
-    'channel:read:subscriptions',
     'bits:read',
     'channel:read:redemptions',
     'moderator:read:followers',
@@ -1377,12 +1376,12 @@ export class TwitchTransport {
         for (const ch of toAdd) {
             if (this.#running) {
                 await this.#subscribeEventSubChannel(ch);
-                await this.#subscribeBotChatChannel(ch);
+                await this.#subscribePublicEventSubChannel(ch);
             }
         }
 
         for (const ch of toRemove) {
-            await this.#unsubscribeBotChatChannel(ch);
+            await this.#unsubscribePublicEventSubChannel(ch);
             this.#unsubscribeEventSubChannel(ch);
         }
 
@@ -1527,51 +1526,51 @@ export class TwitchTransport {
             console.error('[TwitchTransport] EventSub failed to start:', err.message);
         }
         await this.#subscribeEventSubChannels();
-        await this.#startBotChat();
+        await this.#startPublicEventSubSession();
     }
 
-    /** Opens the shared bot-token chat session and subscribes every joined channel. */
-    async #startBotChat() {
-        if (!this.#eventsub?.startBotChat || !this.#botId) return;
+    /** Opens the shared public/bot-authorized session for every joined channel. */
+    async #startPublicEventSubSession() {
+        if (!this.#eventsub?.configurePublicSession || !this.#botId) return;
         try {
-            await this.#eventsub.startBotChat({
+            this.#eventsub.configurePublicSession({
                 userId: this.#botId,
                 getAccessToken: () => this.#vault.getUserToken()
             });
         } catch (err) {
-            console.error('[TwitchTransport] Bot chat observation failed to start:', err.message);
+            console.error('[TwitchTransport] Public EventSub session failed to start:', err.message);
             return;
         }
         for (const channel of this.#channels) {
-            await this.#subscribeBotChatChannel(channel);
+            await this.#subscribePublicEventSubChannel(channel);
         }
     }
 
-    async #subscribeBotChatChannel(channel) {
-        if (!this.#eventsub?.subscribeBotChannel || !this.#botId) return;
+    async #subscribePublicEventSubChannel(channel) {
+        if (!this.#eventsub?.subscribePublicChannel || !this.#botId) return;
         const login = cleanName(channel);
         const broadcasterId = this.#channelIdMap[login];
         if (!broadcasterId) return;
         try {
             // Bot user identity only: no broadcaster token or moderator status required.
-            await this.#eventsub.subscribeBotChannel({
+            await this.#eventsub.subscribePublicChannel({
                 broadcasterUserId: broadcasterId,
                 broadcasterChannel: login
             });
         } catch (err) {
-            console.error(`[TwitchTransport] Bot chat subscribe failed for ${channel}:`, err.message);
+            console.error(`[TwitchTransport] Public EventSub subscribe failed for ${channel}:`, err.message);
         }
     }
 
-    async #unsubscribeBotChatChannel(channel) {
-        if (!this.#eventsub?.unsubscribeBotChannel) return;
+    async #unsubscribePublicEventSubChannel(channel) {
+        if (!this.#eventsub?.unsubscribePublicChannel) return;
         const login = cleanName(channel);
         const broadcasterId = this.#channelIdMap[login];
         if (!broadcasterId) return;
         try {
-            await this.#eventsub.unsubscribeBotChannel(broadcasterId);
+            await this.#eventsub.unsubscribePublicChannel(broadcasterId);
         } catch (err) {
-            console.error(`[TwitchTransport] Bot chat unsubscribe failed for ${channel}:`, err.message);
+            console.error(`[TwitchTransport] Public EventSub unsubscribe failed for ${channel}:`, err.message);
         }
     }
 

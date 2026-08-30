@@ -98,15 +98,15 @@ When not doing a command, follow these rules to define your personality:
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            fallback_template: 'Thanks for the {tier} sub, {username}!',
-            ai_prompt: 'Say a quick welcome to {username}, who just subscribed at {tier}.'
+            fallback_template: 'Thanks for subbing, {username}!',
+            ai_prompt: "Thank {username} for subbing. Optional message: '{message}'."
         }),
         resub: Object.freeze({
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            fallback_template: 'Thanks for {months} months of support, {username}!',
-            ai_prompt: "Welcome back {username}, now at {months} months (streak: {streak}). Respond to their message: '{message}'."
+            fallback_template: 'Thanks for {months} months, {username}!',
+            ai_prompt: "Thank {username} for resubbing for {months} months. Optional message: '{message}'."
         }),
         sub_gift: Object.freeze({
             enabled: true,
@@ -119,16 +119,16 @@ When not doing a command, follow these rules to define your personality:
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
-            fallback_template: 'Thanks for gifting {count} subs to the community, {username}!',
-            ai_prompt: 'React to {username} gifting {count} subs to the community.'
+            fallback_template: 'Thanks for gifting {count} subs, {username}!',
+            ai_prompt: 'Thank {username} for gifting {count} subs to the community.'
         }),
         cheer: Object.freeze({
             enabled: true,
             ai_enabled: true,
             min_bits: 100,
             cooldown_seconds: 0,
-            fallback_template: 'Thanks for cheering {bits} bits, {username}!',
-            ai_prompt: "Thank {username} for cheering {bits} bits. Respond to their message: '{message}'."
+            fallback_template: 'Thanks for the {bits} bits, {username}!',
+            ai_prompt: "Thank {username} for cheering {bits} bits. Optional message: '{message}'."
         }),
         channel_points: Object.freeze({
             enabled: false,
@@ -136,8 +136,8 @@ When not doing a command, follow these rules to define your personality:
             rewards: Object.freeze({
                 Hydrate: Object.freeze({
                     ai_enabled: true,
-                    fallback_template: '{username} says drink water, streamer!',
-                    ai_prompt: "{username} redeemed the Hydrate reward. Remind the streamer to drink water. Their note: '{user_input}'."
+                    fallback_template: '{username} redeemed Hydrate. Drink water, streamer.',
+                    ai_prompt: "Thank {username} for redeeming Hydrate. Remind the streamer to hydrate. Optional note: '{user_input}'."
                 })
             })
         }),

@@ -9,7 +9,7 @@ import TokenInput from '../TokenInput';
 import { FieldRow, inputCls, ResetTabButton, Toggle } from './SettingsPrimitives';
 
 const EVENT_TOKENS: Record<string, string[]> = {
-  subscription: ['{username}', '{tier}'],
+  subscription: ['{username}', '{tier}', '{message}'],
   resub: ['{username}', '{tier}', '{months}', '{streak}', '{message}'],
   sub_gift: ['{username}', '{recipient}', '{tier}'],
   community_sub_gift: ['{username}', '{count}', '{tier}'],
@@ -25,7 +25,7 @@ const ALERT_LABELS: Record<string, string> = {
 };
 
 const SAMPLE_ALERT_DATA: Record<string, { event: ChatEventKind; eventText: string; vars: Record<string, string | number> }> = {
-  subscription: { event: 'sub', eventText: 'CoolViewer subscribed at Tier 1', vars: { username: 'CoolViewer', tier: 'Tier 1' } },
+  subscription: { event: 'sub', eventText: 'CoolViewer subscribed at Tier 1: Glad to be here!', vars: { username: 'CoolViewer', tier: 'Tier 1', message: 'Glad to be here!' } },
   resub: { event: 'sub', eventText: 'DriftKing subscribed at Tier 1 · 7 month streak', vars: { username: 'DriftKing', tier: 'Tier 1', months: 7, streak: 7, message: 'fox supremacy' } },
   sub_gift: { event: 'gift', eventText: 'GenerousGiver gifted a Tier 1 sub to LuckyViewer', vars: { username: 'GenerousGiver', recipient: 'LuckyViewer', tier: 'Tier 1' } },
   community_sub_gift: { event: 'gift', eventText: 'QuantumQueen gifted 5 subs to the community', vars: { username: 'QuantumQueen', count: 5, tier: 'Tier 1' } },
@@ -180,4 +180,3 @@ export default function AlertsTab({ value, persona, botUsername, activeChannel, 
     </div>
   );
 }
-
