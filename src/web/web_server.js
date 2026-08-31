@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { renderAuthMismatchHtml, channelKey } from '../twitch/twitch_transport.js';
+import { channelKey } from '../twitch/twitch_transport.js';
 import { EVENT_REACTION_HARNESS } from '../twitch/event_reaction.js';
 import {
     COOKIE_NAME,
@@ -18,11 +18,13 @@ import {
     SESSION_TTL_MS,
     deriveSessionSecret,
     createSessionToken,
-    verifySessionToken,
     parseCookies,
     serializeCookie,
     clearCookieHeader
 } from './session.js';
+import { AdminIdentityPolicy, WebAccessPolicy, twitchUserResolver } from './access_policy.js';
+import { OAuthStateStore } from './oauth_state.js';
+import { AbuseProtection, RateLimitError } from './abuse_protection.js';
 import { CONFIG_TYPES, collectExactTriggers } from '../utils/bot_config.js';
 import { MAX_CHAT_PAGE_SIZE } from '../utils/storage.js';
 
@@ -31,13 +33,17 @@ const DEFAULT_PUBLIC_DIR = path.resolve(moduleDir, '../../public');
 const DEFAULT_DIST_DIR = path.resolve(DEFAULT_PUBLIC_DIR, 'dist');
 const DEFAULT_KEEP_ALIVE_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
+const DEFAULT_WS_PER_IP = 5;
+const DEFAULT_WS_GLOBAL = 100;
 const KEEP_ALIVE_TIMEOUT_MS = 10_000;
 
 const escapeHtml = (value) =>
     String(value ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 
 const SAMPLE_ALERT_VARS = {
     subscription: { username: 'CoolViewer', tier: 'Tier 1', message: 'Glad to be here!' },
@@ -65,12 +71,15 @@ export class WebServer {
     #configStore;
     #chatRouter;
     #helixActions;
-    #adminUsernames;
     #clientId;
     #clientSecret;
     #sessionSecret;
     #sessionTtlMs;
-    #isAdminLogin;
+    #adminIdentities;
+    #accessPolicy;
+    #oauthStates;
+    #abuse;
+    #securityInitialized = false;
     #botUsername;
     #externalUrl;
     #keepAliveIntervalMs;
@@ -81,6 +90,8 @@ export class WebServer {
     #publicDir;
     #distDir;
     #isDevMock;
+    #maxWsPerIp;
+    #maxWsGlobal;
 
     #app;
     #wsInstance;
@@ -88,6 +99,8 @@ export class WebServer {
     #listening = false;
     #live = false;
     #clients = new Set();
+    #clientIps = new Map();
+    #wsIpCounts = new Map();
     #keepAliveTimer = null;
     #heartbeatTimer = null;
     #transportLogUnsub = null;
@@ -113,6 +126,12 @@ export class WebServer {
             clientId = '',
             clientSecret = '',
             sessionSecret = null,
+            adminIdentityPolicy = null,
+            adminIdentityPins = {},
+            resolveAdminUsers = null,
+            oauthStateStore = null,
+            abuseProtection = null,
+            abusePolicy = {},
             sessionTtlMs = SESSION_TTL_MS,
             port = 3000,
             host,
@@ -120,6 +139,8 @@ export class WebServer {
             externalUrl = '',
             keepAliveIntervalMs = DEFAULT_KEEP_ALIVE_MS,
             heartbeatIntervalMs = DEFAULT_HEARTBEAT_MS,
+            maxWsPerIp = DEFAULT_WS_PER_IP,
+            maxWsGlobal = DEFAULT_WS_GLOBAL,
             publicDir = DEFAULT_PUBLIC_DIR,
             distDir = DEFAULT_DIST_DIR,
             trustProxy = 1,
@@ -139,27 +160,38 @@ export class WebServer {
         this.#configStore = configStore;
         this.#chatRouter = chatRouter;
         this.#helixActions = helixActions;
-        this.#adminUsernames = (adminUsernames || []).map((s) => String(s).toLowerCase()).filter(Boolean);
         this.#clientId = String(clientId || '').trim();
         this.#clientSecret = String(clientSecret || '').trim();
-        this.#sessionSecret = sessionSecret || deriveSessionSecret(this.#clientSecret);
+        this.#sessionSecret = sessionSecret || (isDevMock
+            ? Buffer.from('twitch-dashboard-dev-mock-session-key')
+            : deriveSessionSecret(this.#clientSecret));
         this.#sessionTtlMs = Number(sessionTtlMs) || SESSION_TTL_MS;
         this.#botUsername = String(botUsername || '');
         this.#externalUrl = String(externalUrl || '').trim();
         this.#keepAliveIntervalMs = Number(keepAliveIntervalMs) || DEFAULT_KEEP_ALIVE_MS;
         this.#heartbeatIntervalMs = Number(heartbeatIntervalMs) || DEFAULT_HEARTBEAT_MS;
+        this.#maxWsPerIp = Math.max(1, Number(maxWsPerIp) || DEFAULT_WS_PER_IP);
+        this.#maxWsGlobal = Math.max(1, Number(maxWsGlobal) || DEFAULT_WS_GLOBAL);
         this.#fetchImpl = fetchImpl;
         this.#host = host;
         this.#preferredPort = port ?? 3000;
         this.#publicDir = publicDir;
         this.#distDir = distDir;
         this.#isDevMock = Boolean(isDevMock);
-
-        this.#isAdminLogin = (login) => {
-            const name = String(login || '').toLowerCase();
-            if (!name) return false;
-            return name === String(this.#botUsername).toLowerCase() || this.#adminUsernames.includes(name);
-        };
+        this.#adminIdentities = adminIdentityPolicy || new AdminIdentityPolicy({
+            storage,
+            adminUsernames,
+            botUsername: this.#botUsername,
+            initialPins: this.#isDevMock ? { jesse: 'dev_admin_1', ...adminIdentityPins } : adminIdentityPins,
+            resolveUsers: resolveAdminUsers || twitchUserResolver(transport)
+        });
+        this.#accessPolicy = new WebAccessPolicy({
+            sessionSecret: this.#sessionSecret,
+            adminIdentities: this.#adminIdentities,
+            isDevMock: this.#isDevMock
+        });
+        this.#oauthStates = oauthStateStore || new OAuthStateStore();
+        this.#abuse = abuseProtection || new AbuseProtection(abusePolicy);
 
         const app = express();
         this.#wsInstance = expressWs(app);
@@ -168,6 +200,26 @@ export class WebServer {
         if (trustProxy !== false && trustProxy !== undefined) {
             app.set('trust proxy', trustProxy);
         }
+        app.use((req, res, next) => {
+            const socketOrigin = `${req.secure ? 'wss' : 'ws'}://${req.get('host')}`;
+            res.setHeader('Content-Security-Policy', [
+                "default-src 'self'",
+                "script-src 'self'",
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: blob: https:",
+                "media-src 'self' blob: https:",
+                `connect-src 'self' ${socketOrigin}`,
+                "font-src 'self' data:",
+                "object-src 'none'",
+                "base-uri 'self'",
+                "frame-ancestors 'none'",
+                "form-action 'self' https://id.twitch.tv"
+            ].join('; '));
+            res.setHeader('X-Frame-Options', 'DENY');
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.setHeader('Referrer-Policy', 'no-referrer');
+            next();
+        });
         app.use(express.json({ limit: '1mb' }));
         // Hashed build output never changes content, so it caches immutably;
         // the HTML shell must revalidate every load or new deploys would not
@@ -217,6 +269,11 @@ export class WebServer {
     async start(port = this.#preferredPort) {
         if (this.#listening) return { port: this.port, url: this.url };
 
+        if (!this.#securityInitialized) {
+            await this.#adminIdentities.initialize();
+            this.#securityInitialized = true;
+        }
+
         this.#attachCollaborators();
         this.#live = true;
 
@@ -245,10 +302,7 @@ export class WebServer {
         this.#stopKeepAlive();
         this.#stopHeartbeat();
 
-        for (const client of this.#clients) {
-            try { client.terminate(); } catch { /* already dead */ }
-        }
-        this.#clients.clear();
+        for (const client of [...this.#clients]) this.#dropClient(client);
 
         const server = this.#httpServer;
         this.#httpServer = null;
@@ -278,7 +332,16 @@ export class WebServer {
         return sent;
     }
 
-    async #currentBotStatus() {
+    #publicBotStatus() {
+        return {
+            botUsername: this.#botUsername,
+            connected: Boolean(this.#transport.connected),
+            channels: [...(this.#transport.channels || [])],
+            joinedChannels: [...(this.#transport.joinedChannels || [])]
+        };
+    }
+
+    async #adminDiagnostics() {
         const status = this.#transport.auth.getStatus();
         const channelStatuses = await this.#transport.getChannelAuthStatuses();
         return {
@@ -294,24 +357,56 @@ export class WebServer {
     async #broadcastBotStatus() {
         if (!this.#live) return;
         try {
-            this.broadcast({ type: 'bot:status', ...await this.#currentBotStatus() });
+            this.broadcast({ type: 'bot:status', ...this.#publicBotStatus() });
         } catch (error) {
             console.error('[WebServer] Failed to broadcast bot status:', error.message);
         }
     }
 
     #mountWebSocket() {
-        this.#app.ws('/ws', (ws) => {
+        this.#app.ws('/ws', (ws, req) => {
+            const expectedOrigin = this.#expectedOrigin(req);
+            const actualOrigin = String(req.get('origin') || '');
+            if (!actualOrigin || actualOrigin !== expectedOrigin) {
+                ws.close(1008, 'Origin not allowed');
+                return;
+            }
+            const clientIp = String(req.ip || 'unknown');
+            const ipCount = this.#wsIpCounts.get(clientIp) || 0;
+            if (this.#clients.size >= this.#maxWsGlobal || ipCount >= this.#maxWsPerIp) {
+                ws.close(1013, 'Connection limit reached');
+                return;
+            }
             ws.isAlive = true;
             this.#clients.add(ws);
+            this.#clientIps.set(ws, clientIp);
+            this.#wsIpCounts.set(clientIp, ipCount + 1);
             ws.on('pong', () => { ws.isAlive = true; });
-            ws.on('close', () => this.#clients.delete(ws));
+            ws.on('message', () => { /* Dashboard sockets are receive-only. */ });
+            ws.on('close', () => this.#releaseClient(ws));
             ws.on('error', () => this.#dropClient(ws));
         });
     }
 
+    #expectedOrigin(req) {
+        if (this.#externalUrl) {
+            try { return new URL(this.#externalUrl).origin; } catch { /* use request origin */ }
+        }
+        return this.#requestOrigin(req);
+    }
+
+    #releaseClient(client) {
+        if (!this.#clients.delete(client)) return;
+        const clientIp = this.#clientIps.get(client);
+        this.#clientIps.delete(client);
+        if (!clientIp) return;
+        const remaining = (this.#wsIpCounts.get(clientIp) || 1) - 1;
+        if (remaining > 0) this.#wsIpCounts.set(clientIp, remaining);
+        else this.#wsIpCounts.delete(clientIp);
+    }
+
     #dropClient(client) {
-        this.#clients.delete(client);
+        this.#releaseClient(client);
         try { client.terminate(); } catch { /* ignore */ }
     }
 
@@ -478,7 +573,7 @@ export class WebServer {
         return 'An error occurred while generating the response.';
     }
 
-    #renderAuthSuccessHtml({ title, heading, bodyHtml, autoCloseScript = '', variant = 'success' }) {
+    #renderAuthSuccessHtml({ title, heading, bodyHtml, completion = null, variant = 'success' }) {
         const safeTitle = escapeHtml(title);
         const safeHeading = escapeHtml(heading);
         const isError = variant === 'error';
@@ -488,6 +583,10 @@ export class WebServer {
         const iconPaths = isError
             ? '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>'
             : '<polyline points="20 6 9 17 4 12"></polyline>';
+        const completionAttrs = completion
+            ? ` data-auth-event="${escapeHtml(completion.type)}" data-auth-channel="${escapeHtml(completion.channel || '')}"`
+            : '';
+        const completionScript = completion ? '<script src="/auth/complete.js" defer></script>' : '';
         return `<!doctype html>
 <html>
 <head>
@@ -560,7 +659,7 @@ export class WebServer {
         }
     </style>
 </head>
-<body>
+<body${completionAttrs}>
     <div class="card">
         <div class="icon-wrap">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -571,7 +670,7 @@ export class WebServer {
         ${bodyHtml}
         <p style="margin-top: 16px;"><a href="/">Back to dashboard</a></p>
     </div>
-    ${autoCloseScript}
+    ${completionScript}
 </body>
 </html>`;
     }
@@ -585,36 +684,36 @@ export class WebServer {
         });
     }
 
+    #renderAuthMismatch({ expected, actual, isBroadcaster }) {
+        const cleanExpected = String(expected || '').replace(/^[#@]/, '');
+        const cleanActual = String(actual || '').replace(/^[#@]/, '');
+        const subject = isBroadcaster ? `#${cleanExpected}` : cleanExpected;
+        return this.#renderAuthErrorCard(
+            isBroadcaster ? 'Broadcaster authorization mismatch' : 'Account authorization mismatch',
+            `Expected ${subject || 'the configured account'}, but Twitch authorized ${cleanActual || 'another account'}. Switch accounts and start again from Configuration.`
+        );
+    }
+
     #viewerFrom(req) {
-        const cookies = parseCookies(req.headers?.cookie);
-        const token = cookies[COOKIE_NAME];
-        const payload = verifySessionToken(token, this.#sessionSecret);
-        if (!payload) {
-            if (this.#isDevMock) {
-                return {
-                    login: 'jesse',
-                    userId: 'dev_admin_1',
-                    displayName: 'Jesse',
-                    profileImageUrl: '/media/avatar.jpg',
-                    isAdmin: true
-                };
-            }
-            return null;
-        }
-        return { ...payload, isAdmin: this.#isAdminLogin(payload.login) };
+        return this.#accessPolicy.viewer(req);
+    }
+
+    #requireAuthenticated(req, res) {
+        return this.#accessPolicy.requireAuthenticated(req, res);
     }
 
     #requireAdmin(req, res) {
-        const viewer = this.#viewerFrom(req);
-        if (!viewer) {
-            res.status(401).json({ error: 'unauthorized' });
-            return null;
-        }
-        if (!viewer.isAdmin) {
-            res.status(403).json({ error: 'forbidden' });
-            return null;
-        }
-        return viewer;
+        return this.#accessPolicy.requireAdmin(req, res);
+    }
+
+    #isAdminRequest(req) {
+        return this.#viewerFrom(req)?.isAdmin === true;
+    }
+
+    #sendRateLimit(res, error) {
+        const retryAfter = error instanceof RateLimitError ? error.retryAfterSeconds : 1;
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({ error: 'rate_limited', retryAfter });
     }
 
     /**
@@ -772,14 +871,27 @@ export class WebServer {
             res.type('text/plain').set('Cache-Control', 'no-store').send('OK');
         });
 
+        this.#app.get('/auth/complete.js', (_req, res) => {
+            res.type('application/javascript').send(`(() => {
+    const type = document.body.dataset.authEvent;
+    if (!type || !window.opener) return;
+    const message = { type };
+    const channel = document.body.dataset.authChannel;
+    if (channel) message.channel = channel;
+    window.opener.postMessage(message, window.location.origin);
+    window.setTimeout(() => window.close(), 1200);
+})();`);
+        });
+
         this.#app.get('/auth/dashboard', (req, res) => {
             try {
                 if (!this.#clientId) {
                     res.status(500).send('TWITCH_CLIENT_ID is not configured.');
                     return;
                 }
-                const nonce = crypto.randomBytes(16).toString('hex');
-                res.append('Set-Cookie', serializeCookie(STATE_COOKIE, nonce, {
+                const browserBinding = crypto.randomBytes(24).toString('base64url');
+                const state = this.#oauthStates.create({ purpose: 'dashboard', browserBinding });
+                res.append('Set-Cookie', serializeCookie(STATE_COOKIE, browserBinding, {
                     maxAge: 600,
                     httpOnly: true,
                     sameSite: 'Lax',
@@ -787,7 +899,7 @@ export class WebServer {
                     secure: req.secure
                 }));
                 const redirectUri = this.#redirectUri(req);
-                const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${encodeURIComponent(this.#clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=&state=dashboard:${nonce}`;
+                const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${encodeURIComponent(this.#clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=&state=${encodeURIComponent(state)}`;
                 res.redirect(authUrl);
             } catch (error) {
                 console.error('[Auth] Failed to build dashboard auth URL:', error);
@@ -797,11 +909,14 @@ export class WebServer {
 
         this.#app.get('/auth/login', (req, res) => {
             try {
+                const viewer = this.#requireAdmin(req, res);
+                if (!viewer) return;
                 if (!this.#botUsername) {
                     res.status(500).send('TWITCH_USERNAME is not configured.');
                     return;
                 }
-                res.redirect(this.#transport.auth.getLoginUrl(this.#redirectUri(req)));
+                const state = this.#oauthStates.create({ purpose: 'bot', initiatorId: viewer.userId });
+                res.redirect(this.#transport.auth.getLoginUrl(this.#redirectUri(req), state));
             } catch (error) {
                 console.error('[Auth] Failed to build Twitch auth URL:', error);
                 res.status(500).send('Failed to start Twitch authorization.');
@@ -810,13 +925,20 @@ export class WebServer {
 
         this.#app.get('/auth/broadcaster', (req, res) => {
             try {
-                const rawChannel = req.query.channel || this.#transport.channels[0] || '';
-                const channel = String(rawChannel).replace(/^#/, '').trim();
-                if (!channel) {
-                    return res.status(400).send('Channel parameter is required (e.g. /auth/broadcaster?channel=mychannel)');
+                const viewer = this.#requireAdmin(req, res);
+                if (!viewer) return;
+                const channel = String(req.query.channel || '').replace(/^#/, '').trim().toLowerCase();
+                const configured = new Set((this.#transport.channels || []).map((value) => String(value).replace(/^#/, '').toLowerCase()));
+                if (!/^[a-z0-9_]{1,25}$/.test(channel) || !configured.has(channel)) {
+                    return res.status(400).send('A currently configured channel is required.');
                 }
                 const redirectUri = this.#redirectUri(req);
-                const url = this.#transport.auth.getBroadcasterLoginUrl(redirectUri, channel);
+                const state = this.#oauthStates.create({
+                    purpose: 'broadcaster',
+                    initiatorId: viewer.userId,
+                    channel
+                });
+                const url = this.#transport.auth.getBroadcasterLoginUrl(redirectUri, channel, state);
                 res.redirect(url);
             } catch (error) {
                 console.error('[Auth] Failed to build Broadcaster auth URL:', error);
@@ -826,6 +948,31 @@ export class WebServer {
 
         this.#app.get('/auth/callback', async (req, res) => {
             const { code, state, error, error_description: errorDescription } = req.query;
+            const pending = this.#oauthStates.consume(state);
+            if (!pending) {
+                return res.status(400).type('html').send(this.#renderAuthErrorCard(
+                    'Invalid authorization state',
+                    'The request expired or was already used. Start again from the dashboard.'
+                ));
+            }
+            if (pending.purpose === 'dashboard') {
+                const browserBinding = parseCookies(req.headers?.cookie)[STATE_COOKIE];
+                res.append('Set-Cookie', clearCookieHeader(STATE_COOKIE, { secure: req.secure }));
+                if (!browserBinding || browserBinding !== pending.browserBinding) {
+                    return res.status(400).type('html').send(this.#renderAuthErrorCard(
+                        'Invalid login state',
+                        'The request expired. Start the authorization again from the dashboard.'
+                    ));
+                }
+            } else {
+                const viewer = this.#viewerFrom(req);
+                if (!viewer?.isAdmin || viewer.userId !== pending.initiatorId) {
+                    return res.status(403).type('html').send(this.#renderAuthErrorCard(
+                        'Authorization session mismatch',
+                        'Return to the administrator session that started this authorization and try again.'
+                    ));
+                }
+            }
             if (error) {
                 res.status(400).type('html').send(this.#renderAuthErrorCard(
                     'Twitch authorization failed',
@@ -842,17 +989,7 @@ export class WebServer {
             }
             const redirectUri = this.#redirectUri(req);
 
-            if (state && String(state).startsWith('dashboard:')) {
-                const nonce = String(state).slice('dashboard:'.length);
-                const cookies = parseCookies(req.headers?.cookie);
-                const got = cookies[STATE_COOKIE];
-                res.append('Set-Cookie', clearCookieHeader(STATE_COOKIE, { secure: req.secure }));
-                if (!got || got !== nonce) {
-                    return res.status(400).type('html').send(this.#renderAuthErrorCard(
-                        'Invalid login state',
-                        'The request expired. Start the authorization again from the dashboard.'
-                    ));
-                }
+            if (pending.purpose === 'dashboard') {
                 try {
                     const user = await this.#exchangeDashboardUser(String(code), redirectUri);
                     const token = createSessionToken({
@@ -878,20 +1015,10 @@ export class WebServer {
                 }
             }
 
-            if (state && String(state).startsWith('broadcaster:')) {
-                const channel = String(state).slice('broadcaster:'.length);
+            if (pending.purpose === 'broadcaster') {
+                const channel = pending.channel;
                 try {
                     await this.#transport.auth.handleBroadcasterCallback(channel, String(code), redirectUri);
-                    this.broadcast({ type: 'auth:broadcaster', channel, authorized: true });
-                    const autoCloseScript = `
-                    <script>
-                        try {
-                            if (window.opener) {
-                                window.opener.postMessage({ type: 'twitch:broadcaster_authorized', channel: '${channel}' }, '*');
-                                setTimeout(() => window.close(), 1200);
-                            }
-                        } catch (e) {}
-                    </script>`;
                     const bodyHtml = `
                     <p>Alerts and stream actions are now live for <strong>#${escapeHtml(channel)}</strong>.</p>
                     <p id="closing-note" style="color: #62676e; font-size: 12px; margin-top: 4px;">Closing…</p>`;
@@ -899,17 +1026,15 @@ export class WebServer {
                         title: `#${channel} linked`,
                         heading: `#${channel} linked`,
                         bodyHtml,
-                        autoCloseScript
+                        completion: { type: 'twitch:broadcaster_authorized', channel }
                     }));
                     return;
                 } catch (authError) {
                     console.error('[Auth] Broadcaster callback failed:', authError);
                     if (authError.name === 'AuthMismatchError') {
-                        const retryUrl = `/auth/broadcaster?channel=${encodeURIComponent(authError.expected)}`;
-                        res.status(400).type('html').send(renderAuthMismatchHtml({
+                        res.status(400).type('html').send(this.#renderAuthMismatch({
                             expected: authError.expected,
                             actual: authError.actual,
-                            retryUrl,
                             isBroadcaster: true
                         }));
                         return;
@@ -922,18 +1047,16 @@ export class WebServer {
                 }
             }
 
+            if (pending.purpose !== 'bot') {
+                return res.status(400).type('html').send(this.#renderAuthErrorCard(
+                    'Invalid authorization purpose',
+                    'Start the authorization again from Configuration.'
+                ));
+            }
+
             try {
                 await this.#transport.auth.handleCallback(String(code), redirectUri);
                 await this.#broadcastBotStatus();
-                const autoCloseScript = `
-                <script>
-                    try {
-                        if (window.opener) {
-                            window.opener.postMessage({ type: 'twitch:bot_authorized' }, '*');
-                            setTimeout(() => window.close(), 1200);
-                        }
-                    } catch (e) {}
-                </script>`;
                 const cleanName = String(this.#botUsername || '').replace(/^@/, '');
                 const bodyHtml = `
                 <p id="closing-note" style="color: #62676e; font-size: 12px; margin-top: 4px;">Closing…</p>`;
@@ -941,15 +1064,14 @@ export class WebServer {
                     title: `${cleanName} connected`,
                     heading: `${cleanName} connected`,
                     bodyHtml,
-                    autoCloseScript
+                    completion: { type: 'twitch:bot_authorized' }
                 }));
             } catch (authError) {
                 console.error('[Auth] Callback failed:', authError);
                 if (authError.name === 'AuthMismatchError') {
-                    res.status(400).type('html').send(renderAuthMismatchHtml({
+                    res.status(400).type('html').send(this.#renderAuthMismatch({
                         expected: authError.expected,
                         actual: authError.actual,
-                        retryUrl: '/auth/login',
                         isBroadcaster: false
                     }));
                     return;
@@ -961,11 +1083,9 @@ export class WebServer {
             }
         });
 
-        this.#app.all(['/auth/logout', '/api/auth/logout'], (req, res) => {
+        this.#app.post(['/auth/logout', '/api/auth/logout'], (req, res) => {
+            if (!this.#requireAuthenticated(req, res)) return;
             res.append('Set-Cookie', clearCookieHeader(COOKIE_NAME, { secure: req.secure }));
-            if (req.method === 'GET') {
-                return res.redirect(303, '/');
-            }
             res.json({ ok: true });
         });
 
@@ -1106,13 +1226,21 @@ export class WebServer {
             }
         });
 
-        this.#app.get(['/auth/status', '/api/status'], async (_req, res) => {
-            res.json(await this.#currentBotStatus());
+        this.#app.get(['/auth/status', '/api/status'], (_req, res) => {
+            res.json(this.#publicBotStatus());
         });
 
         this.#app.get('/api/channels', (_req, res) => res.json(this.#transport.channels));
 
-        this.#app.get('/api/channel-status', async (_req, res) => res.json(await this.#transport.getChannelAuthStatuses()));
+        this.#app.get('/api/admin/status', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            res.json(await this.#adminDiagnostics());
+        });
+
+        this.#app.get('/api/channel-status', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            res.json((await this.#adminDiagnostics()).channelStatuses);
+        });
 
         this.#app.get('/api/emotes/:channel', (req, res) => {
             res.set('Cache-Control', 'public, max-age=300');
@@ -1122,11 +1250,34 @@ export class WebServer {
         this.#app.get('/api/badges/:channel', async (req, res) => {
             res.set('Cache-Control', 'no-cache');
             const channel = String(req.params.channel || '').replace(/^#/, '').toLowerCase();
-            await this.#transport?.badges?.refreshGlobal?.();
-            res.json(this.#transport?.badges?.getForChannel?.(channel) || {
-                channel,
-                badges: { channel: {}, global: {} }
-            });
+            if (channel !== '__global__' && !/^[a-z0-9_]{1,25}$/.test(channel)) {
+                return res.status(400).json({ error: 'INVALID_CHANNEL' });
+            }
+            const configured = new Set((this.#transport.channels || []).map((value) => String(value).replace(/^#/, '').toLowerCase()));
+            if (channel !== '__global__' && !configured.has(channel)) {
+                return res.status(404).json({ error: 'CHANNEL_NOT_CONFIGURED' });
+            }
+            try {
+                const payload = await this.#abuse.cached({
+                    cache: 'badges',
+                    key: channel,
+                    family: 'helix',
+                    clientIp: req.ip,
+                    isAdmin: this.#isAdminRequest(req),
+                    loader: async () => {
+                        await this.#transport?.badges?.refreshGlobal?.();
+                        return this.#transport?.badges?.getForChannel?.(channel) || {
+                            channel,
+                            badges: { channel: {}, global: {} }
+                        };
+                    }
+                });
+                res.json(payload);
+            } catch (error) {
+                if (error instanceof RateLimitError) return this.#sendRateLimit(res, error);
+                console.warn('[WebServer] Badge catalog unavailable:', error?.message || error);
+                return res.status(503).json({ error: 'BADGE_CATALOG_UNAVAILABLE' });
+            }
         });
 
         this.#app.post('/api/users/avatars', async (req, res) => {
@@ -1177,6 +1328,11 @@ export class WebServer {
             }
 
             try {
+                this.#abuse.spend({
+                    family: 'helix',
+                    clientIp: req.ip,
+                    isAdmin: this.#isAdminRequest(req)
+                });
                 const ids = toFetch.flatMap((identity) => identity.userId ? [identity.userId] : []);
                 const logins = toFetch.flatMap((identity) => identity.login ? [identity.login] : []);
                 const data = await this.#transport.helix.request('/users', {
@@ -1220,19 +1376,32 @@ export class WebServer {
                 }
                 return res.json({ results });
             } catch (err) {
+                if (err instanceof RateLimitError) return this.#sendRateLimit(res, err);
                 console.warn('[WebServer] Failed to fetch avatars from Helix:', err.message);
                 return res.status(503).json({ error: 'AVATAR_LOOKUP_UNAVAILABLE' });
             }
         });
 
         this.#app.get('/api/chat/:channel', async (req, res) => {
-            let channel = req.params.channel;
-            if (!channel.startsWith('#')) channel = '#' + channel;
+            const normalized = String(req.params.channel || '').replace(/^#/, '').trim().toLowerCase();
+            if (!/^[a-z0-9_]{1,25}$/.test(normalized)) {
+                return res.status(400).json({ error: 'INVALID_CHANNEL' });
+            }
+            const configured = new Set((this.#transport.channels || []).map((value) => String(value).replace(/^#/, '').toLowerCase()));
+            if (!configured.has(normalized)) {
+                return res.status(404).json({ error: 'CHANNEL_NOT_CONFIGURED' });
+            }
+            const channel = `#${normalized}`;
             const rawLimit = req.query.limit;
             const rawCursor = req.query.cursor;
             if (
                 (rawLimit !== undefined && (typeof rawLimit !== 'string' || !/^\d+$/.test(rawLimit))) ||
-                (rawCursor !== undefined && (typeof rawCursor !== 'string' || rawCursor.length === 0))
+                (rawCursor !== undefined && (
+                    typeof rawCursor !== 'string' ||
+                    rawCursor.length === 0 ||
+                    rawCursor.length > 1024 ||
+                    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(rawCursor)
+                ))
             ) {
                 return res.status(400).json({ error: 'INVALID_PAGINATION' });
             }
@@ -1241,10 +1410,25 @@ export class WebServer {
                 return res.status(400).json({ error: 'INVALID_PAGINATION' });
             }
 
-            const page = await this.#storage.getChatLogPage(channel, {
-                limit: Math.min(requestedLimit, MAX_CHAT_PAGE_SIZE),
-                cursor: rawCursor || null
-            });
+            const effectiveLimit = Math.min(requestedLimit, MAX_CHAT_PAGE_SIZE);
+            let page;
+            try {
+                page = await this.#abuse.cached({
+                    cache: 'chat',
+                    key: JSON.stringify([channel, effectiveLimit, rawCursor || null]),
+                    family: 'storage',
+                    clientIp: req.ip,
+                    isAdmin: this.#isAdminRequest(req),
+                    loader: () => this.#storage.getChatLogPage(channel, {
+                        limit: effectiveLimit,
+                        cursor: rawCursor || null
+                    })
+                });
+            } catch (error) {
+                if (error instanceof RateLimitError) return this.#sendRateLimit(res, error);
+                console.warn('[WebServer] Chat history unavailable:', error?.message || error);
+                return res.status(503).json({ error: 'CHAT_HISTORY_UNAVAILABLE' });
+            }
             if (!page?.ok) {
                 if (page?.error === 'INVALID_CURSOR' || page?.error === 'INVALID_LIMIT') {
                     return res.status(400).json({ error: page.error });
@@ -1261,9 +1445,22 @@ export class WebServer {
             });
         });
 
-        this.#app.get('/api/media', async (_req, res) => {
-            const media = await this.#storage.getMediaLog();
-            res.json(media);
+        this.#app.get('/api/media', async (req, res) => {
+            try {
+                const media = await this.#abuse.cached({
+                    cache: 'media',
+                    key: 'snapshot',
+                    family: 'storage',
+                    clientIp: req.ip,
+                    isAdmin: this.#isAdminRequest(req),
+                    loader: () => this.#storage.getMediaLog()
+                });
+                res.json(media);
+            } catch (error) {
+                if (error instanceof RateLimitError) return this.#sendRateLimit(res, error);
+                console.warn('[WebServer] Media history unavailable:', error?.message || error);
+                return res.status(503).json({ error: 'MEDIA_HISTORY_UNAVAILABLE' });
+            }
         });
 
         this.#app.delete('/api/media/:id', async (req, res) => {
@@ -1276,29 +1473,10 @@ export class WebServer {
                 return res.status(503).json({ error: 'media_delete_failed' });
             }
             if (result.outcome === 'deleted') {
+                this.#abuse.invalidate('media');
                 this.broadcast({ type: 'media:deleted', id });
             }
             res.json(result);
-        });
-
-        this.#app.get('/gemini/:text', async (req, res) => {
-            if (!this.#aiEngine?.generate) {
-                res.status(503).send('AI engine is not configured.');
-                return;
-            }
-            try {
-                const harness = this.#emotePool?.getHarnessInstructions?.() || '';
-                const answer = await this.#aiEngine.generate(req.params.text, {
-                    harnessInstructions: harness
-                });
-                const body = this.#emotePool?.decorateReply
-                    ? this.#emotePool.decorateReply(null, answer, { appendEmote: false })
-                    : answer;
-                res.send(body);
-            } catch (error) {
-                console.error('Error generating response:', error);
-                res.status(500).send(this.#publicError(error));
-            }
         });
 
         this.#app.get('/', (_req, res) => {

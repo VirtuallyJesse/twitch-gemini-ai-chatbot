@@ -21,6 +21,7 @@ interface Props {
   botUsername?: string;
   botAuthorized?: boolean;
   activeChannel?: string;
+  joinedChannels: string[];
   channelStatuses: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   onChannelsChange?: (channels: string[]) => void;
 }
@@ -36,7 +37,7 @@ const TAB_DOMAINS: Record<TabKey, ConfigDomain> = {
   errors: 'error_messages',
 };
 
-function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = false, activeChannel = '', channelStatuses, onChannelsChange }: Omit<Props, 'open'>) {
+function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = false, activeChannel = '', joinedChannels, channelStatuses, onChannelsChange }: Omit<Props, 'open'>) {
   const highlightBots = useBotHighlight();
   const canonicalChannels = useRef<string[] | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('config');
@@ -105,6 +106,15 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = 
       `width=${width},height=${height},top=${window.screen.height / 2 - height / 2},left=${window.screen.width / 2 - width / 2}`
     );
   };
+  const openBotAuthorization = () => {
+    const width = 600;
+    const height = 700;
+    window.open(
+      '/auth/login',
+      'twitch_bot_auth',
+      `width=${width},height=${height},top=${window.screen.height / 2 - height / 2},left=${window.screen.width / 2 - width / 2}`
+    );
+  };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -122,7 +132,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = 
     switch (activeTab) {
       case 'config': {
         const value = snapshot.domains.bot_settings.value;
-        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} botAuthorized={botAuthorized} dispatch={dispatch} />;
+        return value && <ConfigurationTab value={value} busy={busy} botUsername={botUsername} botAuthorized={botAuthorized} joinedChannels={joinedChannels} channelStatuses={channelStatuses} dispatch={dispatch} onAuthorizeBot={openBotAuthorization} onAuthorizeBroadcaster={openBroadcasterLink} />;
       }
       case 'persona': {
         const value = snapshot.domains.system_instructions.value;
@@ -130,7 +140,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = 
       }
       case 'stream-actions': {
         const value = snapshot.domains.stream_actions.value;
-        return value && <StreamActionsTab value={value} channels={snapshot.domains.bot_settings.value?.channels || []} channelStatuses={channelStatuses} busy={busy} dispatch={dispatch} onAuthorizeBroadcaster={openBroadcasterLink} onOpenConfiguration={() => setActiveTab('config')} />;
+        return value && <StreamActionsTab value={value} busy={busy} dispatch={dispatch} />;
       }
       case 'commands': {
         const value = snapshot.domains.commands.value;

@@ -14,11 +14,11 @@ interface Props {
   joinedChannels: string[];
   activeChannel: string;
   onSelectChannel: (c: string) => void;
-  channelStatuses: Record<string, { authorized?: boolean }>;
   logs: Record<string, LogEntry[]>;
   histories: Record<string, ChatChannelHistory>;
   onLoadOlder: (channel: string) => void;
   viewer: ViewerInfo | null;
+  setupNeedsAttention?: boolean;
   onOpenSettings: () => void;
   onLogout: () => void;
 }
@@ -32,16 +32,23 @@ export default function Sidebar({
   joinedChannels,
   activeChannel,
   onSelectChannel,
-  channelStatuses,
   logs,
   histories,
   onLoadOlder,
   viewer,
+  setupNeedsAttention = false,
   onOpenSettings,
   onLogout,
 }: Props) {
   const cleanUsername = botUsername.replace(/^@/, '');
-  const connection = connectionStatus({ wsConnected, botAuthorized, botConnected, channels, joinedChannels });
+  const connection = connectionStatus({
+    wsConnected,
+    botAuthorized,
+    botConnected,
+    channels,
+    joinedChannels,
+    showSetupDetails: viewer?.isAdmin === true,
+  });
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
       {/* top — brand + live connection status */}
@@ -92,13 +99,11 @@ export default function Sidebar({
           joinedChannels={joinedChannels}
           activeChannel={activeChannel}
           onSelectChannel={onSelectChannel}
-          channelStatuses={channelStatuses}
           logs={logs}
           histories={histories}
           onLoadOlder={onLoadOlder}
           botUsername={cleanUsername}
-          botAuthorized={botAuthorized}
-          onOpenSettings={onOpenSettings}
+          onOpenSettings={viewer?.isAdmin ? onOpenSettings : undefined}
         />
       </div>
 
@@ -127,10 +132,11 @@ export default function Sidebar({
               {viewer.isAdmin && (
                 <button
                   onClick={onOpenSettings}
-                  title="Configure bot"
-                  className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-ink"
+                  title={setupNeedsAttention ? 'Configuration needs attention' : 'Configure bot'}
+                  className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-ink"
                 >
                   <Settings2 size={14} />
+                  {setupNeedsAttention && <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" aria-label="Configuration needs attention" />}
                 </button>
               )}
               <button

@@ -15,6 +15,7 @@ import { ChatRouter } from './twitch/chat_router.js';
 import { createHelixTools } from './twitch/helix_actions.js';
 import { WebServer } from './web/web_server.js';
 import { createExecutionTrace } from './utils/execution_trace.js';
+import { ImageDownloader } from './utils/image_downloader.js';
 
 const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
@@ -102,6 +103,7 @@ const emotes = new EmotePool({
 });
 
 const mediaUploader = new MediaUploader();
+const imageDownloader = new ImageDownloader();
 const errorHandler = new ErrorHandler({ messages: bootConfig.error_messages });
 
 function isUsableSecret(value) {
@@ -117,7 +119,7 @@ if (isUsableSecret(env.POLLINATIONS_API_KEY)) {
 } else {
     console.log('[Media] Pollinations disabled (missing or placeholder API key).');
 }
-mediaProviders.push(new GoogleProvider({ googleBackend }));
+mediaProviders.push(new GoogleProvider({ googleBackend, imageDownloader }));
 
 const transport = new TwitchTransport({
     clientId: env.TWITCH_CLIENT_ID || '',
@@ -152,6 +154,7 @@ const aiEngine = new AIEngine({
     // (2) Gemini miscounts characters, so retries need margin to land clean.
     maxResponseLength: 450,
     errorHandler,
+    imageDownloader,
     tools: helixTools,
     streamActionsPolicy: bootConfig.stream_actions
 });

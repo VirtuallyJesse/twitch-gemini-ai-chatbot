@@ -227,7 +227,7 @@ export class GoogleProvider {
                     return { key, client, regionalClient: client };
                 });
         this.activeKeyIndex = 0;
-        this.imageDownloader = imageDownloader ?? new ImageDownloader({ fetchImpl });
+        this.imageDownloader = imageDownloader ?? new ImageDownloader();
         this.now = now;
         this.sleep = sleep;
         this.catalogTtlMs = catalogTtlMs;

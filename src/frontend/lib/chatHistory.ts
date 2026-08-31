@@ -166,7 +166,13 @@ export function failChatPage(
     ...model,
     channels: {
       ...model.channels,
-      [request.channel]: { ...state, loading: null, error, pending: null },
+      [request.channel]: {
+        ...state,
+        loading: null,
+        error,
+        pending: null,
+        hasMore: error === 'RATE_LIMITED' && request.mode === 'older' ? false : state.hasMore,
+      },
     },
   };
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageSquareText, LayoutGrid } from 'lucide-react';
 import type {
   BadgeDictionaries,
+  AdminDiagnostics,
   BotStatus,
   LogEntry,
   MediaItem,
@@ -9,14 +10,13 @@ import type {
   RawMediaEntry,
   ViewerInfo,
 } from './lib/types';
-import { api } from './lib/api';
+import { api, ApiError } from './lib/api';
 import { wsClient } from './lib/ws';
 import { registerChannelEmotes } from './lib/emotes';
 import { registerChannelBadges } from './lib/badges';
 import { hydrateBadgeCatalogs } from './lib/badgeHydration';
 import { timeAgo } from './lib/time';
 import { normChannel } from './lib/channel';
-import { botAuthorization } from './lib/botStatusPresentation';
 import { createGalleryAvatarHydrator } from './lib/avatars';
 import { formatRawChatEntry } from './lib/chatLogs';
 import {
@@ -66,11 +66,13 @@ export default function App() {
   // Runtime state
   const [viewer, setViewer] = useState<ViewerInfo | null>(null);
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+  const [adminDiagnostics, setAdminDiagnostics] = useState<AdminDiagnostics | null>(null);
   const [channels, setChannels] = useState<string[]>([]);
   const [activeChannel, setActiveChannel] = useState<string>('');
   const [channelStatuses, setChannelStatuses] = useState<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>>({});
   const [chatHistory, setChatHistory] = useState(createChatHistoryModel);
   const chatHistoryRef = useRef(chatHistory);
+  const viewerAdminRef = useRef(false);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [deleteDialog, setDeleteDialog] = useState<DeleteMediaDialogState | null>(null);
   const deletePendingRef = useRef(false);
@@ -107,7 +109,9 @@ export default function App() {
         hasMore: rawPage.hasMore,
       }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'CHAT_HISTORY_UNAVAILABLE';
+      const message = error instanceof ApiError && error.status === 429
+        ? 'RATE_LIMITED'
+        : error instanceof Error ? error.message : 'CHAT_HISTORY_UNAVAILABLE';
       if (message === 'STALE_CURSOR' || message === 'INVALID_CURSOR') {
         commitChatHistory(restartChatHydration(chatHistoryRef.current, channel));
         queueMicrotask(() => void requestChatPage(channel, 'hydrate'));
@@ -172,11 +176,20 @@ export default function App() {
       api.getViewer(),
       api.getStatus(),
       api.getChannels(),
-      api.getChannelStatuses(),
       api.getMedia(),
-    ]).then(([vRes, sRes, cRes, csRes, mRes]) => {
+    ]).then(([vRes, sRes, cRes, mRes]) => {
       if (disposed) return;
-      if (vRes.status === 'fulfilled') setViewer(vRes.value);
+      if (vRes.status === 'fulfilled') {
+        setViewer(vRes.value);
+        viewerAdminRef.current = vRes.value.isAdmin === true;
+        if (vRes.value.isAdmin) {
+          api.getAdminStatus().then((diagnostics) => {
+            if (disposed) return;
+            setAdminDiagnostics(diagnostics);
+            setChannelStatuses(diagnostics.channelStatuses || {});
+          }).catch(() => {});
+        }
+      }
       if (sRes.status === 'fulfilled') setBotStatus(sRes.value);
 
       if (cRes.status === 'fulfilled') {
@@ -196,8 +209,6 @@ export default function App() {
       }
       configuredChannelsReady = true;
       for (const pending of pendingChatEvents.splice(0)) acceptLiveChat(pending);
-
-      if (csRes.status === 'fulfilled') setChannelStatuses(csRes.value);
 
       const snapshot = mRes.status === 'fulfilled' && Array.isArray(mRes.value)
         ? mRes.value.map(normalizeMediaEntry)
@@ -242,25 +253,13 @@ export default function App() {
     const unsubBotStatus = wsClient.on<BotStatus>('bot:status', (data) => {
       if (data) {
         setBotStatus(data);
-        if (data.channelStatuses) setChannelStatuses(data.channelStatuses);
-      }
-    });
-
-    const unsubBroadcaster = wsClient.on<{ channel: string; authorized: boolean }>('auth:broadcaster', (data) => {
-      if (data?.channel) {
-        const c = normChannel(data.channel);
-        setChannelStatuses((prev) => ({
-          ...prev,
-          [c]: { authorized: data.authorized },
-          [`#${c}`]: { authorized: data.authorized },
-        }));
       }
     });
 
     const unsubConfig = wsClient.on<{ key: string }>('config:updated', (data) => {
       if (!data?.key || data.key === 'bot_settings') {
-        Promise.allSettled([api.getChannels(), api.getChannelStatuses(), api.getStatus()]).then(
-          ([cRes, csRes, sRes]) => {
+        Promise.allSettled([api.getChannels(), api.getStatus()]).then(
+          ([cRes, sRes]) => {
             if (cRes.status === 'fulfilled' && Array.isArray(cRes.value)) {
               const chanList = cRes.value.map(normChannel);
               syncConfiguredChannels(chanList);
@@ -268,11 +267,14 @@ export default function App() {
               setActiveChannel((prev) => (chanList.includes(prev) ? prev : chanList[0] || ''));
               void hydrateBadgeCatalogs(chanList, (channel) => api.getBadges(channel));
             }
-            if (csRes.status === 'fulfilled') {
-              setChannelStatuses(csRes.value);
-            }
             if (sRes.status === 'fulfilled') {
               setBotStatus(sRes.value);
+            }
+            if (viewerAdminRef.current) {
+              api.getAdminStatus().then((diagnostics) => {
+                setAdminDiagnostics(diagnostics);
+                setChannelStatuses(diagnostics.channelStatuses || {});
+              }).catch(() => {});
             }
           }
         );
@@ -281,16 +283,17 @@ export default function App() {
 
     // Window message listener for OAuth popups
     const handleWindowMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'twitch:bot_authorized') {
-        setBotStatus((prev) => (prev ? { ...prev, authorized: true } : null));
-        api.getStatus().then((s) => s && setBotStatus(s));
+        api.getAdminStatus().then((diagnostics) => {
+          setAdminDiagnostics(diagnostics);
+          setChannelStatuses(diagnostics.channelStatuses || {});
+        }).catch(() => {});
       } else if (event.data?.type === 'twitch:broadcaster_authorized' && event.data?.channel) {
-        const c = normChannel(String(event.data.channel));
-        setChannelStatuses((prev) => ({
-          ...prev,
-          [c]: { authorized: true },
-          [`#${c}`]: { authorized: true },
-        }));
+        api.getAdminStatus().then((diagnostics) => {
+          setAdminDiagnostics(diagnostics);
+          setChannelStatuses(diagnostics.channelStatuses || {});
+        }).catch(() => {});
       }
     };
     window.addEventListener('message', handleWindowMessage);
@@ -304,7 +307,6 @@ export default function App() {
       unsubEmotes();
       unsubBadges();
       unsubBotStatus();
-      unsubBroadcaster();
       unsubConfig();
       window.removeEventListener('message', handleWindowMessage);
     };
@@ -337,6 +339,9 @@ export default function App() {
 
   const handleLogout = async () => {
     await api.logout();
+    viewerAdminRef.current = false;
+    setAdminDiagnostics(null);
+    setChannelStatuses({});
     setViewer({ authenticated: false });
   };
 
@@ -395,6 +400,15 @@ export default function App() {
     return [...list].sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
   }, [searched, filter]);
 
+  const botAuthorized = adminDiagnostics?.authorized === true;
+  const joinedSet = useMemo(() => new Set((botStatus?.joinedChannels || []).map(normChannel)), [botStatus?.joinedChannels]);
+  const setupNeedsAttention = Boolean(viewer?.isAdmin && (
+    !botAuthorized || channels.some((channel) => {
+      const status = channelStatuses[channel] ?? channelStatuses[`#${channel}`] ?? {};
+      return !joinedSet.has(normChannel(channel)) || status.authorized !== true || status.needsRelink === true;
+    })
+  ));
+
   return (
     <div className="flex h-full bg-bg">
       {/* left rail — full viewport height */}
@@ -405,18 +419,18 @@ export default function App() {
       >
         <Sidebar
           botUsername={botStatus?.botUsername || ''}
-          botAuthorized={botAuthorization(botStatus)}
+          botAuthorized={botAuthorized}
           botConnected={Boolean(botStatus?.connected)}
           wsConnected={wsConnected}
           channels={channels}
           joinedChannels={botStatus?.joinedChannels || []}
           activeChannel={activeChannel}
           onSelectChannel={handleSelectChannel}
-          channelStatuses={channelStatuses}
           logs={logs}
           histories={chatHistory.channels}
           onLoadOlder={handleRevealOlderChat}
           viewer={viewer}
+          setupNeedsAttention={setupNeedsAttention}
           onOpenSettings={() => setSettingsOpen(true)}
           onLogout={handleLogout}
         />
@@ -475,7 +489,8 @@ export default function App() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         botUsername={botStatus?.botUsername || ''}
-        botAuthorized={botAuthorization(botStatus)}
+        botAuthorized={botAuthorized}
+        joinedChannels={botStatus?.joinedChannels || []}
         activeChannel={activeChannel}
         channelStatuses={channelStatuses}
         onChannelsChange={(newChans) => {
@@ -483,7 +498,10 @@ export default function App() {
           syncConfiguredChannels(cleaned);
           setChannels(cleaned);
           setActiveChannel((prev) => (cleaned.includes(prev) ? prev : cleaned[0] || ''));
-          api.getChannelStatuses().then((cs) => cs && setChannelStatuses(cs));
+          api.getAdminStatus().then((diagnostics) => {
+            setAdminDiagnostics(diagnostics);
+            setChannelStatuses(diagnostics.channelStatuses || {});
+          }).catch(() => {});
         }}
       />
       <DeleteMediaDialog

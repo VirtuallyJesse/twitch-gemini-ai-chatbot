@@ -134,11 +134,14 @@ export interface ViewerInfo {
 
 export interface BotStatus {
   botUsername?: string;
-  authorized?: boolean;
   connected?: boolean;
   channels?: string[];
   joinedChannels?: string[];
-  channelStatuses?: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
+}
+
+export interface AdminDiagnostics extends BotStatus {
+  authorized: boolean;
+  channelStatuses: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   storageConfigured?: boolean;
 }
 

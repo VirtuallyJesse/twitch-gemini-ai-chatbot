@@ -1,17 +1,23 @@
 import { useState } from 'react';
-import { Plus, X } from 'lucide-react';
+import { ExternalLink, Plus, X } from 'lucide-react';
 import type { ConfigIntent } from '../../config/ConfigEditor';
 import type { BotSettings } from '../../lib/types';
 import { channelLabel, normChannel } from '../../lib/channel';
 import { FieldRow, inputCls, ResetTabButton, SectionTitle, selectCls, Toggle } from './SettingsPrimitives';
 import { channelJoinControls } from '../../lib/botStatusPresentation';
 
+const connectionActionCls = 'flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 py-1.5 text-[11px] font-medium text-ink transition-colors hover:border-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60';
+
 interface Props {
   value: BotSettings;
   busy: boolean;
   botUsername: string;
   botAuthorized: boolean;
+  joinedChannels: string[];
+  channelStatuses: Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>;
   dispatch: (intent: ConfigIntent) => void;
+  onAuthorizeBot: () => void;
+  onAuthorizeBroadcaster: (channel: string) => void;
 }
 
 export default function ConfigurationTab({
@@ -19,11 +25,16 @@ export default function ConfigurationTab({
   busy,
   botUsername,
   botAuthorized,
+  joinedChannels,
+  channelStatuses,
   dispatch,
+  onAuthorizeBot,
+  onAuthorizeBroadcaster,
 }: Props) {
   const [newChannel, setNewChannel] = useState('');
   const [newIgnoredUser, setNewIgnoredUser] = useState('');
   const joinControls = channelJoinControls(botAuthorized);
+  const joined = new Set(joinedChannels.map(normChannel));
   const change = <K extends keyof BotSettings>(field: K, next: BotSettings[K]) => {
     dispatch({ type: 'bot-setting.changed', field, value: next });
   };
@@ -44,23 +55,50 @@ export default function ConfigurationTab({
   return (
     <div className="space-y-4">
       <SectionTitle>Connection & channels</SectionTitle>
-      <FieldRow label="Bot account">
-        <span className="rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11.5px] text-muted">
-          {botUsername ? botUsername.replace(/^@/, '') : 'Not configured'}
-        </span>
-      </FieldRow>
+      <div className="flex items-center justify-between gap-3 border-b border-line/30 py-2">
+        <div className="min-w-0">
+          <div className="text-[12.5px] font-medium text-ink">Bot account</div>
+          <div className="mt-1 flex items-center gap-2">
+            <span className="rounded-md border border-line bg-bg px-2.5 py-1 font-mono text-[11.5px] text-muted">
+              {botUsername ? botUsername.replace(/^@/, '') : 'Not configured'}
+            </span>
+            <span className={`rounded px-2 py-1 text-[10px] font-semibold ${botAuthorized ? 'bg-emerald-400/10 text-emerald-400' : 'bg-amber-400/10 text-amber-400'}`}>
+              {botAuthorized ? 'Authorized' : 'Authorization required'}
+            </span>
+          </div>
+        </div>
+        <button type="button" onClick={onAuthorizeBot} className={connectionActionCls}>
+          <ExternalLink size={11} /> {botAuthorized ? 'Reauthorize' : 'Authorize'}
+        </button>
+      </div>
       <div className="py-2 border-b border-line/30">
         <div className="text-[12.5px] font-medium text-ink">Configured channels</div>
         {value.channels.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-2 space-y-1">
             {value.channels.map((channel) => {
+              const normalized = normChannel(channel);
+              const status = channelStatuses[normalized] ?? channelStatuses[`#${normalized}`] ?? {};
+              const broadcasterLinked = status.authorized === true && status.needsRelink !== true;
               return (
-                <span key={channel} className="flex items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink">
-                  {channelLabel(channel)}
-                  <button onClick={() => dispatch({ type: 'channel.removed', channel })} aria-label={`Remove ${channel}`} className="ml-0.5 cursor-pointer text-faint transition-colors hover:text-ink">
-                    <X size={11} />
+                <div key={channel} className="flex items-start justify-between gap-3 py-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <span className="flex items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 py-1 font-mono text-[11.5px] text-ink">
+                      #{channelLabel(channel)}
+                      <button type="button" onClick={() => dispatch({ type: 'channel.removed', channel })} aria-label={`Remove ${channel}`} title={`Remove #${channelLabel(channel)}`} className="ml-0.5 cursor-pointer text-faint transition-colors hover:text-ink focus-visible:outline-none focus-visible:text-ink">
+                        <X size={11} />
+                      </button>
+                    </span>
+                    <span className={`rounded px-2 py-1 text-[10px] font-semibold ${joined.has(normalized) ? 'bg-emerald-400/10 text-emerald-400' : 'bg-amber-400/10 text-amber-400'}`}>
+                      Chat {joined.has(normalized) ? 'joined' : 'not joined'}
+                    </span>
+                    <span className={`rounded px-2 py-1 text-[10px] font-semibold ${broadcasterLinked ? 'bg-emerald-400/10 text-emerald-400' : 'bg-amber-400/10 text-amber-400'}`}>
+                      Broadcaster {broadcasterLinked ? 'linked' : status.needsRelink ? 'relink required' : 'not linked'}
+                    </span>
+                  </div>
+                  <button type="button" onClick={() => onAuthorizeBroadcaster(channel)} className={connectionActionCls}>
+                    <ExternalLink size={11} /> {broadcasterLinked || status.needsRelink ? 'Relink' : 'Link'}
                   </button>
-                </span>
+                </div>
               );
             })}
           </div>

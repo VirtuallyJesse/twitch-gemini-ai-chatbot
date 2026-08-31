@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import {
   Hash,
   ArrowDown,
-  Unlink,
   Loader2,
   Zap,
   Star,
@@ -10,23 +9,19 @@ import {
   Diamond,
   Heart,
   Radio,
-  Link2,
   ShieldCheck,
   Ghost,
   Settings2,
-  AlertCircle,
-  ExternalLink,
   WifiOff,
 } from 'lucide-react';
 import type { ChatEventKind, LogEntry } from '../lib/types';
 import { parseChat, type Token } from '../lib/parseChat';
 import { useBotHighlight } from '../lib/settings';
-import { normChannel, channelLabel } from '../lib/channel';
+import { normChannel } from '../lib/channel';
 import { stringToColor } from '../lib/color';
 import { ChatBadge } from './Badges';
 import Emote from './Emote';
 import type { ChatChannelHistory } from '../lib/chatHistory';
-import { channelStatusGlyph } from '../lib/botStatusPresentation';
 import {
   captureChatAnchor,
   chatViewportNeedsFill,
@@ -163,56 +158,6 @@ export function MsgRow({
   return <div className="rounded px-1 py-[3px] text-[12.5px] leading-[1.5] hover:bg-white/[0.03]">{body}</div>;
 }
 
-function BotAuthBanner({
-  botUsername,
-  onAuthorize,
-}: {
-  botUsername?: string;
-  onAuthorize: () => void;
-}) {
-  const name = (botUsername || '').replace(/^@/, '') || 'bot';
-  return (
-    <div className="rounded-md border border-amber-400/30 bg-amber-400/5 px-3 py-2.5">
-      <div className="flex items-center gap-2">
-        <AlertCircle size={13} className="shrink-0 text-amber-400" />
-        <span className="text-[12px] font-semibold text-ink">Bot not authorized</span>
-      </div>
-      <p className="mt-1 text-[11.5px] leading-snug text-muted">
-        {name} can't see chat until it's authorized.
-      </p>
-      <button
-        onClick={onAuthorize}
-        className="mt-2 flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-[11.5px] font-semibold text-bg transition hover:brightness-110"
-      >
-        <ExternalLink size={12} />
-        Authorize {name}
-      </button>
-    </div>
-  );
-}
-
-function LinkBanner({ channel, onLink }: { channel: string; onLink: () => void }) {
-  const chanName = channelLabel(channel);
-  return (
-    <div className="rounded-md border border-line bg-surface-2 px-3 py-2.5">
-      <div className="flex items-center gap-2">
-        <Unlink size={13} className="shrink-0 text-amber-400" />
-        <span className="text-[12px] font-semibold text-ink">Broadcaster not linked</span>
-      </div>
-      <p className="mt-1 text-[11.5px] leading-snug text-muted">
-        Some alerts and channel controls stay off until #{chanName} is linked.
-      </p>
-      <button
-        onClick={onLink}
-        className="mt-2 flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-[11.5px] font-semibold text-bg transition hover:brightness-110"
-      >
-        <Link2 size={12} />
-        Link #{chanName}
-      </button>
-    </div>
-  );
-}
-
 function NoChannels({ onOpenSettings }: { onOpenSettings?: () => void }) {
   return (
     <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
@@ -243,12 +188,10 @@ interface Props {
   joinedChannels: string[];
   activeChannel: string;
   onSelectChannel: (c: string) => void;
-  channelStatuses: Record<string, { authorized?: boolean }>;
   logs: Record<string, LogEntry[]>;
   histories: Record<string, ChatChannelHistory>;
   onLoadOlder: (channel: string) => void;
   botUsername?: string;
-  botAuthorized?: boolean;
   onOpenSettings?: () => void;
 }
 
@@ -257,12 +200,10 @@ export default function ChatPanel({
   joinedChannels,
   activeChannel,
   onSelectChannel,
-  channelStatuses,
   logs,
   histories,
   onLoadOlder,
   botUsername,
-  botAuthorized = false,
   onOpenSettings,
 }: Props) {
   const [atBottom, setAtBottom] = useState(true);
@@ -276,7 +217,6 @@ export default function ChatPanel({
   const highlightBots = useBotHighlight();
 
   const activeNorm = normChannel(activeChannel);
-  const isLinked = channelStatuses[activeNorm]?.authorized ?? channelStatuses[`#${activeNorm}`]?.authorized ?? false;
   const entries: LogEntry[] = logs[activeNorm] || logs[`#${activeNorm}`] || [];
   const history = histories[activeNorm];
   const canRevealCached = Boolean(history && history.visibleCount < history.entries.length);
@@ -363,32 +303,6 @@ export default function ChatPanel({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   };
 
-  const startBotAuth = () => {
-    const width = 600;
-    const height = 700;
-    const left = window.screen.width / 2 - width / 2;
-    const top = window.screen.height / 2 - height / 2;
-    window.open(
-      '/auth/login',
-      'twitch_bot_auth',
-      `width=${width},height=${height},top=${top},left=${left}`
-    );
-  };
-
-  const startLink = () => {
-    const chan = activeNorm;
-    if (!chan) return;
-    const width = 600;
-    const height = 700;
-    const left = window.screen.width / 2 - width / 2;
-    const top = window.screen.height / 2 - height / 2;
-    window.open(
-      `/auth/broadcaster?channel=${encodeURIComponent(chan)}`,
-      'twitch_broadcaster_auth',
-      `width=${width},height=${height},top=${top},left=${left}`
-    );
-  };
-
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface">
       {/* channel tabs */}
@@ -397,8 +311,7 @@ export default function ChatPanel({
           {channels.map((chan) => {
           const chanNorm = normChannel(chan);
           const isActive = chanNorm === activeNorm;
-          const chanLinked = channelStatuses[chanNorm]?.authorized ?? channelStatuses[`#${chanNorm}`]?.authorized ?? false;
-          const glyph = channelStatusGlyph(chanNorm, joinedChannels, chanLinked);
+          const joined = joinedChannels.map(normChannel).includes(chanNorm);
           return (
             <button
               key={chan}
@@ -407,10 +320,8 @@ export default function ChatPanel({
                 isActive ? 'text-ink' : 'text-muted hover:text-ink'
               }`}
             >
-              {glyph === 'membership-missing' ? (
+              {!joined ? (
                 <WifiOff size={11} className="text-amber-400" strokeWidth={2.4} aria-label="Bot not joined" />
-              ) : glyph === 'broadcaster-unlinked' ? (
-                <Unlink size={11} className="text-amber-400" strokeWidth={2.4} aria-label="Broadcaster not linked" />
               ) : (
                 <Hash size={11} className={isActive ? 'text-accent' : 'text-faint'} strokeWidth={2.4} />
               )}
@@ -421,17 +332,6 @@ export default function ChatPanel({
         })}
         </div>
       )}
-
-      {/* pinned status banner with progressive disclosure */}
-      {botAuthorized === false ? (
-        <div className="shrink-0 border-b border-line bg-surface-2/30 p-2.5">
-          <BotAuthBanner botUsername={botUsername} onAuthorize={startBotAuth} />
-        </div>
-      ) : channels.length > 0 && !isLinked ? (
-        <div className="shrink-0 border-b border-line bg-surface-2/30 p-2.5">
-          <LinkBanner channel={activeNorm} onLink={startLink} />
-        </div>
-      ) : null}
 
       {/* log */}
       <div className="relative min-h-0 flex-1">

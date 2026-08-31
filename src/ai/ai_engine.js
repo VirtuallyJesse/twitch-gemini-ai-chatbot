@@ -87,7 +87,7 @@ export class AIEngine {
         this.histories = new Map();
 
         // Private internal collaborator
-        this.#imageDownloader = imageDownloader ?? new ImageDownloader({ fetchImpl });
+        this.#imageDownloader = imageDownloader ?? new ImageDownloader();
         this.#toolDispatcher = new ToolDispatcher({
             tools,
             searchProvider: this.searchProvider,

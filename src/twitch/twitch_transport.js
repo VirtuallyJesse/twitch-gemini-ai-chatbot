@@ -93,132 +93,6 @@ export class MissingScopeError extends Error {
     }
 }
 
-export function renderAuthMismatchHtml({ expected, actual, retryUrl, isBroadcaster = false }) {
-    const cleanExpected = String(expected || '').replace(/^[#@]/, '');
-    const cleanActual = String(actual || '').replace(/^[#@]/, '');
-    const title = isBroadcaster ? 'Broadcaster Authorization Mismatch' : 'Account Authorization Mismatch';
-    const explanation = isBroadcaster
-        ? `You attempted to link stream management for channel <strong>#${cleanExpected}</strong>, but you authorized with Twitch account <strong>${cleanActual}</strong>.`
-        : `This bot is configured to run as <strong>${cleanExpected}</strong>, but you authorized with Twitch account <strong>${cleanActual}</strong>.`;
-    const actionText = isBroadcaster
-        ? `Log into Twitch as <strong>${cleanExpected}</strong> in your browser (or switch accounts) and try again.`
-        : `Log into Twitch as <strong>${cleanExpected}</strong> (or open the authorization link in an <strong>Incognito / Private window</strong>) and try again.`;
-    const buttonText = isBroadcaster
-        ? `Retry Authorization for #${cleanExpected}`
-        : `Retry Authorization with ${cleanExpected}`;
-
-    return `<!doctype html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${title}</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: #101113;
-            color: #9da2ab;
-            line-height: 1.55;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
-        }
-        .card {
-            background: #18191c;
-            border: 1px solid #2d3039;
-            border-radius: 12px;
-            padding: 28px;
-            max-width: 520px;
-            width: 100%;
-        }
-        .header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 16px;
-        }
-        .icon-wrap {
-            width: 36px;
-            height: 36px;
-            border-radius: 8px;
-            background: rgba(251, 191, 36, 0.1);
-            border: 1px solid rgba(251, 191, 36, 0.25);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #fbbf24;
-            flex-shrink: 0;
-        }
-        h1 {
-            color: #e8eaed;
-            font-size: 16px;
-            font-weight: 600;
-            line-height: 1.3;
-        }
-        p {
-            font-size: 13px;
-            margin-bottom: 12px;
-            color: #9da2ab;
-        }
-        strong {
-            color: #a273ff;
-            background: #222429;
-            padding: 1px 5px;
-            border-radius: 4px;
-            border: 1px solid #2d3039;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .actions {
-            margin-top: 20px;
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        .button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: #a273ff;
-            color: #101113;
-            text-decoration: none;
-            padding: 9px 18px;
-            border-radius: 6px;
-            font-weight: 600;
-            font-size: 13px;
-            transition: filter 0.15s ease;
-        }
-        .button:hover {
-            filter: brightness(1.15);
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header">
-            <div class="icon-wrap">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="8" x2="12" y2="12"></line>
-                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                </svg>
-            </div>
-            <h1>${title}</h1>
-        </div>
-        <p>${explanation}</p>
-        <p>${actionText}</p>
-        <div class="actions">
-            <a class="button" href="${retryUrl}">${buttonText}</a>
-        </div>
-    </div>
-</body>
-</html>`;
-}
-
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
 export const channelKey = (channel) => `#${cleanName(channel)}`;
 const delay = (ms) => (ms > 0 ? new Promise(resolve => setTimeout(resolve, ms)) : Promise.resolve());
@@ -667,11 +541,14 @@ class HelixClient {
         return data;
     }
 
-    /** Batch-resolve logins -> user IDs. */
-    async resolveUserIds(usernames) {
+    /** Batch-resolve logins -> user IDs with the caller-selected token authority. */
+    async resolveUserIds(usernames, { useAppToken = false } = {}) {
         const logins = [...new Set((usernames || []).map(cleanName).filter(Boolean))];
         if (logins.length === 0) return {};
-        const data = await this.request('/users', { query: { login: logins } });
+        const data = await this.request('/users', {
+            query: { login: logins },
+            useAppToken
+        });
         const idMap = {};
         for (const user of data?.data || []) idMap[cleanName(user.login)] = user.id;
         return idMap;
@@ -1207,7 +1084,7 @@ export class TwitchTransport {
         this.auth = {
             getLoginUrl: (redirectUri, state) => this.#buildLoginUrl(redirectUri, state),
             handleCallback: (code, redirectUri) => this.#handleCallback(code, redirectUri),
-            getBroadcasterLoginUrl: (redirectUri, channel) => this.#buildBroadcasterLoginUrl(redirectUri, channel),
+            getBroadcasterLoginUrl: (redirectUri, channel, state) => this.#buildBroadcasterLoginUrl(redirectUri, channel, state),
             handleBroadcasterCallback: (channel, code, redirectUri) =>
                 this.#handleBroadcasterCallback(channel, code, redirectUri),
             getStatus: () => this.#getStatus(),
@@ -1446,7 +1323,7 @@ export class TwitchTransport {
         return url.toString();
     }
 
-    #buildBroadcasterLoginUrl(redirectUri, channel) {
+    #buildBroadcasterLoginUrl(redirectUri, channel, state = '') {
         if (!this.#clientId) throw new Error('Twitch client ID is required to build the authorization URL.');
         const name = cleanName(channel);
         if (!name) throw new Error('channel is required for broadcaster authorization.');
@@ -1455,7 +1332,7 @@ export class TwitchTransport {
         url.searchParams.set('client_id', this.#clientId);
         url.searchParams.set('redirect_uri', redirectUri);
         url.searchParams.set('scope', TWITCH_BROADCASTER_SCOPES.join(' '));
-        url.searchParams.set('state', `broadcaster:${name}`);
+        if (state) url.searchParams.set('state', state);
         return url.toString();
     }
 

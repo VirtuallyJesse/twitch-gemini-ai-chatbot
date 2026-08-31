@@ -8,8 +8,21 @@ export const COOKIE_NAME = 'tg_session';
 export const STATE_COOKIE = 'tg_oauth_state';
 export const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
+const PLACEHOLDER_SECRETS = new Set([
+    'dev-insecure',
+    'change-me',
+    'changeme',
+    'your-client-secret',
+    'your-twitch-client-secret',
+    'twitch-client-secret'
+]);
+
 export function deriveSessionSecret(clientSecret) {
-    return crypto.createHmac('sha256', String(clientSecret || 'dev-insecure'))
+    const material = String(clientSecret || '').trim();
+    if (!material || PLACEHOLDER_SECRETS.has(material.toLowerCase())) {
+        throw new Error('TWITCH_CLIENT_SECRET must be configured with non-placeholder signing material.');
+    }
+    return crypto.createHmac('sha256', material)
         .update('twitch-dashboard-session-v1')
         .digest();
 }

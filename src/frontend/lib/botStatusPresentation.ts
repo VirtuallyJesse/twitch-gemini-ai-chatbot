@@ -8,10 +8,7 @@ interface ConnectionStatusInput {
   botConnected: boolean;
   channels: readonly string[];
   joinedChannels: readonly string[];
-}
-
-export function botAuthorization(status: { authorized?: boolean } | null | undefined): boolean {
-  return status?.authorized === true;
+  showSetupDetails?: boolean;
 }
 
 export function channelJoinControls(botAuthorized: boolean): { disabled: boolean; helper: string | null } {
@@ -26,8 +23,14 @@ export function connectionStatus({
   botConnected,
   channels,
   joinedChannels,
+  showSetupDetails = true,
 }: ConnectionStatusInput): { tone: ConnectionTone; label: string } {
   if (!wsConnected) return { tone: 'offline', label: 'Offline' };
+  if (!showSetupDetails) {
+    return botConnected
+      ? { tone: 'connected', label: 'Connected' }
+      : { tone: 'connecting', label: 'Available' };
+  }
   if (!botAuthorized) return { tone: 'warning', label: 'Setup required' };
   if (!botConnected) return { tone: 'connecting', label: 'Connecting…' };
 
@@ -41,15 +44,4 @@ export function connectionStatus({
     tone: 'connected',
     label: `Connected · ${joinedCount} channel${joinedCount === 1 ? '' : 's'}`,
   };
-}
-
-export function channelStatusGlyph(
-  channel: string,
-  joinedChannels: readonly string[],
-  broadcasterAuthorized: boolean
-): 'membership-missing' | 'broadcaster-unlinked' | 'ready' {
-  const joined = new Set(joinedChannels.map(normChannel));
-  if (!joined.has(normChannel(channel))) return 'membership-missing';
-  if (!broadcasterAuthorized) return 'broadcaster-unlinked';
-  return 'ready';
 }

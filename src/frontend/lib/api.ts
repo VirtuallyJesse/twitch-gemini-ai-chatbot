@@ -1,5 +1,6 @@
 import type {
   AllConfig,
+  AdminDiagnostics,
   BotStatus,
   ChannelBadgeCatalog,
   ConfigDomain,
@@ -11,6 +12,13 @@ import type {
 import { normChannel } from './channel';
 import type { EmoteProvider } from './emotes';
 import type { AvatarIdentity, AvatarLookupResult } from './avatars';
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAfter: number | null) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 class ApiClient {
   private async request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -31,7 +39,8 @@ class ApiClient {
       } catch {
         // use default error message
       }
-      throw new Error(errMessage);
+      const retryAfter = Number.parseInt(res.headers.get('Retry-After') || '', 10);
+      throw new ApiError(errMessage, res.status, Number.isFinite(retryAfter) ? retryAfter : null);
     }
 
     return res.json();
@@ -45,12 +54,12 @@ class ApiClient {
     return this.request<BotStatus>('/api/status');
   }
 
-  async getChannels(): Promise<string[]> {
-    return this.request<string[]>('/api/channels');
+  async getAdminStatus(): Promise<AdminDiagnostics> {
+    return this.request<AdminDiagnostics>('/api/admin/status');
   }
 
-  async getChannelStatuses(): Promise<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>> {
-    return this.request<Record<string, { authorized?: boolean; linked?: boolean; needsRelink?: boolean }>>('/api/channel-status');
+  async getChannels(): Promise<string[]> {
+    return this.request<string[]>('/api/channels');
   }
 
   async getChatPage(channel: string, cursor: string | null = null): Promise<RawChatHistoryPage> {

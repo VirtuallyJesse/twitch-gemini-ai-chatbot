@@ -32,8 +32,8 @@ A high-level checklist — the [Tutorial](#tutorial) below covers every step in 
 5. *(Optional)* **Get a Tavily API key** from [`app.tavily.com`](https://app.tavily.com) to enable live web search
 6. *(Optional)* **Get a Pollinations API key** from [`enter.pollinations.ai`](https://enter.pollinations.ai) to use Pollinations for media generation
 7. **Deploy your fork to Render** and fill in your environment variables
-8. **Authorize the bot** at `https://YOUR-APP.onrender.com/auth/login`
-9. **Open your dashboard** at `https://YOUR-APP.onrender.com/` to join channels and customize personality, commands, models, and alerts
+8. **Open your dashboard** at `https://YOUR-APP.onrender.com/`, sign in with Twitch, and authorize the bot from **Configuration → Connection & channels**
+9. Join channels and customize personality, commands, models, and alerts from the dashboard
 
 That's it. No local install. No terminal commands.
 
@@ -111,18 +111,18 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
 
 #### 4. Connect and configure your accounts (after Render deploys)
 
-1. In your **Bot's Incognito window**, visit:
+1. In your **Bot's Incognito window**, open the dashboard:
    ```
-   https://YOUR-APP.onrender.com/auth/login
+   https://YOUR-APP.onrender.com/
    ```
-   Click **Authorize** to connect the bot to chat.
+   Sign in with Twitch at the bottom left, open **Configuration → Connection & channels**, and click **Authorize** beside the bot account.
 
 2. In your **Streamer browser**, open your dashboard:
    ```
    https://YOUR-APP.onrender.com/
    ```
    - Click **Sign in with Twitch** in the top right.
-   - Click the **`[Link Broadcaster]`** button next to your channel name to enable stream controls and live alerts.
+   - Open **Configuration → Connection & channels**, then use **Link** beside the channel to enable stream controls and live alerts.
    - Click your profile name → **⚙️ Bot Configuration** to customize persona, commands, and alerts.
 
 3. **Mod the Bot:** In your Twitch stream chat, type `/mod yourbotusername` so the bot can use its full toolkit.
@@ -448,7 +448,7 @@ Yes, for development and testing. Run `npm install`, build the dashboard once wi
 
 > ⚠️ **Use separate credentials for local development.** Create a different Twitch application (with `http://localhost:3000/auth/callback` as the redirect URL) and either omit `UPSTASH_REDIS_URL` or point it to a separate database. Using the same credentials as production will overwrite your live tokens and data.
 
-Once running, visit `http://localhost:3000/auth/login` to authorize.
+Once running, visit `http://localhost:3000/`, sign in with Twitch at the bottom left, and authorize from **Configuration → Connection & channels**.
 
 > 💡 `AI_VERBOSE` | `true` turns on detailed engine logging while debugging.
 
