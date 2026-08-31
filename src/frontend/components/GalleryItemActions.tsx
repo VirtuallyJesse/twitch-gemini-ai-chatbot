@@ -42,7 +42,7 @@ export default function GalleryItemActions({ item }: { item: MediaItem }) {
             requestDelete(item);
           }}
           onPointerDown={(event) => event.stopPropagation()}
-          className="flex h-6 w-6 items-center justify-center rounded bg-black/55 text-red-300 transition-colors hover:bg-red-950/90 hover:text-red-200"
+          className="flex h-6 w-6 items-center justify-center rounded bg-black/45 text-ink/70 transition-colors hover:bg-black/70 hover:text-ink"
         >
           <Trash2 size={11} strokeWidth={2.2} />
         </button>

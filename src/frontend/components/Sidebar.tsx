@@ -108,7 +108,7 @@ export default function Sidebar({
       </div>
 
       {/* bottom — docked profile */}
-      <div className="shrink-0 border-t border-line px-2 py-2">
+      <div className="shrink-0 border-t border-line px-2 pt-2 pb-16 lg:pb-2">
         {viewer?.authenticated ? (
           <div className="flex items-center justify-between gap-1.5">
             <button
