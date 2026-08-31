@@ -1,7 +1,4 @@
-const HOSTS = {
-    primary: 'https://i.nuuls.com/upload',
-    fallback: 'https://kappa.lol/api/upload'
-};
+import { isHttpUrl } from './media_hosts.js';
 
 const UPLOAD_KIND = {
     image: 'image',
@@ -47,11 +44,18 @@ export class MediaUploader {
         fetchImpl = globalThis.fetch.bind(globalThis),
         timeoutMs = null,
         timeoutMsByKind = {},
-        primaryUrl = HOSTS.primary,
-        fallbackUrl = HOSTS.fallback,
+        primaryUrl,
+        fallbackUrl,
         FormDataImpl = FormData,
         BlobImpl = Blob
     } = {}) {
+        if (!isHttpUrl(primaryUrl)) {
+            throw new Error('MediaUploader requires a valid primaryUrl');
+        }
+        if (!isHttpUrl(fallbackUrl)) {
+            throw new Error('MediaUploader requires a valid fallbackUrl');
+        }
+
         this.fetchImpl = fetchImpl;
         this.primaryUrl = primaryUrl;
         this.fallbackUrl = fallbackUrl;

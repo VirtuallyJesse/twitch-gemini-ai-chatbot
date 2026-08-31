@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { AIEngine } from './ai/ai_engine.js';
 import { EmotePool } from './twitch/emote_pool.js';
 import { MediaUploader } from './media/media_uploader.js';
+import { MEDIA_HOSTS, configureMediaHosts } from './media/media_hosts.js';
 import { MediaPipeline } from './media/media_pipeline.js';
 import ErrorHandler from './utils/error_handler.js';
 import { PollinationsProvider } from './media/pollinations_provider.js';
@@ -102,7 +103,11 @@ const emotes = new EmotePool({
     appendEnabled: bootConfig.bot_settings?.enable_emote_appending !== undefined ? bootConfig.bot_settings.enable_emote_appending : bool(env.ENABLE_EMOTE_APPENDING, true)
 });
 
-const mediaUploader = new MediaUploader();
+const mediaHostConfig = configureMediaHosts(MEDIA_HOSTS);
+const mediaUploader = new MediaUploader({
+    primaryUrl: mediaHostConfig.uploadUrls.primary,
+    fallbackUrl: mediaHostConfig.uploadUrls.fallback
+});
 const imageDownloader = new ImageDownloader();
 const errorHandler = new ErrorHandler({ messages: bootConfig.error_messages });
 
@@ -206,6 +211,7 @@ const server = new WebServer({
     clientSecret: env.TWITCH_CLIENT_SECRET || '',
     botUsername: env.TWITCH_USERNAME || '',
     externalUrl: env.RENDER_EXTERNAL_URL || '',
+    publicMediaOrigins: mediaHostConfig.publicOrigins,
     trustProxy: 1
 });
 

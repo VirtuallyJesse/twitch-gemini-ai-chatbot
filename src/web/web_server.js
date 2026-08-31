@@ -61,6 +61,31 @@ const SAMPLE_ALERT_VARS = {
 const AVATAR_CACHE_MAX = 10_000;
 const HELIX_LOOKUP_BATCH = 100;
 
+function normalizePublicMediaOrigins(origins) {
+    if (!Array.isArray(origins)) {
+        throw new Error('WebServer requires publicMediaOrigins to be an array');
+    }
+
+    for (const origin of origins) {
+        if (typeof origin !== 'string' || !origin || origin.trim() !== origin || origin.includes('*')) {
+            throw new Error(`Invalid public media origin: ${String(origin)}`);
+        }
+
+        let url;
+        try {
+            url = new URL(origin);
+        } catch {
+            throw new Error(`Invalid public media origin: ${origin}`);
+        }
+
+        if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin) {
+            throw new Error(`Invalid public media origin: ${origin}`);
+        }
+    }
+
+    return [...new Set(origins)];
+}
+
 export class WebServer {
     #transport;
     #storage;
@@ -141,6 +166,7 @@ export class WebServer {
             heartbeatIntervalMs = DEFAULT_HEARTBEAT_MS,
             maxWsPerIp = DEFAULT_WS_PER_IP,
             maxWsGlobal = DEFAULT_WS_GLOBAL,
+            publicMediaOrigins = [],
             publicDir = DEFAULT_PUBLIC_DIR,
             distDir = DEFAULT_DIST_DIR,
             trustProxy = 1,
@@ -150,6 +176,7 @@ export class WebServer {
 
         if (!transport) throw new Error('WebServer requires transport');
         if (!storage) throw new Error('WebServer requires storage');
+        const trustedPublicMediaOrigins = normalizePublicMediaOrigins(publicMediaOrigins);
 
         this.#transport = transport;
         this.#storage = storage;
@@ -208,7 +235,7 @@ export class WebServer {
                 "style-src 'self' 'unsafe-inline'",
                 "img-src 'self' data: blob: https:",
                 "media-src 'self' blob: https:",
-                `connect-src 'self' ${socketOrigin}`,
+                `connect-src 'self' ${socketOrigin} ${trustedPublicMediaOrigins.join(' ')}`.trim(),
                 "font-src 'self' data:",
                 "object-src 'none'",
                 "base-uri 'self'",
