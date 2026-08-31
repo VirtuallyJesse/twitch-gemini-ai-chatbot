@@ -110,6 +110,18 @@ redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -tonumber(ARGV[2]) - 1)
 return cjson.encode(stored)
 `;
 
+const DELETE_MEDIA_LUA = `
+local rows = redis.call('LRANGE', KEYS[1], 0, -1)
+for _, raw in ipairs(rows) do
+  local ok, entry = pcall(cjson.decode, raw)
+  if ok and type(entry) == 'table' and tostring(entry.id or '') == ARGV[1] then
+    local removed = redis.call('LREM', KEYS[1], 1, raw)
+    if removed > 0 then return 'DELETED' end
+  end
+end
+return 'ABSENT'
+`;
+
 function nextEntryOrder(list, now = Date.now()) {
     const previous = Number(list.at(-1)?.order) || 0;
     return Math.max(previous + 1, now * 1000);
@@ -402,6 +414,20 @@ export class MemoryStorageAdapter {
         }
     }
 
+    async deleteMediaEntry(id) {
+        try {
+            const target = String(id || '');
+            if (!target) return { ok: true, outcome: 'absent' };
+            const index = this.media.findIndex((entry) => String(entry?.id || '') === target);
+            if (index < 0) return { ok: true, outcome: 'absent' };
+            this.media.splice(index, 1);
+            return { ok: true, outcome: 'deleted' };
+        } catch (error) {
+            console.error('[Storage] Memory delete failed:', error.message);
+            return { ok: false, outcome: 'failure' };
+        }
+    }
+
     async setTokens(accessTokenOrPayload, refreshToken, expiration) {
         try {
             this.tokens = normalizeTokenPayload(accessTokenOrPayload, refreshToken, expiration);
@@ -668,6 +694,22 @@ export class UpstashRedisAdapter {
         }
     }
 
+    async deleteMediaEntry(id) {
+        try {
+            const target = String(id || '');
+            if (!target) return { ok: true, outcome: 'absent' };
+            const data = await this.request('/', [
+                'EVAL', DELETE_MEDIA_LUA, 1, MEDIA_KEY, target
+            ]);
+            if (data?.result === 'DELETED') return { ok: true, outcome: 'deleted' };
+            if (data?.result === 'ABSENT') return { ok: true, outcome: 'absent' };
+            return { ok: false, outcome: 'failure' };
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return { ok: false, outcome: 'failure' };
+        }
+    }
+
     async setTokens(accessTokenOrPayload, refreshToken, expiration) {
         try {
             const value = JSON.stringify(
@@ -840,6 +882,10 @@ export class Storage {
 
     getMediaLog(limit) {
         return this.adapter.getMediaLog(limit);
+    }
+
+    deleteMediaEntry(id) {
+        return this.adapter.deleteMediaEntry(id);
     }
 
     setTokens(accessTokenOrPayload, refreshToken, expiration) {

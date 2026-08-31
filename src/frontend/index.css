@@ -101,3 +101,21 @@ select:disabled {
 .tile-in {
   animation: tile-in 0.3s ease-out both;
 }
+
+/* Tile actions stay discoverable on touch and retain the quiet hover reveal
+   only when the device has a precise, hover-capable pointer. */
+.gallery-actions {
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .gallery-actions {
+    opacity: 0;
+  }
+
+  .group:hover .gallery-actions,
+  .gallery-actions:focus-within {
+    opacity: 1;
+  }
+}

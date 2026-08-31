@@ -4,7 +4,7 @@ import type { MediaItem } from '../lib/types';
 import { fmtSecs } from '../lib/time';
 import { claimPlayback } from '../lib/mediaBus';
 import TileCaption from './TileCaption';
-import SourceLink from './SourceLink';
+import GalleryItemActions from './GalleryItemActions';
 
 function Fallback({ video }: { video?: boolean }) {
   return (
@@ -143,7 +143,7 @@ export default function MediaTile({ item, index }: { item: MediaItem; index?: nu
     >
       {item.type === 'image' ? <ImageTile item={item} /> : <VideoTile item={item} />}
 
-      {item.src && <SourceLink href={item.src} label={item.type} />}
+      <GalleryItemActions item={item} />
 
       <TileCaption item={item} />
 

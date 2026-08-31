@@ -60,6 +60,7 @@ export interface ChatHistoryPage {
 
 export interface MediaItem {
   id: string;
+  persistedId?: string;
   type: MediaType;
   src?: string;
   prompt: string;
@@ -75,7 +76,7 @@ export interface MediaItem {
 }
 
 export interface RawMediaEntry {
-  id: string;
+  id?: string;
   timestamp: number | string;
   channel: string;
   username: string;

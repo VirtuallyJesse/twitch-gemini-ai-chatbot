@@ -8,9 +8,11 @@ export function normalizeMediaEntry(raw: RawMediaEntry): MediaItem {
 
   const ts = typeof raw.timestamp === 'number' ? raw.timestamp : Date.parse(String(raw.timestamp)) || Date.now();
   const minAgo = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+  const persistedId = typeof raw.id === 'string' && raw.id.trim() ? raw.id : undefined;
 
   return {
-    id: raw.id || `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: persistedId || `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    persistedId,
     type,
     src: raw.mediaUrl,
     prompt: raw.prompt || '',

@@ -1266,6 +1266,21 @@ export class WebServer {
             res.json(media);
         });
 
+        this.#app.delete('/api/media/:id', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            const id = String(req.params.id || '').trim();
+            if (!id) return res.status(400).json({ error: 'invalid_media_id' });
+
+            const result = await this.#storage.deleteMediaEntry(id);
+            if (!result?.ok) {
+                return res.status(503).json({ error: 'media_delete_failed' });
+            }
+            if (result.outcome === 'deleted') {
+                this.broadcast({ type: 'media:deleted', id });
+            }
+            res.json(result);
+        });
+
         this.#app.get('/gemini/:text', async (req, res) => {
             if (!this.#aiEngine?.generate) {
                 res.status(503).send('AI engine is not configured.');

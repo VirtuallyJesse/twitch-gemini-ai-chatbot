@@ -62,6 +62,12 @@ class ApiClient {
     return this.request<RawMediaEntry[]>('/api/media');
   }
 
+  async deleteMedia(id: string): Promise<{ ok: true; outcome: 'deleted' | 'absent' }> {
+    return this.request<{ ok: true; outcome: 'deleted' | 'absent' }>(`/api/media/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
   async getEmotes(channel: string): Promise<Record<string, string | { url?: string; provider?: EmoteProvider }>> {
     return this.request<Record<string, string | { url?: string; provider?: EmoteProvider }>>(`/api/emotes/${normChannel(channel)}`);
   }

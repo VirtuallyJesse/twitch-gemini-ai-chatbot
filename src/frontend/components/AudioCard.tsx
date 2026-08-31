@@ -5,7 +5,7 @@ import { AUDIO_TINT_HUES } from '../lib/audioTint';
 import { fmtSecs } from '../lib/time';
 import { claimPlayback } from '../lib/mediaBus';
 import TileCaption from './TileCaption';
-import SourceLink from './SourceLink';
+import GalleryItemActions from './GalleryItemActions';
 
 /* flat wash mixing — base wash for the card body, stronger mix for the
    progress bars; chrome (pills, edges) stays uniform with image/video tiles */
@@ -184,7 +184,7 @@ export default function AudioCard({
         {timeLabel}
       </span>
 
-      {src && <SourceLink href={src} label="audio" />}
+      <GalleryItemActions item={item} />
 
       {error || !src ? (
         <div className="pointer-events-none absolute inset-0 flex select-none flex-col items-center justify-center gap-2">

@@ -34,10 +34,13 @@ import {
   type ChatRequestMode,
 } from './lib/chatHistory';
 import { normalizeMediaEntry } from './lib/media';
+import { applyMediaMutation, replayMediaMutations, type MediaMutation } from './lib/mediaMutations';
 import Sidebar from './components/Sidebar';
 import GalleryToolbar, { type Filter } from './components/GalleryToolbar';
 import MediaGrid from './components/MediaGrid';
 import SettingsModal from './components/SettingsModal';
+import { GalleryActionsProvider } from './components/GalleryItemActions';
+import DeleteMediaDialog, { type DeleteMediaDialogState } from './components/DeleteMediaDialog';
 
 function haystack(m: MediaItem): string {
   return [
@@ -69,6 +72,8 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState(createChatHistoryModel);
   const chatHistoryRef = useRef(chatHistory);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteMediaDialogState | null>(null);
+  const deletePendingRef = useRef(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [avatarHydrator] = useState(() => createGalleryAvatarHydrator({
     lookup: (identities, signal) => api.getAvatars(identities, signal),
@@ -138,13 +143,24 @@ export default function App() {
 
   // Initial Data Hydration
   useEffect(() => {
+    let disposed = false;
     let configuredChannelsReady = false;
+    let mediaHydrated = false;
     const pendingChatEvents: Array<{ channel: string; entry: RawChatEntry }> = [];
+    const pendingMediaMutations: MediaMutation[] = [];
     const acceptLiveChat = (data: { channel: string; entry: RawChatEntry }) => {
       const chan = normChannel(data.channel);
       const entry = formatRawChatEntry(data.entry);
       if (!entry) return;
       commitChatHistory(appendLiveChatEntry(chatHistoryRef.current, chan, entry));
+    };
+    const acceptMediaMutation = (mutation: MediaMutation) => {
+      if (disposed) return;
+      if (!mediaHydrated) {
+        pendingMediaMutations.push(mutation);
+        return;
+      }
+      setMediaList((previous) => applyMediaMutation(previous, mutation));
     };
 
     // Connect WebSocket
@@ -159,6 +175,7 @@ export default function App() {
       api.getChannelStatuses(),
       api.getMedia(),
     ]).then(([vRes, sRes, cRes, csRes, mRes]) => {
+      if (disposed) return;
       if (vRes.status === 'fulfilled') setViewer(vRes.value);
       if (sRes.status === 'fulfilled') setBotStatus(sRes.value);
 
@@ -182,10 +199,12 @@ export default function App() {
 
       if (csRes.status === 'fulfilled') setChannelStatuses(csRes.value);
 
-      if (mRes.status === 'fulfilled' && Array.isArray(mRes.value)) {
-        const normalized = mRes.value.map(normalizeMediaEntry);
-        setMediaList(normalized);
-      }
+      const snapshot = mRes.status === 'fulfilled' && Array.isArray(mRes.value)
+        ? mRes.value.map(normalizeMediaEntry)
+        : [];
+      setMediaList(replayMediaMutations(snapshot, pendingMediaMutations));
+      pendingMediaMutations.length = 0;
+      mediaHydrated = true;
     });
 
     // Real-time WebSocket Listeners
@@ -201,8 +220,13 @@ export default function App() {
 
     const unsubMedia = wsClient.on<{ entry: RawMediaEntry }>('media', (data) => {
       if (!data?.entry) return;
-      const normalized = normalizeMediaEntry(data.entry);
-      setMediaList((prev) => [normalized, ...prev]);
+      acceptMediaMutation({ type: 'added', item: normalizeMediaEntry(data.entry) });
+    });
+
+    const unsubMediaDeleted = wsClient.on<{ id: string }>('media:deleted', (data) => {
+      if (!data?.id) return;
+      acceptMediaMutation({ type: 'deleted', id: data.id });
+      setDeleteDialog((current) => current?.target.persistedId === data.id ? null : current);
     });
 
     const unsubEmotes = wsClient.on<{ channel: string; emotes: Record<string, string> }>('emotes:update', (data) => {
@@ -272,9 +296,11 @@ export default function App() {
     window.addEventListener('message', handleWindowMessage);
 
     return () => {
+      disposed = true;
       unsubStatus();
       unsubChat();
       unsubMedia();
+      unsubMediaDeleted();
       unsubEmotes();
       unsubBadges();
       unsubBotStatus();
@@ -313,6 +339,36 @@ export default function App() {
     await api.logout();
     setViewer({ authenticated: false });
   };
+
+  const requestMediaDelete = useCallback((item: MediaItem) => {
+    if (!item.persistedId || deletePendingRef.current) return;
+    setDeleteDialog({ target: item, pending: false, error: null });
+  }, []);
+
+  const cancelMediaDelete = useCallback(() => {
+    if (deletePendingRef.current) return;
+    setDeleteDialog(null);
+  }, []);
+
+  const confirmMediaDelete = useCallback(async () => {
+    const id = deleteDialog?.target.persistedId;
+    if (!id || deletePendingRef.current) return;
+    deletePendingRef.current = true;
+    setDeleteDialog((current) => current?.target.persistedId === id
+      ? { ...current, pending: true, error: null }
+      : current);
+    try {
+      await api.deleteMedia(id);
+      setMediaList((previous) => applyMediaMutation(previous, { type: 'deleted', id }));
+      setDeleteDialog((current) => current?.target.persistedId === id ? null : current);
+    } catch {
+      setDeleteDialog((current) => current?.target.persistedId === id
+        ? { ...current, pending: false, error: 'Couldn’t delete this gallery item. Try again.' }
+        : current);
+    } finally {
+      deletePendingRef.current = false;
+    }
+  }, [deleteDialog]);
 
   // Search & Filter
   const searched = useMemo(() => {
@@ -378,11 +434,16 @@ export default function App() {
           onQuery={setQuery}
         />
         <div className="min-h-0 flex-1">
-          <MediaGrid
-            items={items}
-            resetKey={`${filter}:${query}`}
-            onItemsExposed={hydrateExposedMedia}
-          />
+          <GalleryActionsProvider
+            canDelete={Boolean(viewer?.authenticated && viewer.isAdmin)}
+            requestDelete={requestMediaDelete}
+          >
+            <MediaGrid
+              items={items}
+              resetKey={`${filter}:${query}`}
+              onItemsExposed={hydrateExposedMedia}
+            />
+          </GalleryActionsProvider>
         </div>
       </section>
 
@@ -424,6 +485,11 @@ export default function App() {
           setActiveChannel((prev) => (cleaned.includes(prev) ? prev : cleaned[0] || ''));
           api.getChannelStatuses().then((cs) => cs && setChannelStatuses(cs));
         }}
+      />
+      <DeleteMediaDialog
+        state={deleteDialog}
+        onCancel={cancelMediaDelete}
+        onConfirm={() => void confirmMediaDelete()}
       />
     </div>
   );
