@@ -99,14 +99,14 @@ When not doing a command, follow these rules to define your personality:
             ai_enabled: true,
             cooldown_seconds: 0,
             fallback_template: 'Thanks for subbing, {username}!',
-            ai_prompt: "Thank {username} for subbing. Optional message: '{message}'."
+            ai_prompt: "Thank {username} for subbing. {username}'s optional message: '{message}'."
         }),
         resub: Object.freeze({
             enabled: true,
             ai_enabled: true,
             cooldown_seconds: 0,
             fallback_template: 'Thanks for {months} months, {username}!',
-            ai_prompt: "Thank {username} for resubbing for {months} months. Optional message: '{message}'."
+            ai_prompt: "Thank {username} for resubbing for {months} months. {username}'s optional message: '{message}'."
         }),
         sub_gift: Object.freeze({
             enabled: true,
@@ -128,7 +128,7 @@ When not doing a command, follow these rules to define your personality:
             min_bits: 100,
             cooldown_seconds: 0,
             fallback_template: 'Thanks for the {bits} bits, {username}!',
-            ai_prompt: "Thank {username} for cheering {bits} bits. Optional message: '{message}'."
+            ai_prompt: "Thank {username} for cheering {bits} bits. {username}'s optional message: '{message}'."
         }),
         channel_points: Object.freeze({
             enabled: false,
@@ -137,7 +137,7 @@ When not doing a command, follow these rules to define your personality:
                 Hydrate: Object.freeze({
                     ai_enabled: true,
                     fallback_template: '{username} redeemed Hydrate. Drink water, streamer.',
-                    ai_prompt: "Thank {username} for redeeming Hydrate. Remind the streamer to hydrate. Optional note: '{user_input}'."
+                    ai_prompt: "Thank {username} for redeeming Hydrate. Remind the streamer to hydrate. {username}'s optional note: '{user_input}'."
                 })
             })
         }),
