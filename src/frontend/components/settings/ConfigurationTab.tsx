@@ -146,7 +146,7 @@ export default function ConfigurationTab({
       <SectionTitle>AI & search</SectionTitle>
       <FieldRow label="Gemini model">
         <select value={value.model_name} onChange={(event) => change('model_name', event.target.value)} className={selectCls}>
-          <option value="gemini-3.7-flash">Gemini 3.7 Flash</option><option value="gemini-3.6-flash">Gemini 3.6 Flash</option><option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+          <option value="gemini-3.8-flash">Gemini 3.8 Flash</option><option value="gemini-3.7-flash">Gemini 3.7 Flash</option><option value="gemini-3.6-flash">Gemini 3.6 Flash</option><option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
         </select>
       </FieldRow>
       <FieldRow label="Thinking level">

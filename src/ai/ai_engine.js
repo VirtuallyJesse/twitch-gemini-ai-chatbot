@@ -3,7 +3,7 @@ import ErrorHandler, { BotError } from '../utils/error_handler.js';
 import { ImageDownloader } from '../utils/image_downloader.js';
 import { ToolDispatcher } from './tool_dispatcher.js';
 
-const DEFAULT_MODEL = 'gemini-3.7-flash';
+const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS = 20_000;
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
 const ROTATE_WORTHY_MODEL_STATUSES = new Set([401, 403, 429, 503]);

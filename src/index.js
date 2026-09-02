@@ -146,7 +146,7 @@ const helixTools = helixActionSuite.tools;
 
 const aiEngine = new AIEngine({
     googleBackend,
-    modelName: bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.7-flash',
+    modelName: bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.8-flash',
     fileContext: bootConfig.system_instructions,
     historyLength: parseInt(bootConfig.bot_settings?.ai_history_length || env.AI_HISTORY_LENGTH, 10) || 10,
     searchGrounding: bootConfig.bot_settings?.search_grounding || env.SEARCH_GROUNDING || 'off',
@@ -222,7 +222,7 @@ const storageMode = storage.isPersistent ? 'Upstash Redis (Persistent)' : 'In-Me
 const mediaMode = mediaProviders.map((provider) => provider.id).join(', ') || 'Disabled';
 const effectiveSearchMode = bootConfig.bot_settings?.search_grounding || searchSlot;
 const searchMode = effectiveSearchMode ? String(effectiveSearchMode).toUpperCase() : 'Off';
-const effectiveModel = bootConfig.bot_settings?.model_name || env.MODEL_NAME || 'gemini-3.7-flash';
+const effectiveModel = aiEngine.modelName;
 
 console.log(`\n======================================================`);
 console.log(`  Twitch Gemini AI Chatbot                            `);

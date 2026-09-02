@@ -15,7 +15,7 @@ export const CONFIG_TYPES = Object.freeze([
 export const FACTORY = Object.freeze({
     bot_settings: Object.freeze({
         channels: Object.freeze([]),
-        model_name: 'gemini-3.7-flash',
+        model_name: 'gemini-3.8-flash',
         thinking_level: 'medium',
         search_grounding: '',
         tavily_search_depth: 'basic',
