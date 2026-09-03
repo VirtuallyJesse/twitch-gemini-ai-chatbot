@@ -4,7 +4,7 @@
 
 # Twitch Gemini Chatbot
 
-**A free, AI-powered Twitch chatbot running on Google Gemini. Deploys in minutes, runs 24/7.**
+**A free AI bot for your Twitch chat. Runs 24/7.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)](#license)
 
@@ -16,37 +16,34 @@
 
 <div align="center">
 <img src="assets/features.png" alt="Features Overview" width="100%">
-<img src="assets/dashboard.png" alt="Features Overview" width="100%">
+<br><br>
+<img src="assets/dashboard.png" alt="Web Dashboard and Media Gallery" width="100%">
 </div>
 
 ---
 
-## Quick Start
+## What You Need
 
-A high-level checklist — the [Tutorial](#tutorial) below covers every step in detail.
+Everything runs on free tiers. No credit card required, and no coding needed:
 
-1. **Fork this repository** to your GitHub account
-2. **Create a Twitch application** at [`dev.twitch.tv/console`](https://dev.twitch.tv/console) — note your Client ID & Secret
-3. **Get Gemini API key(s)** from [`console.cloud.google.com`](https://console.cloud.google.com/)
-4. **Create an Upstash Redis database** at [`console.upstash.com`](https://console.upstash.com) — copy the Redis connection string
-5. *(Optional)* **Get a Tavily API key** from [`app.tavily.com`](https://app.tavily.com) to enable live web search
-6. *(Optional)* **Get a Pollinations API key** from [`enter.pollinations.ai`](https://enter.pollinations.ai) to use Pollinations for media generation
-7. **Deploy your fork to Render** and fill in your environment variables
-8. **Open your dashboard** at `https://YOUR-APP.onrender.com/`, sign in with Twitch, and authorize the bot from **Configuration → Connection & channels**
-9. Join channels and customize personality, commands, models, and alerts from the dashboard
+- **GitHub account** (to hold your copy of the bot)
+- **Twitch Developer app** (gives your bot a name and connects to chat)
+- **Google Gemini API key** (powers the bot's responses)
+- **Upstash Redis database** (saves your settings and chat history)
+- **Render account** (hosts the bot 24/7 in the cloud)
 
-That's it. No local install. No terminal commands.
+Follow the step-by-step [Setup Guide](#setup-guide) below to set them up.
 
 ---
 
-## Tutorial
+## Setup Guide
 
-Full walkthrough for each requirement. Complete these in order.
+Follow these steps in order to get your bot running.
 
 <!-- ─── 1. FORK & DEPLOY ─────────────────────────────────── -->
 
 <details>
-<summary><strong>1 — Fork & Deploy to Render</strong></summary>
+<summary><strong>Step 1: Fork and deploy to Render</strong></summary>
 
 <br>
 
@@ -65,7 +62,7 @@ Click the button below to deploy your fork:
 
 1. Sign into [Render](https://render.com) with your **GitHub account**
 2. Render will detect your fork and open the Blueprint form
-3. Fill in the environment variables as you complete the sections below
+3. Leave this tab open. Fill in the fields as you complete the steps below
 4. Click **Deploy Blueprint** once every value is ready
 
 </details>
@@ -73,70 +70,56 @@ Click the button below to deploy your fork:
 <!-- ─── 2. TWITCH ──────────────────────────────────────── -->
 
 <details>
-<summary><strong>2 — Twitch Setup</strong></summary>
+<summary><strong>Step 2: Twitch setup</strong></summary>
 
 <br>
 
-To give your bot its own name and chat badge, you'll use two Twitch accounts:
-1. **Your Streamer Account** (where you go live)
-2. **Your Bot Account** (a separate Twitch account created for your bot)
+To give your bot its own name and chat badge, you will use two Twitch accounts:
+1. **Your Streamer account** (where you go live)
+2. **Your Bot account** (a separate Twitch account created for your bot)
 
-> 💡 **Tip:** Keep your main browser logged into your **Streamer account**, and open an **Incognito window** logged into your **Bot account**.
+> 💡 Keep your main browser logged into your **Streamer account**, and open an **Incognito window** logged into your **Bot account**.
 
 #### 1. Create the Twitch application
 
-1. Go to the [Twitch Developer Console](https://dev.twitch.tv/console) and sign in with your **main Twitch account**
-2. Click **Register Your Application**
+1. Go to the [Twitch Developer Console](https://dev.twitch.tv/console) and sign in with your **Streamer account**.
+2. Click **Register Your Application**.
 3. Fill in the form:
    - **Name:** anything you like (e.g. `My Stream Bot`)
    - **OAuth Redirect URL:** `https://YOUR-APP.onrender.com/auth/callback`  
      *(Replace `YOUR-APP` with your Render service name)*
    - **Category:** `Chat Bot`
-4. Click **Create**
+4. Click **Create**.
 
 #### 2. Get your credentials
 
-1. Click **Manage** on your new application
-2. Copy the **Client ID**
-3. Click **New Secret** and copy the **Client Secret**
+1. Click **Manage** on your new application.
+2. Copy the **Client ID**.
+3. Click **New Secret** and copy the **Client Secret**.
 
-#### 3. Render environment variables
+#### 3. Fill in your Render fields
 
-| Variable | What to enter |
+Paste these into your open Render tab:
+
+| Setting | What to enter |
 |---|---|
 | `TWITCH_USERNAME` | Your **bot account's** username (lowercase) |
-| `ADMIN_USERNAMES` | Your **streamer account's** username (grants access to dashboard settings) |
+| `ADMIN_USERNAMES` | Your **streamer account's** username |
 | `TWITCH_CLIENT_ID` | The Client ID copied above |
 | `TWITCH_CLIENT_SECRET` | The Client Secret copied above |
 
-#### 4. Connect and configure your accounts (after Render deploys)
-
-1. In your **Bot's Incognito window**, open the dashboard:
-   ```
-   https://YOUR-APP.onrender.com/
-   ```
-   Sign in with Twitch at the bottom left, open **Configuration → Connection & channels**, and click **Authorize** beside the bot account.
-
-2. In your **Streamer browser**, open your dashboard:
-   ```
-   https://YOUR-APP.onrender.com/
-   ```
-   - Click **Sign in with Twitch** in the top right.
-   - Open **Configuration → Connection & channels**, then use **Link** beside the channel to enable stream controls and live alerts.
-   - Click your profile name → **⚙️ Bot Configuration** to customize persona, commands, and alerts.
-
-3. **Mod the Bot:** In your Twitch stream chat, type `/mod yourbotusername` so the bot can use its full toolkit.
+> 💡 You will connect both accounts to the dashboard after Render finishes deploying in Step 7.
 
 </details>
 
 <!-- ─── 3. GEMINI ──────────────────────────────────────── -->
 
 <details>
-<summary><strong>3 — Gemini API Keys</strong></summary>
+<summary><strong>Step 3: Gemini API keys</strong></summary>
 
 <br>
 
-> ⚠️ Create your keys through the **Google Cloud Console** — not Google AI Studio. Keys created in the Cloud Console are managed separately and behave differently.
+> ⚠️ Create your keys through the **Google Cloud Console**, not Google AI Studio. Keys created in the Cloud Console are managed separately and behave differently.
 
 #### Create a project
 
@@ -156,32 +139,32 @@ To give your bot its own name and chat badge, you'll use two Twitch accounts:
 1. Go to **APIs & Services → Credentials**
    - Direct link: [`console.cloud.google.com/apis/credentials`](https://console.cloud.google.com/apis/credentials)
 2. Click **Create Credentials → API key**
-3. Copy the generated key — it starts with `AIza`
+3. Copy the generated key (starts with `AIza`)
 
 #### Multiple keys (recommended)
 
-Each key is tied to one project and gets its own daily quota — more keys = more capacity. Repeat all three steps above for as many projects as your account allows. Most accounts can create 5–15 projects.
+Each key is tied to one project and gets its own daily quota. More keys = more capacity. Repeat all three steps above for as many projects as your account allows. Most accounts can create 5-15 projects.
 
-The `GEMINI_API_KEY` environment variable accepts **multiple comma-separated keys** and rotates through them automatically.
+The `GEMINI_API_KEY` setting accepts **multiple comma-separated keys** and rotates through them automatically.
 
-#### Render environment variable
+#### Render setting
 
-| Variable | Value |
+| Setting | Value |
 |---|---|
 | `GEMINI_API_KEY` | One or more keys, e.g. `Key1,Key2,Key3` |
 
-> 💡 **Optional:** To give Gemini extra context on YouTube links (video title, description), create a YouTube Data API v3 key from the same [Credentials page](https://console.cloud.google.com/apis/credentials) and add it as `YOUTUBE_API_KEY`.
+> 💡 To give Gemini extra context on YouTube links (video title, description), create a YouTube Data API v3 key from the same [Credentials page](https://console.cloud.google.com/apis/credentials) and add it as `YOUTUBE_API_KEY`.
 
 </details>
 
 <!-- ─── 4. UPSTASH ─────────────────────────────────────── -->
 
 <details>
-<summary><strong>4 — Upstash Redis Setup</strong></summary>
+<summary><strong>Step 4: Upstash Redis setup</strong></summary>
 
 <br>
 
-Upstash provides a free persistent database that stores chat logs, media history, and OAuth tokens across Render restarts.
+Upstash provides a free database that saves your settings, chat logs, and media history across Render restarts.
 
 #### Create a database
 
@@ -192,58 +175,56 @@ Upstash provides a free persistent database that stores chat logs, media history
 5. Select the **Free** tier
 6. Click **Create**
 
-#### Get the connection string
+#### Get your database URL
 
 1. On the database details page, find the **Redis** section
-2. Copy the connection string that looks like:
+2. Click the **copy button** next to the URL:
    ```
    redis://default:xxxxxxxxxxxx@us1-xxxxxx.upstash.io:6379
    ```
 
-#### Render environment variable
+#### Render setting
 
-| Variable | Value |
+| Setting | Value |
 |---|---|
-| `UPSTASH_REDIS_URL` | The full `redis://...` connection string |
+| `UPSTASH_REDIS_URL` | The full `redis://...` connection URL |
 
 </details>
 
 <!-- ─── 5. TAVILY ──────────────────────────────────────── -->
 
 <details>
-<summary><strong>5 — Tavily Web Search Setup (optional)</strong></summary>
+<summary><strong>Step 5: Web search setup (optional)</strong></summary>
 
 <br>
 
-Tavily lets the bot look up real-time facts — scores, patch notes, breaking news, anything Gemini wouldn't know on its own.
+Google's built-in search requires a paid account. Tavily provides 1,000 free web searches per month with no payment required.
 
 #### Get your API key
 
 1. Go to [app.tavily.com](https://app.tavily.com) and sign up
 2. Copy your API key from the dashboard
 
-#### Render environment variable
+#### Render setting
 
-| Variable | Value |
+| Setting | Value |
 |---|---|
 | `TAVILY_API_KEY` | Your Tavily API key |
 
 To turn search on, open your dashboard settings and set **Web search** to `Tavily`.
-
-> 💡 The free tier gives you 1,000 searches a month, resetting on the 1st — plenty for daily chat use.
 
 </details>
 
 <!-- ─── 6. MEDIA ──────────────────────────────────────── -->
 
 <details>
-<summary><strong>6 — Media Generation (optional)</strong></summary>
+<summary><strong>Step 6: Media generation (optional)</strong></summary>
 
 <br>
 
 The bot can create images, videos, voice clips, and music with Google and Pollinations.
 
-Your Google key from step 3 already covers Google media models. To use Pollinations models as well, add a Pollinations API key:
+Your Google key from Step 3 already works for Google models. To use Pollinations models as well, add a Pollinations API key:
 
 #### Get your API key
 
@@ -252,30 +233,43 @@ Your Google key from step 3 already covers Google media models. To use Pollinati
 3. Create an API key in your dashboard
 4. Copy the key
 
-#### Render environment variable
+#### Render setting
 
-| Variable | Value |
+| Setting | Value |
 |---|---|
 | `POLLINATIONS_API_KEY` | Your Pollinations API key |
 
-You can switch models or providers anytime in your dashboard under **Commands**.
+> 💡 You can switch models or providers anytime in your dashboard under **Commands**.
 
 </details>
 
 <!-- ─── 7. DASHBOARD CONFIG ─────────────────────────────── -->
 
 <details>
-<summary><strong>7 — Dashboard & Bot Customization</strong></summary>
+<summary><strong>Step 7: Connect accounts and customize</strong></summary>
 
 <br>
 
-Your Render URL (`https://YOUR-APP.onrender.com`) is your live control center. Sign in with Twitch and click your name → **⚙️ Bot Configuration** to customize:
+Once Render finishes deploying, open your dashboard at `https://YOUR-APP.onrender.com` and sign in with Twitch at the bottom left.
 
-- **Configuration.** Which channels the bot joins and how it behaves in chat. Plus search, emotes, and stream actions.
-- **Persona.** Write your bot's personality, tone, and channel rules.
-- **Commands.** Tune the media commands (`!image`, `!video`, `!tts`, `!song`). Rename them, switch models, and set who can use them. Add custom text commands like `!discord` below.
-- **Alerts.** Toggle and customize AI or static celebrations for subs, raids, cheers, follows, and channel points.
-- **Errors.** Fine-tune chat fallback notices if external services go down.
+#### 1. Connect your accounts
+
+Open **Configuration → Connection & channels**:
+
+1. **Authorize the bot:** In your Bot account's incognito window, click **Authorize** next to Bot account.
+2. **Join your channel:** In your Streamer browser, enter your channel name under Configured channels and click **+ Join**.
+3. **Link your channel:** Click **Link** beside your channel name to enable stream controls and alerts.
+4. **Mod the bot:** In your Twitch chat, type `/mod yourbotname`.
+
+#### 2. Customize your bot
+
+Click your name at the bottom left to explore your settings:
+
+- **Configuration:** Manage web search, emote sync, and AI models.
+- **Persona:** Write your bot's personality, tone, and chat rules.
+- **Stream Actions:** Toggle Twitch controls like category changes, moderation, and viewer clipping.
+- **Commands:** Set up media commands (`!image`, `!video`, `!tts`, `!song`) and add custom text commands.
+- **Alerts:** Customize chat reactions for subs, raids, cheers, and channel points.
 
 > 💡 All dashboard changes save instantly.
 
@@ -286,11 +280,60 @@ Your Render URL (`https://YOUR-APP.onrender.com`) is your live control center. S
 ## FAQ
 
 <details>
+<summary><strong>How do I update my bot with new features and fixes?</strong></summary>
+
+<br>
+
+When a new update is released:
+
+1. Open your forked repository on GitHub.
+2. Click **Sync fork**, then **Update branch**.
+3. Render will automatically detect the changes, rebuild, and relaunch your bot.
+
+> 💡 All of your dashboard settings are preserved during updates.
+
+</details>
+
+<details>
+<summary><strong>Where do I find my Render URL and dashboard?</strong></summary>
+
+<br>
+
+1. Go to your [Render Dashboard](https://dashboard.render.com/).
+2. Click your web service name.
+3. Your URL (ending in `.onrender.com`) is located near the top, directly below your repository name.
+
+</details>
+
+<details>
 <summary><strong>How much can I use the bot each day?</strong></summary>
 
 <br>
 
-On the free tier, each API key under a project at [`console.cloud.google.com`](https://console.cloud.google.com/) gets around 20 calls per day. Your account may have anywhere from 5–15 available projects depending on account age, giving you 100–300 API calls per day. The `GEMINI_API_KEY` env var accepts multiple comma-separated keys and rotates through them automatically.
+On the free tier, each key in a Google Cloud project gets roughly 20 responses per day. Most Google accounts can create 5-15 projects, giving you 100-300 free responses daily. The `GEMINI_API_KEY` setting accepts multiple comma-separated keys, rotating through them automatically.
+
+</details>
+
+<details>
+<summary><strong>Does the bot stay online 24/7?</strong></summary>
+
+<br>
+
+Yes. The bot stays connected to your chat around the clock, whether you are live or offline. It includes a built-in keepalive ping to prevent Render's free tier from sleeping due to inactivity.
+
+</details>
+
+<details>
+<summary><strong>Can the bot perform Twitch actions like changing the title or moderating?</strong></summary>
+
+<br>
+
+Yes. Chatters can ask the bot to perform stream actions in natural language:
+
+- **Broadcaster and moderators:** Update the stream category or title, timeout chatters, post announcements, and run shoutouts (e.g. `@mybot change category to Just Chatting`).
+- **Everyone in chat:** Create clips (e.g. `@mybot clip that!`).
+
+You can toggle individual actions on or off or adjust the clip cooldown from the **Stream Actions** tab in your dashboard.
 
 </details>
 
@@ -299,143 +342,45 @@ On the free tier, each API key under a project at [`console.cloud.google.com`](h
 
 <br>
 
-Yes, the bot automatically celebrates new subs, gift bombs, cheers, raids, and channel point redemptions in chat. You can toggle alerts, tweak templates, and adjust bit/viewer thresholds directly in your dashboard under **Alerts**.
+Yes. The bot automatically celebrates new subs, gift bombs, cheers, raids, and channel point redemptions in chat. You can toggle alerts, customize messages, and adjust bit and viewer thresholds in your dashboard under **Alerts**.
 
 </details>
 
 <details>
-<summary><strong>Can I ask the bot to do things on Twitch, not just chat?</strong></summary>
+<summary><strong>Can chatters send images or videos to the bot?</strong></summary>
 
 <br>
 
-Yes. Depending on who's asking, the bot can:
+Yes, through links posted in chat:
 
-- Change the stream category or title
-- Timeout disruptive chatters
-- Send a highlighted announcement
-- Shout out another streamer
-- Create a clip
+- **Images:** The bot fetches image URLs present in a chat message. If an image is not recognized, try a direct link or a different image host.
+- **Videos and audio:** Only native YouTube URLs are supported; other video and audio links are unsupported. Adding the optional `YOUTUBE_API_KEY` setting gives the bot extra context like the video title and description.
 
-Just ask in chat, e.g. `@mybot change the category to Just Chatting` or `@mybot clip that!`
-
-Changing the title/category, timeouts, announcements, and shoutouts are limited to the broadcaster and moderators. Anyone in chat can ask for a clip.
+> 💡 Certain image models also accept image links alongside prompts to edit or remix existing pictures.
 
 </details>
 
 <details>
-<summary><strong>Can I turn off the bot's Twitch actions?</strong></summary>
+<summary><strong>How does web search work, and what happens if I run out?</strong></summary>
 
 <br>
 
-Yes. In your dashboard, open **Settings → Configuration** and turn off **Stream actions**. The bot goes back to pure Q&A.
+When enabled under **Configuration → Web search** with your `TAVILY_API_KEY`, the bot decides on its own when it needs to search the web.
 
-You can also tune **Clip Cooldown** and **Timeout Duration** below the toggle.
+Tavily includes 1,000 free searches each month (roughly 33 per day). If you run out, the bot detects it automatically and falls back to answering from its own knowledge without failing.
+
+> 💡 The `Google` search option requires a paid Gemini billing account. For free setups, stick with `Tavily` or `Off`.
 
 </details>
 
 <details>
-<summary><strong>Does the bot search the web?</strong></summary>
+<summary><strong>Can I use Vertex AI instead of Gemini API keys?</strong></summary>
 
 <br>
 
-Yes, if you set it up. Add your `TAVILY_API_KEY` in Render, then set **Settings → Configuration → Web search** to `Tavily`.
+Yes. Set `VERTEX_PROJECT_ID` instead of `GEMINI_API_KEY`. Do not configure both at the same time. [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) must already be configured in your environment.
 
-Leave it on `Off` and the bot skips search — it still answers from its own knowledge, and you can still paste it a link directly to read via URL context.
-
-`Google` uses Gemini's own built-in search instead of Tavily. This only works with a **paid** Gemini key, so stick to `Tavily` or `Off` unless you're already paying for Gemini.
-
-</details>
-
-<details>
-<summary><strong>What happens when I run out of Tavily searches?</strong></summary>
-
-<br>
-
-The bot detects it automatically and falls back to answering without search.
-
-The free tier gives 1,000 credits/month (basic search = 1 credit). How long that lasts depends on your chat's activity:
-
-| Chat activity | ~Searches/day | Lasts you |
-|---|---|---|
-| Light | 10 | All month, with room to spare |
-| Moderate | 50 | ~20 days |
-| Busy | 200 | ~5 days |
-
-> 💡 `TAVILY_SEARCH_DEPTH=advanced` costs 2 credits/search — roughly halve these numbers if you switch to it.
-
-</details>
-
-<details>
-<summary><strong>Can Gemini see images or videos?</strong></summary>
-
-<br>
-
-**Images** — Yes. The bot automatically fetches any image URLs present in a chat message and sends them to Gemini for context. If an image isn't being recognized, try a different image host.
-
-**Videos & Audio** — Only native YouTube URLs are supported. Gemini can process the video content directly.
-
-</details>
-
-<details>
-<summary><strong>What is the optional YouTube API key for?</strong></summary>
-
-<br>
-
-Gemini can natively watch YouTube videos. When you supply a `YOUTUBE_API_KEY`, it provides Gemini with extra context such as the video title and description. You can obtain the key from the same [Google Cloud Console](https://console.cloud.google.com/apis/credentials) where you get your Gemini keys.
-
-</details>
-
-<details>
-<summary><strong>Does the bot work while my stream is offline?</strong></summary>
-
-<br>
-
-Yes. As long as the Render service is running, the bot stays connected to your Twitch chat 24/7 — live or offline.
-
-</details>
-
-<details>
-<summary><strong>Will Render spin down after inactivity?</strong></summary>
-
-<br>
-
-The bot has a built-in keepalive mechanism to prevent Render's free-tier spin-downs. If the bot is still spinning down, please [open an issue](../../issues).
-
-</details>
-
-<details>
-<summary><strong>How do I see chat logs, media gallery, and settings?</strong></summary>
-
-<br>
-
-Your Render service URL (`https://YOUR-APP.onrender.com`) doubles as a split-screen web dashboard that displays live chat logs and generated media. Sign in with your Twitch account in the top right to open the **⚙️ Bot Configuration** menu.
-
-</details>
-
-<details>
-<summary><strong>How do I update my bot with new features and fixes?</strong></summary>
-
-<br>
-
-When a new update is released, your fork on GitHub will show *"This branch is X commits behind VirtuallyJesse:main"*.
-
-To update:
-1. Open your fork on GitHub
-2. Click **Sync fork → Update branch**
-3. Render will automatically detect the new commits, rebuild, and redeploy your bot
-
-> 💡 All your dashboard settings, personality, commands, and alerts stay completely safe in Redis during updates.
-
-</details>
-
-<details>
-<summary><strong>Can I use Vertex AI instead of the Gemini API?</strong></summary>
-
-<br>
-
-Yes, set `VERTEX_PROJECT_ID` instead of `GEMINI_API_KEY`; never configure both at the same time. [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) must already be available to the process.
-
-> Google owns project setup, authentication, IAM, billing, and model access. See the [Vertex AI documentation](https://cloud.google.com/vertex-ai/generative-ai/docs/overview) for setup details.
+> 💡 See the [Vertex AI documentation](https://cloud.google.com/vertex-ai/generative-ai/docs/overview) for Google Cloud project setup and IAM details.
 
 </details>
 
@@ -444,13 +389,13 @@ Yes, set `VERTEX_PROJECT_ID` instead of `GEMINI_API_KEY`; never configure both a
 
 <br>
 
-Yes, for development and testing. Run `npm install`, build the dashboard once with `npm run build`, create a `.env` file with the same variable names from `render.yaml`, then run `npm run dev`.
+Yes, for development and testing. Run `npm install`, build the dashboard with `npm run build`, create a `.env` file with the settings from `render.yaml`, then run `npm run dev`.
 
-> ⚠️ **Use separate credentials for local development.** Create a different Twitch application (with `http://localhost:3000/auth/callback` as the redirect URL) and either omit `UPSTASH_REDIS_URL` or point it to a separate database. Using the same credentials as production will overwrite your live tokens and data.
+> ⚠️ **Use separate credentials for local development.** Create a different Twitch application (with `http://localhost:3000/auth/callback` as the redirect URL) and either omit `UPSTASH_REDIS_URL` or point it to a separate database. Using your production credentials will overwrite live tokens.
 
-Once running, visit `http://localhost:3000/`, sign in with Twitch at the bottom left, and authorize from **Configuration → Connection & channels**.
+Once running, visit `http://localhost:3000/` to access your local dashboard.
 
-> 💡 `AI_VERBOSE` | `true` turns on detailed engine logging while debugging.
+> 💡 Set `AI_VERBOSE=true` in `.env` for detailed engine logs while debugging.
 
 </details>
 
@@ -458,7 +403,7 @@ Once running, visit `http://localhost:3000/`, sign in with Twitch at the bottom 
 
 ## License
 
-[MIT](LICENSE) — use freely, attribution appreciated!
+[MIT](LICENSE). Use freely, attribution appreciated!
 
 ---
 
