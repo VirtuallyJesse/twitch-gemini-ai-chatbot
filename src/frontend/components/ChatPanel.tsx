@@ -24,9 +24,8 @@ import Emote from './Emote';
 import type { ChatChannelHistory } from '../lib/chatHistory';
 import {
   captureChatAnchor,
-  chatViewportAtBottom,
   chatViewportNeedsFill,
-  createChatAnchorRestorer,
+  restoreChatAnchor,
   syncChatViewportAfterResize,
   type ChatScrollAnchor,
 } from '../lib/chatScroll';
@@ -208,7 +207,6 @@ export default function ChatPanel({
   onOpenSettings,
 }: Props) {
   const [atBottom, setAtBottom] = useState(true);
-  const [anchorRestorer] = useState(createChatAnchorRestorer);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevChannelRef = useRef(activeChannel);
   const pendingPrependRef = useRef<{
@@ -231,7 +229,6 @@ export default function ChatPanel({
     const pending = pendingPrependRef.current;
 
     if (channelChanged) {
-      anchorRestorer.cancel();
       pendingPrependRef.current = null;
       el.scrollTop = el.scrollHeight;
       setAtBottom(true);
@@ -239,9 +236,9 @@ export default function ChatPanel({
     }
     if (pending?.channel === activeNorm) {
       if ((entries[0]?.id || null) !== pending.firstEntryId) {
-        anchorRestorer.restore(el, pending.anchor);
+        restoreChatAnchor(el, pending.anchor);
         pendingPrependRef.current = null;
-        setAtBottom(chatViewportAtBottom(el));
+        setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
         return;
       }
       if (el.scrollHeight !== pending.anchor.height) {
@@ -251,7 +248,7 @@ export default function ChatPanel({
     if (!pending && atBottom) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [activeChannel, activeNorm, entries, atBottom, anchorRestorer]);
+  }, [activeChannel, activeNorm, entries, atBottom]);
 
   useEffect(() => {
     const pending = pendingPrependRef.current;
@@ -263,23 +260,19 @@ export default function ChatPanel({
     }
   }, [activeNorm, entries, history?.loading]);
 
-  useEffect(() => () => anchorRestorer.cancel(), [anchorRestorer]);
-
   const loadOlder = useCallback(() => {
     const el = scrollRef.current;
     if (
       !el || !history?.hydrated || history.loading || pendingPrependRef.current ||
-      anchorRestorer.isPending() ||
       (!canRevealCached && !history.hasMore)
     ) return;
-    anchorRestorer.cancel();
     pendingPrependRef.current = {
       channel: activeNorm,
       firstEntryId: entries[0]?.id || null,
       anchor: captureChatAnchor(el),
     };
     onLoadOlder(activeNorm);
-  }, [activeNorm, canRevealCached, entries, history, onLoadOlder, anchorRestorer]);
+  }, [activeNorm, canRevealCached, entries, history, onLoadOlder]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -302,12 +295,11 @@ export default function ChatPanel({
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    setAtBottom(chatViewportAtBottom(el));
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
     if (el.scrollTop < 80) loadOlder();
   };
 
   const jumpToLatest = () => {
-    anchorRestorer.cancel();
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   };
 
