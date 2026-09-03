@@ -9,6 +9,7 @@
 
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
 const channelKey = (channel) => `#${cleanName(channel)}`;
+const CHAT_NOTIFICATION_TYPE = 'channel.chat.notification';
 
 function asText(data) {
     if (typeof data === 'string') return data;
@@ -65,7 +66,7 @@ function normalizeNotification(message, nowFn) {
     const base = { id, channel, broadcasterUserId, occurredAt };
 
     switch (type) {
-        case 'channel.chat.notification': {
+        case CHAT_NOTIFICATION_TYPE: {
             const noticeType = event.notice_type;
             const user = actorFrom(event, {
                 anonymous: !!event.chatter_is_anonymous,
@@ -176,7 +177,7 @@ const PUBLIC_SUBSCRIPTION_SPECS = [
         condition: (broadcasterId, botUserId) => ({ broadcaster_user_id: broadcasterId, user_id: botUserId })
     },
     {
-        type: 'channel.chat.notification',
+        type: CHAT_NOTIFICATION_TYPE,
         version: '1',
         condition: (broadcasterId, botUserId) => ({ broadcaster_user_id: broadcasterId, user_id: botUserId })
     },
@@ -243,6 +244,25 @@ function normalizeBotChatMessage(message, nowFn) {
             color: typeof event.color === 'string' ? event.color : '',
             'display-name': event.chatter_user_name || ''
         }
+    };
+}
+
+/** Normalizes only the Twitch-authored facts needed for transcript observation. */
+function normalizeChatNotice(message, nowFn) {
+    const metadata = message?.metadata || {};
+    if (metadata.subscription_type !== CHAT_NOTIFICATION_TYPE) return null;
+    const event = message?.payload?.event || {};
+    const id = String(event.message_id || '');
+    const systemMessage = typeof event.system_message === 'string' ? event.system_message : '';
+    if (!id || !systemMessage.trim()) return null;
+
+    return {
+        id,
+        channel: channelKey(event.broadcaster_user_login),
+        occurredAt: Date.parse(metadata.message_timestamp) || nowFn(),
+        noticeType: String(event.notice_type || ''),
+        systemMessage,
+        messageText: typeof event.message?.text === 'string' ? event.message.text : ''
     };
 }
 
@@ -899,6 +919,7 @@ export class EventSubClient {
     #botUserId = null;
     #botTokenProvider = null;
     #botChatHandlers = [];
+    #chatNoticeHandlers = [];
 
     constructor({
         helixClient,
@@ -954,6 +975,14 @@ export class EventSubClient {
         this.#botChatHandlers.push(handler);
         return () => {
             this.#botChatHandlers = this.#botChatHandlers.filter((h) => h !== handler);
+        };
+    }
+
+    /** Subscribes to normalized Twitch-authored chat-visible notice observations. */
+    onChatNotice(handler) {
+        this.#chatNoticeHandlers.push(handler);
+        return () => {
+            this.#chatNoticeHandlers = this.#chatNoticeHandlers.filter((h) => h !== handler);
         };
     }
 
@@ -1075,7 +1104,7 @@ export class EventSubClient {
                     const messageId = message?.metadata?.message_id;
                     if (this.#isDuplicate(messageId)) return;
                     const observation = normalizeBotChatMessage(message, this.#nowFn);
-                    if (observation) this.#emitBotChat(observation);
+                    if (observation) this.#dispatchObservers(this.#botChatHandlers, observation, 'onBotChat');
                     return;
                 }
                 this.#dispatchNotification(message);
@@ -1098,9 +1127,19 @@ export class EventSubClient {
     #dispatchNotification(message) {
         const messageId = message?.metadata?.message_id;
         if (this.#isDuplicate(messageId)) return;
-        const normalized = normalizeNotification(message, this.#nowFn);
-        if (normalized) {
-            this.#emit(normalized);
+        if (message?.metadata?.subscription_type === CHAT_NOTIFICATION_TYPE) {
+            try {
+                const notice = normalizeChatNotice(message, this.#nowFn);
+                if (notice) this.#dispatchObservers(this.#chatNoticeHandlers, notice, 'onChatNotice');
+            } catch (err) {
+                console.error('[EventSub] Failed to normalize chat notice:', err?.message || err);
+            }
+        }
+        try {
+            const normalized = normalizeNotification(message, this.#nowFn);
+            if (normalized) this.#dispatchObservers(this.#eventHandlers, normalized, 'onEvent');
+        } catch (err) {
+            console.error('[EventSub] Failed to normalize reaction event:', err?.message || err);
         }
     }
 
@@ -1119,28 +1158,15 @@ export class EventSubClient {
         return false;
     }
 
-    #emitBotChat(observation) {
-        for (const handler of this.#botChatHandlers) {
+    #dispatchObservers(handlers, value, label) {
+        for (const handler of handlers) {
             try {
-                const result = handler(observation);
+                const result = handler(value);
                 if (result && typeof result.catch === 'function') {
-                    result.catch((err) => console.error('[EventSub] onBotChat handler failed:', err?.message || err));
+                    result.catch((err) => console.error(`[EventSub] ${label} handler failed:`, err?.message || err));
                 }
             } catch (err) {
-                console.error('[EventSub] onBotChat handler failed:', err?.message || err);
-            }
-        }
-    }
-
-    #emit(event) {
-        for (const handler of this.#eventHandlers) {
-            try {
-                const result = handler(event);
-                if (result && typeof result.catch === 'function') {
-                    result.catch((err) => console.error('[EventSub] onEvent handler failed:', err?.message || err));
-                }
-            } catch (err) {
-                console.error('[EventSub] onEvent handler failed:', err?.message || err);
+                console.error(`[EventSub] ${label} handler failed:`, err?.message || err);
             }
         }
     }

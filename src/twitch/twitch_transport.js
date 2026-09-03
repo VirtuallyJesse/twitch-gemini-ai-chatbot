@@ -17,6 +17,20 @@ import { BadgeCatalog } from './badge_catalog.js';
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const NOTICE_PRESENTATION = new Map([
+    ['sub', 'sub'],
+    ['resub', 'sub'],
+    ['prime_paid_upgrade', 'sub'],
+    ['shared_chat_sub', 'sub'],
+    ['shared_chat_resub', 'sub'],
+    ['shared_chat_prime_paid_upgrade', 'sub'],
+    ['sub_gift', 'gift'],
+    ['community_sub_gift', 'gift'],
+    ['shared_chat_sub_gift', 'gift'],
+    ['shared_chat_community_sub_gift', 'gift'],
+    ['raid', 'raid'],
+    ['shared_chat_raid', 'raid']
+]);
 export const TWITCH_AUTH_SCOPES = [
     'chat:read', 'chat:edit', 'user:bot', 'user:read:chat', 'user:write:chat',
     'clips:edit',
@@ -1080,6 +1094,9 @@ export class TwitchTransport {
         if (this.#eventsub?.onBotChat) {
             this.#eventsub.onBotChat(obs => this.#ingestBotChat(obs));
         }
+        if (this.#eventsub?.onChatNotice) {
+            this.#eventsub.onChatNotice(notice => this.#ingestChatNotice(notice));
+        }
 
         this.auth = {
             getLoginUrl: (redirectUri, state) => this.#buildLoginUrl(redirectUri, state),
@@ -1586,6 +1603,25 @@ export class TwitchTransport {
         });
     }
 
+    /** Records a Twitch-authored chat notice without projecting it into chat routing or ambient context. */
+    #ingestChatNotice(notice) {
+        const key = channelKey(notice?.channel);
+        if (!this.#channels.includes(key)) return;
+
+        const id = String(notice?.id || '');
+        const systemMessage = typeof notice?.systemMessage === 'string' ? notice.systemMessage : '';
+        if (!id || !systemMessage.trim()) return;
+
+        const messageText = typeof notice?.messageText === 'string' ? notice.messageText : '';
+        this.#recordTranscriptEntry(key, {
+            kind: 'event',
+            id,
+            timestamp: Number(notice.occurredAt) || this.#nowFn(),
+            event: NOTICE_PRESENTATION.get(String(notice.noticeType || '')) || 'system',
+            text: messageText.trim() ? `${systemMessage}: ${messageText}` : systemMessage
+        });
+    }
+
     /**
      * The one private observation path. Records the canonical transcript
      * entry - exact Twitch ID, identity, emote metadata, source timestamp,
@@ -1616,21 +1652,13 @@ export class TwitchTransport {
             username: obs.username,
             message: text,
             timestamp: Number(obs.timestamp) || this.#nowFn(),
-            meta: Object.keys(emotes).length > 0 ? { twitchEmotesByName: emotes } : {},
-            order: this.#nextLocalOrder(key)
+            meta: Object.keys(emotes).length > 0 ? { twitchEmotesByName: emotes } : {}
         };
         if (badges.length > 0) entry.badges = badges;
         if (color) entry.color = color;
 
-        // Transcript emission: complete rows only; consumers never repair them.
-        if (entry.badges) void this.#badges?.noteDescriptors(key, entry.badges);
-        for (const handler of this.#logHandlers) {
-            try {
-                handler(key, entry);
-            } catch (err) {
-                console.error('[TwitchTransport] onLogEntry handler failed:', err.message);
-            }
-        }
+        const recordedEntry = this.#recordTranscriptEntry(key, entry);
+        if (recordedEntry.badges) void this.#badges?.noteDescriptors(key, recordedEntry.badges);
 
         if (obs.authoredByBot) return; // transcript evidence only: no ambient, no routing, no memory turn
 
@@ -1663,7 +1691,7 @@ export class TwitchTransport {
         }
 
         if (invocation.kind === 'none') {
-            this.#buffers.append(key, entry);
+            this.#buffers.append(key, recordedEntry);
         }
 
         for (const handler of this.#messageHandlers) {
@@ -1685,6 +1713,23 @@ export class TwitchTransport {
             return { text: textForLogs, emotes: emoteIdMap };
         }
         return { text: String(text ?? ''), emotes: {} };
+    }
+
+    /** Assigns transcript-local order and isolates every persistence/live-delivery observer. */
+    #recordTranscriptEntry(channel, entry) {
+        const key = channelKey(channel);
+        const recordedEntry = { ...entry, order: this.#nextLocalOrder(key) };
+        for (const handler of this.#logHandlers) {
+            try {
+                const result = handler(key, recordedEntry);
+                if (result && typeof result.catch === 'function') {
+                    result.catch((err) => console.error('[TwitchTransport] onLogEntry handler failed:', err?.message || err));
+                }
+            } catch (err) {
+                console.error('[TwitchTransport] onLogEntry handler failed:', err?.message || err);
+            }
+        }
+        return recordedEntry;
     }
 
     #nextLocalOrder(key) {
