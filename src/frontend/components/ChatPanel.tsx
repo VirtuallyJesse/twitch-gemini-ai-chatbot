@@ -23,11 +23,10 @@ import { ChatBadge } from './Badges';
 import Emote from './Emote';
 import type { ChatChannelHistory } from '../lib/chatHistory';
 import {
-  captureChatAnchor,
+  chatIsAtLatest,
+  chatIsNearOldest,
   chatViewportNeedsFill,
-  restoreChatAnchor,
-  syncChatViewportAfterResize,
-  type ChatScrollAnchor,
+  selectChatViewportEntries,
 } from '../lib/chatScroll';
 
 /* ------------------------------ tokens ------------------------------ */
@@ -206,101 +205,78 @@ export default function ChatPanel({
   botUsername,
   onOpenSettings,
 }: Props) {
-  const [atBottom, setAtBottom] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevChannelRef = useRef(activeChannel);
-  const pendingPrependRef = useRef<{
-    channel: string;
-    firstEntryId: string | null;
-    anchor: ChatScrollAnchor;
-  } | null>(null);
+  const requestedHistoryRef = useRef<ChatChannelHistory | null>(null);
+  const [reading, setReading] = useState<{ channel: string; newestOrder: number } | null>(null);
   const highlightBots = useBotHighlight();
 
   const activeNorm = normChannel(activeChannel);
-  const entries: LogEntry[] = logs[activeNorm] || logs[`#${activeNorm}`] || [];
+  const allEntries: LogEntry[] = logs[activeNorm] || logs[`#${activeNorm}`] || [];
+  const newestOrder = reading?.channel === activeNorm ? reading.newestOrder : null;
+  const atBottom = newestOrder === null;
+  const entries = selectChatViewportEntries(allEntries, newestOrder);
+  const bufferedCount = allEntries.length - entries.length;
   const history = histories[activeNorm];
   const canRevealCached = Boolean(history && history.visibleCount < history.entries.length);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const channelChanged = prevChannelRef.current !== activeChannel;
-    prevChannelRef.current = activeChannel;
-    const pending = pendingPrependRef.current;
-
-    if (channelChanged) {
-      pendingPrependRef.current = null;
-      el.scrollTop = el.scrollHeight;
-      setAtBottom(true);
-      return;
+    if (prevChannelRef.current !== activeChannel) {
+      prevChannelRef.current = activeChannel;
+      requestedHistoryRef.current = null;
+      setReading(null);
+      el.scrollTop = 0;
     }
-    if (pending?.channel === activeNorm) {
-      if ((entries[0]?.id || null) !== pending.firstEntryId) {
-        restoreChatAnchor(el, pending.anchor);
-        pendingPrependRef.current = null;
-        setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
-        return;
-      }
-      if (el.scrollHeight !== pending.anchor.height) {
-        pendingPrependRef.current = { ...pending, anchor: captureChatAnchor(el) };
-      }
-    }
-    if (!pending && atBottom) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [activeChannel, activeNorm, entries, atBottom]);
-
-  useEffect(() => {
-    const pending = pendingPrependRef.current;
-    if (
-      pending?.channel === activeNorm && history?.loading === null &&
-      (entries[0]?.id || null) === pending.firstEntryId
-    ) {
-      pendingPrependRef.current = null;
-    }
-  }, [activeNorm, entries, history?.loading]);
+  }, [activeChannel]);
 
   const loadOlder = useCallback(() => {
     const el = scrollRef.current;
     if (
-      !el || !history?.hydrated || history.loading || pendingPrependRef.current ||
+      !el || !history?.hydrated || history.loading || requestedHistoryRef.current === history ||
       (!canRevealCached && !history.hasMore)
     ) return;
-    pendingPrependRef.current = {
-      channel: activeNorm,
-      firstEntryId: entries[0]?.id || null,
-      anchor: captureChatAnchor(el),
-    };
+    // Coalesce events using the same history snapshot until React commits the next one.
+    requestedHistoryRef.current = history;
     onLoadOlder(activeNorm);
-  }, [activeNorm, canRevealCached, entries, history, onLoadOlder]);
+  }, [activeNorm, canRevealCached, entries.length, history, onLoadOlder]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el && history?.hydrated && canRevealCached && chatViewportNeedsFill(el)) {
-      loadOlder();
-    }
+    if (el && history?.hydrated && canRevealCached && chatViewportNeedsFill(el)) loadOlder();
   }, [activeNorm, canRevealCached, entries.length, history?.hydrated, loadOlder]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
-      const needsFill = syncChatViewportAfterResize(el, atBottom);
+      const needsFill = chatViewportNeedsFill(el);
       if (canRevealCached && needsFill) loadOlder();
+      if (chatIsAtLatest(el)) setReading(null);
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [atBottom, canRevealCached, loadOlder]);
+  }, [canRevealCached, loadOlder]);
 
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
-    if (el.scrollTop < 80) loadOlder();
+    if (chatIsAtLatest(el)) {
+      setReading(null);
+    } else {
+      setReading(current => current?.channel === activeNorm ? current : {
+        channel: activeNorm,
+        newestOrder: allEntries[allEntries.length - 1]?.order ?? -Infinity,
+      });
+    }
+    if (chatIsNearOldest(el)) loadOlder();
   };
 
   const jumpToLatest = () => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    // An explicit navigation action can end momentum. Incoming messages never do.
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setReading(null);
   };
 
   return (
@@ -335,9 +311,8 @@ export default function ChatPanel({
 
       {/* log */}
       <div className="relative min-h-0 flex-1">
-        <div ref={scrollRef} onScroll={onScroll} className="scroll-slim h-full overflow-x-hidden overflow-y-auto px-2.5 py-2">
           {history?.loading === 'older' && (
-            <div className="sticky top-1 z-10 flex h-0 justify-center" role="status">
+            <div className="absolute inset-x-0 top-1 z-10 flex justify-center" role="status">
               <span className="flex items-center gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1 text-[10.5px] text-faint shadow-md">
                 <Loader2 size={11} className="animate-spin" />
                 Loading older messages…
@@ -345,7 +320,7 @@ export default function ChatPanel({
             </div>
           )}
           {history?.error && history.hydrated && (
-            <div className="sticky top-1 z-10 flex h-0 justify-center">
+            <div className="absolute inset-x-0 top-1 z-10 flex justify-center">
               <span className="flex items-center gap-2 rounded-full border border-rose-400/30 bg-raised px-2.5 py-1 text-[10.5px] text-rose-300 shadow-md">
                 History couldn’t load.
                 <button onClick={loadOlder} className="cursor-pointer font-semibold text-accent hover:underline">
@@ -354,11 +329,8 @@ export default function ChatPanel({
               </span>
             </div>
           )}
-          {history?.hydrated && !history.hasMore && !canRevealCached && entries.length > 0 && (
-            <div className="py-2 text-center font-mono text-[9.5px] uppercase tracking-[0.12em] text-faint">
-              Beginning of retained history
-            </div>
-          )}
+        <div ref={scrollRef} onScroll={onScroll}
+          className="scroll-slim flex h-full flex-col-reverse overflow-x-hidden overflow-y-auto px-2.5 py-2 [overflow-anchor:none]">
           {channels.length === 0 ? (
             <NoChannels onOpenSettings={onOpenSettings} />
           ) : history?.loading === 'hydrate' && entries.length === 0 ? (
@@ -372,19 +344,24 @@ export default function ChatPanel({
               <p className="text-[12.5px] font-medium text-muted">No messages yet</p>
             </div>
           ) : (
-            entries.map((e) => {
-              if (e.kind === 'sep') return <Separator key={e.id} label={e.label} />;
-              if (e.kind === 'event') return <EventRow key={e.id} entry={e} />;
-              return (
-                <MsgRow
-                  key={e.id}
-                  entry={e}
-                  channel={activeNorm}
-                  botUsername={botUsername}
-                  highlightBots={highlightBots}
-                />
-              );
-            })
+            [...entries].reverse().map((e) => (
+              <div key={e.id} className="flow-root shrink-0">
+                {e.kind === 'sep' ? <Separator label={e.label} /> :
+                 e.kind === 'event' ? <EventRow entry={e} /> : (
+                  <MsgRow
+                    entry={e}
+                    channel={activeNorm}
+                    botUsername={botUsername}
+                    highlightBots={highlightBots}
+                  />
+                )}
+              </div>
+            ))
+          )}
+          {history?.hydrated && !history.hasMore && !canRevealCached && entries.length > 0 && (
+            <div className="shrink-0 py-2 text-center font-mono text-[9.5px] uppercase tracking-[0.12em] text-faint">
+              Beginning of retained history
+            </div>
           )}
         </div>
         {!atBottom && (
@@ -393,7 +370,7 @@ export default function ChatPanel({
             className="absolute bottom-3 left-1/2 flex -translate-x-1/2 cursor-pointer items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[11px] font-medium text-ink shadow-lg transition-colors hover:border-accent/50"
           >
             <ArrowDown size={12} />
-            Latest
+            {bufferedCount > 0 ? `Latest (${bufferedCount})` : 'Latest'}
           </button>
         )}
       </div>
