@@ -132,11 +132,20 @@ function sanitizeParam(value) {
     return text.length > 180 ? text.slice(0, 180) : text;
 }
 
+// Chatter-facing display rule for machine identifiers interpolated as {provider}/{service}.
+function formatParam(key, value) {
+    const text = sanitizeParam(value);
+    if ((key === 'provider' || key === 'service') && text) {
+        return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+    return text;
+}
+
 function interpolate(template, params) {
     let out = String(template ?? '');
     if (!params || typeof params !== 'object') return oneLine(out);
     for (const [key, value] of Object.entries(params)) {
-        out = out.split(`{${key}}`).join(sanitizeParam(value));
+        out = out.split(`{${key}}`).join(formatParam(key, value));
     }
     return oneLine(out);
 }
