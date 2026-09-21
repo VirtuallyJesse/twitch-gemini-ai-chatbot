@@ -4,7 +4,8 @@ import { ImageDownloader } from '../utils/image_downloader.js';
 import { ToolDispatcher } from './tool_dispatcher.js';
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
-const DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS = 35_000;
+const DEFAULT_TEXT_MODEL_ATTEMPT_TIMEOUT_MS = 35_000;
+const DEFAULT_MULTIMEDIA_MODEL_ATTEMPT_TIMEOUT_MS = 90_000;
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
 const ROTATE_WORTHY_MODEL_STATUSES = new Set([401, 403, 429, 503]);
 
@@ -52,7 +53,8 @@ export class AIEngine {
         imageDownloader = null,
         fetchImpl = (...a) => globalThis.fetch(...a),
         clientFactory = (options) => new GoogleGenAI(options),
-        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS
+        textModelAttemptTimeoutMs = DEFAULT_TEXT_MODEL_ATTEMPT_TIMEOUT_MS,
+        multimediaModelAttemptTimeoutMs = DEFAULT_MULTIMEDIA_MODEL_ATTEMPT_TIMEOUT_MS
     } = {}) {
         this.googleBackend = googleBackend;
         this.#clients = googleBackend?.kind === 'vertex'
@@ -80,9 +82,12 @@ export class AIEngine {
         this.maxResponseLength = parseInt(maxResponseLength, 10) || 450;
         this.errorHandler = errorHandler;
         this.fetchImpl = fetchImpl;
-        this.modelAttemptTimeoutMs = Number(modelAttemptTimeoutMs) > 0
-            ? Number(modelAttemptTimeoutMs)
-            : DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS;
+        this.textModelAttemptTimeoutMs = Number(textModelAttemptTimeoutMs) > 0
+            ? Number(textModelAttemptTimeoutMs)
+            : DEFAULT_TEXT_MODEL_ATTEMPT_TIMEOUT_MS;
+        this.multimediaModelAttemptTimeoutMs = Number(multimediaModelAttemptTimeoutMs) > 0
+            ? Number(multimediaModelAttemptTimeoutMs)
+            : DEFAULT_MULTIMEDIA_MODEL_ATTEMPT_TIMEOUT_MS;
         this.currentKeyIndex = 0;
         this.histories = new Map();
 
@@ -318,11 +323,14 @@ export class AIEngine {
             const rawUrl = youtubeMatch[0];
             const id = AIEngine.extractYouTubeVideoId(rawUrl);
             const fileUri = id ? `https://www.youtube.com/watch?v=${id}` : rawUrl;
-            // Omit mimeType: routes to Gemini's native YouTube ingestion.
+            const fileData = { fileUri };
+            if (this.googleBackend?.kind === 'vertex') {
+                fileData.mimeType = 'video/mp4';
+            }
             return {
                 memoryUserParts: [
                     { text: text.replace(rawUrl, '').trim() },
-                    { fileData: { fileUri } }
+                    { fileData }
                 ],
                 allUrls,
                 youtubeMatch,
@@ -364,6 +372,13 @@ export class AIEngine {
      * Executes generation call via the Google GenAI SDK.
      */
     async #executeModelCall({ contents, systemInstruction, safetySettings, tools, keyIndex, trace }) {
+        const policy = this.#classifyRequestPolicy(contents);
+        const controller = new AbortController();
+        let applicationTimedOut = false;
+        const timer = setTimeout(() => {
+            applicationTimedOut = true;
+            controller.abort();
+        }, policy.deadlineMs);
         const config = {
             maxOutputTokens: 8192,
             thinkingConfig: {
@@ -373,8 +388,8 @@ export class AIEngine {
             tools,
             systemInstruction,
             safetySettings,
+            abortSignal: controller.signal,
             httpOptions: {
-                timeout: this.modelAttemptTimeoutMs,
                 retryOptions: { attempts: 1 }
             }
         };
@@ -387,25 +402,74 @@ export class AIEngine {
         };
         const call = trace?.nextGeminiCall?.() || 0;
         const started = performance.now();
-        trace?.event?.('gemini.request', { call, request });
+        trace?.event?.('gemini.request', { call, request, policy });
         let result;
         try {
             result = await client.models.generateContent(request);
         } catch (error) {
+            const normalizedError = applicationTimedOut
+                ? new BotError('REQUEST_TIMEOUT', { cause: error })
+                : error?.name === 'AbortError'
+                    ? new BotError('FETCH_TIMEOUT', { cause: error })
+                    : error;
             trace?.event?.('gemini.failed', {
                 call,
                 durationMs: performance.now() - started,
-                reason: error?.message || String(error)
+                reason: normalizedError?.key || normalizedError?.message || String(normalizedError)
             });
-            if (error?.name === 'AbortError') {
-                throw new BotError('FETCH_TIMEOUT', { cause: error });
-            }
-            throw error;
+            throw normalizedError;
+        } finally {
+            clearTimeout(timer);
         }
 
         const durationMs = performance.now() - started;
         trace?.event?.('gemini.response', { call, response: result });
         return { result, call, durationMs };
+    }
+
+    #classifyRequestPolicy(contents) {
+        const activeTurnIndex = contents.findLastIndex(content =>
+            content?.role === 'user'
+            && content.parts?.some(part => this.#isRuntimeContextPart(part))
+        );
+        let activeTurnHasMultimedia = false;
+        let retainedHistoryHasMultimedia = false;
+
+        contents.forEach((content, index) => {
+            const hasMultimedia = content?.parts?.some(part =>
+                Boolean(part?.inlineData || part?.fileData)
+            );
+            if (!hasMultimedia) return;
+            if (activeTurnIndex < 0 || index >= activeTurnIndex) activeTurnHasMultimedia = true;
+            else retainedHistoryHasMultimedia = true;
+        });
+
+        const isMultimedia = activeTurnHasMultimedia || retainedHistoryHasMultimedia;
+        const multimediaSource = activeTurnHasMultimedia && retainedHistoryHasMultimedia
+            ? 'both'
+            : activeTurnHasMultimedia
+                ? 'active-turn'
+                : retainedHistoryHasMultimedia
+                    ? 'retained-history'
+                    : 'none';
+        return {
+            requestClass: isMultimedia ? 'multimedia' : 'text-only',
+            deadlineMs: isMultimedia
+                ? this.multimediaModelAttemptTimeoutMs
+                : this.textModelAttemptTimeoutMs,
+            multimediaSource
+        };
+    }
+
+    #isRuntimeContextPart(part) {
+        if (typeof part?.text !== 'string' || !part.text.startsWith('{"runtimeContext":')) {
+            return false;
+        }
+        try {
+            return Boolean(JSON.parse(part.text)?.runtimeContext);
+        } catch {
+            return false;
+        }
     }
 
     #classifyModelError(error) {

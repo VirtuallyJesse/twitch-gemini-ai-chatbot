@@ -305,7 +305,7 @@ function renderGenerationConfig(lines, config, tools) {
     }
 
     const entries = Object.entries(config).filter(
-        ([key]) => !['systemInstruction', 'tools', 'safetySettings', 'httpOptions'].includes(key)
+        ([key]) => !['systemInstruction', 'tools', 'safetySettings', 'httpOptions', 'abortSignal'].includes(key)
     );
     if (entries.length === 0) lines.push('  (defaults)');
     for (const [key, value] of entries) {
@@ -353,12 +353,18 @@ function renderSdkTransport(lines, httpOptions, tools) {
     }
 }
 
-function renderGeminiRequest({ call, request }, tools) {
+function renderGeminiRequest({ call, request, policy }, tools) {
     const lines = [`Gemini call ${call} request`];
     if (!request || typeof request !== 'object') {
         lines.push(`request: ${json(request, tools.sanitize)}`);
         return lines;
     }
+
+    lines.push('Application deadline');
+    lines.push(`  class: ${tools.redactText(policy?.requestClass || 'unknown')}`);
+    lines.push(`  deadline: ${Number(policy?.deadlineMs || 0)}ms`);
+    lines.push(`  multimedia source: ${tools.redactText(policy?.multimediaSource || 'unknown')}`);
+    lines.push('  Google server deadline: SDK default');
 
     lines.push('Model');
     lines.push(`  name: ${scalar(request.model, tools.redactText)}`);
