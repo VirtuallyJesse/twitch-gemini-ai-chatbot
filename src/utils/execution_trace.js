@@ -360,16 +360,17 @@ function renderGeminiRequest({ call, request, policy }, tools) {
         return lines;
     }
 
+    const config = request.config;
     lines.push('Application deadline');
-    lines.push(`  class: ${tools.redactText(policy?.requestClass || 'unknown')}`);
     lines.push(`  deadline: ${Number(policy?.deadlineMs || 0)}ms`);
-    lines.push(`  multimedia source: ${tools.redactText(policy?.multimediaSource || 'unknown')}`);
-    lines.push('  Google server deadline: SDK default');
+    lines.push(`  attempts: ${Number(config?.httpOptions?.retryOptions?.attempts || 0)}`);
+    lines.push(config?.httpOptions?.timeout == null
+        ? '  Google server deadline: SDK default'
+        : `  Google server deadline: ${Number(config.httpOptions.timeout)}ms`);
 
     lines.push('Model');
     lines.push(`  name: ${scalar(request.model, tools.redactText)}`);
 
-    const config = request.config;
     renderSystemInstruction(lines, config?.systemInstruction, tools);
 
     lines.push('Contents (ordered)');
