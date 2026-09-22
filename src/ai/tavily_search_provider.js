@@ -1,7 +1,7 @@
 export const TAVILY_SEARCH_URL = 'https://api.tavily.com/search';
 export const TAVILY_USAGE_URL = 'https://api.tavily.com/usage';
 export const TAVILY_BREAKER_KEY = 'tavily:breaker';
-export const TAVILY_TIMEOUT_MS = 3500;
+export const TAVILY_TIMEOUT_MS = 7000;
 export const TAVILY_PROBE_INTERVAL_MS = 60 * 60 * 1000;
 export const TAVILY_MAX_RESULTS = 5;
 
