@@ -7,6 +7,7 @@ const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS = 35_000;
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
 const ROTATE_WORTHY_MODEL_STATUSES = new Set([401, 403, 429, 503]);
+const VERTEX_CAPACITY_STATUSES = new Set([429, 503]);
 
 const YT_ID_RE = /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
 const YT_URL_RE = /(https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)[\w-]+|https?:\/\/youtu\.be\/[\w-]+)/;
@@ -33,6 +34,8 @@ export class AIEngine {
     #clients;
     #toolDispatcher;
     #injectedSearchProvider;
+    #sleep;
+    #random;
 
     constructor({
         googleBackend,
@@ -52,7 +55,9 @@ export class AIEngine {
         imageDownloader = null,
         fetchImpl = (...a) => globalThis.fetch(...a),
         clientFactory = (options) => new GoogleGenAI(options),
-        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS
+        modelAttemptTimeoutMs = DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS,
+        sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+        random = Math.random
     } = {}) {
         this.googleBackend = googleBackend;
         this.#clients = googleBackend?.kind === 'vertex'
@@ -79,6 +84,8 @@ export class AIEngine {
         this.youtubeApiKey = youtubeApiKey;
         this.maxResponseLength = parseInt(maxResponseLength, 10) || 450;
         this.errorHandler = errorHandler;
+        this.#sleep = sleep;
+        this.#random = random;
         this.fetchImpl = fetchImpl;
         this.modelAttemptTimeoutMs = Number(modelAttemptTimeoutMs) > 0
             ? Number(modelAttemptTimeoutMs)
@@ -489,7 +496,19 @@ export class AIEngine {
 
             let outcome = await attempt();
 
-            if (outcome.error
+            const status = outcome.error && this.errorHandler.classify(outcome.error).status;
+            if (this.googleBackend?.kind === 'vertex' && VERTEX_CAPACITY_STATUSES.has(status)) {
+                const delayMs = 500 + Math.floor(this.#random() * 501);
+                console.log(`   ${COLORS.yellow}⚠️${COLORS.reset} Vertex capacity HTTP ${status}; retrying same Vertex client once after ${delayMs}ms`);
+                trace?.event?.('gemini.retry', {
+                    backend: 'vertex', status, retry: 1, maxRetries: 1, delayMs
+                });
+                await this.#sleep(delayMs);
+                outcome = await attempt();
+            }
+
+            if (this.googleBackend?.kind !== 'vertex'
+                && outcome.error
                 && this.#classifyModelError(outcome.error).status === 429
                 && this.#toolDispatcher.hasGoogleSearch(attemptTools)) {
                 this.#logModelAttemptFailure(
@@ -512,6 +531,11 @@ export class AIEngine {
             if (!outcome.error) {
                 this.currentKeyIndex = keyIndex;
                 return outcome.result;
+            }
+
+            if (this.googleBackend?.kind === 'vertex') {
+                this.#logModelAttemptFailure(outcome.error, keyIndex, outcome.started, 'failing turn');
+                throw outcome.error;
             }
 
             failures.push(outcome.error);
