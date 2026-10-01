@@ -612,13 +612,13 @@ export class AIEngine {
 
     /**
      * Builds candidate parts array for conversational memory or retry payloads.
-     * Preserves thought parts (with thoughtSignature) unmodified in original order,
-     * plus the winning conversational text part (via reference equality).
-     * Strips inline data, file data, and non-winning text parts.
+     * Preserves thought and signature-bearing parts unmodified in original order,
+     * including empty signature carriers, plus the winning conversational text part.
+     * Strips other inline data, file data, and non-winning text parts.
      */
     #buildCandidatePartsForMemory(rawParts, winningTextPart) {
         if (!winningTextPart) return [];
-        return rawParts.filter(p => p.thought === true || p === winningTextPart);
+        return rawParts.filter(p => p.thought === true || p.thoughtSignature != null || p === winningTextPart);
     }
 
     #getKeyErrorReason(error) {
