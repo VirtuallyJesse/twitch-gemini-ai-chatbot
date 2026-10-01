@@ -374,6 +374,8 @@ export class WebServer {
         return {
             ...status,
             channelStatuses,
+            botChatObservation: Object.fromEntries(Object.entries(this.#transport.getBotChatObservationHealth?.() || {})
+                .map(([channel, health]) => [channel, { state: health.state, ...(health.reason ? { reason: health.reason } : {}) }])),
             botUsername: this.#botUsername,
             authorized: this.#transport.auth.isAuthorized(),
             connected: Boolean(this.#transport.connected),

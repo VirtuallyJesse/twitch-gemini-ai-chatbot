@@ -4,6 +4,7 @@
 // observed chat. IRC (tmi.js) is authoritative for viewer-authored messages;
 // a shared bot-token EventSub WebSocket session observes bot-authored messages
 // and public alert sources; Helix REST (App Access Token -> official Chatbot badge) sends.
+// Confirmed sends supply canonical-ID transcript fallbacks when observation is absent.
 // One private observation path records every Twitch-observed message - exact
 // identity, message ID, timestamp, local order - before any routing, ambient,
 // or ignored-username policy runs.
@@ -13,6 +14,7 @@ import tmi from 'tmi.js';
 import { EventSubClient } from './eventsub_client.js';
 import { normalizeBadges } from '../utils/badges.js';
 import { BadgeCatalog } from './badge_catalog.js';
+import { retryMetadata } from './retry_timing.js';
 
 const ID_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
@@ -69,13 +71,15 @@ function firstMissingScope(granted, required) {
 }
 
 export class HelixApiError extends Error {
-    constructor(method, path, status, data) {
+    constructor(method, path, status, data, retry = {}) {
         const body = typeof data === 'string' ? data : JSON.stringify(data);
         super(`Twitch API ${method} ${path} failed (${status}): ${body}`);
         this.name = 'HelixApiError';
         this.status = status;
         this.path = path;
         this.data = data;
+        this.retryAfterMs = retry.retryAfterMs;
+        this.retryHeaders = retry.retryHeaders || {};
     }
 }
 
@@ -486,11 +490,13 @@ class HelixClient {
     #clientId;
     #vault;
     #fetchImpl;
+    #nowFn;
 
-    constructor({ clientId = '', tokenVault, fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
+    constructor({ clientId = '', tokenVault, fetchImpl = globalThis.fetch.bind(globalThis), nowFn = Date.now } = {}) {
         this.#clientId = clientId;
         this.#vault = tokenVault;
         this.#fetchImpl = fetchImpl;
+        this.#nowFn = nowFn;
     }
 
     /** Bearer + Client-Id headers; exactly one 401 retry after refreshing the used token kind. */
@@ -550,7 +556,7 @@ class HelixClient {
         }
 
         if (!response.ok) {
-            throw new HelixApiError(method, path, response.status, data);
+            throw new HelixApiError(method, path, response.status, data, retryMetadata(response.headers, response.status, this.#nowFn()));
         }
         return data;
     }
@@ -583,7 +589,7 @@ class HelixClient {
     }
 
     /** Send chat via App Access Token - preserves the official Chatbot badge. */
-    async sendChatMessage({ broadcasterId, senderId, message, replyParentMessageId = '' }) {
+    async sendChatMessage({ broadcasterId, senderId, message, replyParentMessageId = '', signal }) {
         const body = { broadcaster_id: broadcasterId, sender_id: senderId, message };
         if (replyParentMessageId) body.reply_parent_message_id = replyParentMessageId;
         let data;
@@ -591,6 +597,7 @@ class HelixClient {
             data = await this.request('/chat/messages', {
                 method: 'POST',
                 useAppToken: true,
+                signal,
                 body
             });
         } catch (error) {
@@ -1025,6 +1032,12 @@ export class TwitchTransport {
     #eventHandlers = [];
     #messageClassifier = () => ({ kind: 'none' });
     #orders = new Map(); // channelKey -> last assigned local order
+    #pendingSends = new Map();
+    #recentBotMessages = new Map();
+    #sending = new Set();
+    #stopping = false;
+    #setTimeoutFn;
+    #clearTimeoutFn;
 
     constructor(options = {}) {
         const {
@@ -1042,6 +1055,9 @@ export class TwitchTransport {
             fetchImpl = globalThis.fetch.bind(globalThis),
             ircClientFactory = (tmiOptions) => new tmi.client(tmiOptions),
             nowFn = Date.now,
+            setTimeoutFn = setTimeout,
+            clearTimeoutFn = clearTimeout,
+            randomFn = Math.random,
             wsImpl = globalThis.WebSocket,
             eventsubClient = null,
             enableEventSub = true
@@ -1054,9 +1070,11 @@ export class TwitchTransport {
         this.#maxMessageLength = maxMessageLength;
         this.#chunkDelayMs = chunkDelayMs;
         this.#nowFn = nowFn;
+        this.#setTimeoutFn = setTimeoutFn;
+        this.#clearTimeoutFn = clearTimeoutFn;
 
         this.#vault = new TokenVault({ clientId, clientSecret, initialRefreshToken, storage, fetchImpl, now: nowFn });
-        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl });
+        this.#helix = new HelixClient({ clientId, tokenVault: this.#vault, fetchImpl, nowFn });
         if (storage?.getJson && storage?.setJson) {
             this.#badges = new BadgeCatalog({
                 helixClient: this.#helix,
@@ -1084,7 +1102,10 @@ export class TwitchTransport {
                 : new EventSubClient({
                     helixClient: this.#helix,
                     wsImpl: wsImpl || globalThis.WebSocket,
-                    nowFn
+                    nowFn,
+                    setTimeoutFn,
+                    clearTimeoutFn,
+                    randomFn
                 }));
 
         if (this.#eventsub?.onEvent) {
@@ -1114,6 +1135,7 @@ export class TwitchTransport {
 
     /** Boots from stored/seed tokens, resolves Helix IDs, connects IRC - or stands by. */
     async start(handlers = {}) {
+        this.#stopping = false;
         if (handlers.onMessage) this.onMessage(handlers.onMessage);
         if (handlers.onLogEntry) this.onLogEntry(handlers.onLogEntry);
         if (handlers.onStatus) this.onStatus(handlers.onStatus);
@@ -1137,12 +1159,16 @@ export class TwitchTransport {
 
     async stop() {
         this.#running = false;
+        this.#stopping = true;
+        for (const id of this.#pendingSends.keys()) this.#emitSendFallback(id);
+        await Promise.allSettled([...this.#sending]);
         try {
             await this.#eventsub?.disconnect?.();
         } catch (err) {
             console.error('[TwitchTransport] EventSub disconnect failed:', err.message);
         }
         await this.#irc.disconnect();
+        this.#recentBotMessages.clear();
     }
 
     /* ── outbound delivery ─────────────────────────────────── */
@@ -1151,8 +1177,8 @@ export class TwitchTransport {
      * Delivers chat via Helix with the App Access Token (official Chatbot badge).
      * Flattens newlines, chunks >maxMessageLength on word boundaries paced
      * chunkDelayMs apart, retries 401s transparently. Delivery is a separate
-     * fact from observation: the transcript row arrives only when the
-     * bot-token EventSub session reports Twitch's own record of the message.
+     * fact from observation: EventSub supplies the preferred transcript row;
+     * confirmed canonical IDs fall back after five seconds without observation.
      */
     async send(channel, message, { replyParentMessageId = '' } = {}) {
         const flat = String(message ?? '').replace(/\s+/g, ' ').trim();
@@ -1300,6 +1326,14 @@ export class TwitchTransport {
     get helix() { return this.#helix; }
     get badges() { return this.#badges; }
 
+    /** Per-channel observation diagnostics; the connected indicator continues to mean IRC. */
+    getBotChatObservationHealth() {
+        return Object.fromEntries(this.#channels.map(channel => [channel, this.#eventsub
+            ? this.#eventsub.getBotChatObservationHealth?.(this.#channelIdMap[cleanName(channel)]) || { state: 'disconnected' }
+            : { state: 'disconnected', reason: 'disabled' }
+        ]));
+    }
+
     async getBroadcasterToken(channel) {
         return this.#vault.getBroadcasterAccessToken(channel);
     }
@@ -1357,6 +1391,7 @@ export class TwitchTransport {
         if (!code) throw new Error('Missing authorization code.');
         await this.#vault.exchangeCode(String(code), redirectUri, this.#botUsername);
         try {
+            if (this.#running) await this.#eventsub?.reauthorizePublicSession?.();
             await this.#bootRuntime();
         } catch (err) {
             // Auth succeeded; a transient runtime failure must not fail the OAuth callback.
@@ -1372,6 +1407,7 @@ export class TwitchTransport {
         if (this.#running) {
             try {
                 await this.#subscribeEventSubChannel(channel);
+                await this.#eventsub?.reauthorizeBroadcasterSession?.(this.#channelIdMap[cleanName(channel)]);
             } catch (err) {
                 console.error('[TwitchTransport] EventSub subscribe after broadcaster link failed:', err.message);
             }
@@ -1516,6 +1552,7 @@ export class TwitchTransport {
                 broadcasterUserId: broadcasterId,
                 broadcasterChannel: login,
                 accessToken: token,
+                getAccessToken: () => this.#vault.getBroadcasterAccessToken(login),
                 moderatorUserId: broadcasterId
             });
         } catch (err) {
@@ -1539,14 +1576,75 @@ export class TwitchTransport {
     }
 
     async #sendChunk(channel, chunk, { replyParentMessageId = '' } = {}) {
+        if (this.#stopping) throw new Error('Twitch transport is stopping.');
         const broadcasterId = this.#channelIdMap[cleanName(channel)];
         if (!broadcasterId) throw new Error(`No broadcaster ID resolved for channel "${channel}".`);
         if (!this.#botId) throw new Error('Bot user ID is not resolved; call start() before send().');
-        await this.#helix.sendChatMessage({
+        const username = this.#botUsername;
+        const controller = new AbortController();
+        let timeout;
+        const expired = new Promise((_, reject) => {
+            timeout = this.#setTimeoutFn(() => {
+                controller.abort();
+                reject(new Error('Twitch chat send timed out.'));
+            }, 10_000);
+            timeout?.unref?.();
+        });
+        const sending = Promise.race([this.#helix.sendChatMessage({
             broadcasterId,
             senderId: this.#botId,
             message: chunk,
-            replyParentMessageId
+            replyParentMessageId,
+            signal: controller.signal
+        }), expired]);
+        this.#sending.add(sending);
+        try {
+            const result = await sending;
+            const id = typeof result.message_id === 'string' ? result.message_id : '';
+            this.#pruneBotMessages();
+            if (!id.trim() || this.#recentBotMessages.has(id) || this.#pendingSends.has(id)) return;
+            const pending = { channel: channelKey(channel), username, message: chunk, timestamp: this.#nowFn(), timer: null };
+            this.#pendingSends.set(id, pending);
+            if (this.#stopping) this.#emitSendFallback(id);
+            else {
+                pending.timer = this.#setTimeoutFn(() => this.#emitSendFallback(id), 5000);
+                pending.timer?.unref?.();
+            }
+        } finally {
+            this.#clearTimeoutFn(timeout);
+            this.#sending.delete(sending);
+        }
+    }
+
+    #pruneBotMessages() {
+        const cutoff = this.#nowFn() - 10 * 60 * 1000;
+        for (const [id, timestamp] of this.#recentBotMessages) {
+            if (timestamp > cutoff) break;
+            this.#recentBotMessages.delete(id);
+        }
+    }
+
+    #rememberBotMessage(id) {
+        this.#pruneBotMessages();
+        this.#recentBotMessages.set(id, this.#nowFn());
+        while (this.#recentBotMessages.size > 1000) {
+            this.#recentBotMessages.delete(this.#recentBotMessages.keys().next().value);
+        }
+    }
+
+    #emitSendFallback(id) {
+        const pending = this.#pendingSends.get(id);
+        if (!pending) return;
+        this.#pendingSends.delete(id);
+        if (pending.timer !== null) this.#clearTimeoutFn(pending.timer);
+        this.#rememberBotMessage(id);
+        console.warn(`[TwitchTransport] Bot chat observation missing for ${pending.channel}, message ${id}; recording confirmed-send fallback.`);
+        this.#recordTranscriptEntry(pending.channel, {
+            id,
+            username: pending.username,
+            message: pending.message,
+            timestamp: pending.timestamp,
+            meta: { provenance: 'helix_send_fallback' }
         });
     }
 
@@ -1585,19 +1683,29 @@ export class TwitchTransport {
      * Viewer-authored notifications are discarded because IRC owns viewers.
      */
     #ingestBotChat(observation) {
-        const channel = channelKey(observation.channel);
+        let channel = channelKey(observation.channel);
+        const id = String(observation.id || '');
         if (
             String(this.#botId || '') === ''
             || observation.chatterUserId !== String(this.#botId)
-            || !this.#channels.includes(channel)
+            || !id
         ) return;
+        this.#pruneBotMessages();
+        if (this.#recentBotMessages.has(id)) return;
+        const pending = this.#pendingSends.get(id);
+        if (pending) {
+            channel = pending.channel;
+            if (pending.timer !== null) this.#clearTimeoutFn(pending.timer);
+            this.#pendingSends.delete(id);
+        } else if (!this.#channels.includes(channel)) return;
+        this.#rememberBotMessage(id);
         this.#observe({
             channel,
             loginName: observation.loginName,
             username: observation.username,
             text: observation.text,
             tags: observation.tags || {},
-            id: observation.id || '',
+            id,
             timestamp: Number(observation.timestamp) || this.#nowFn(),
             authoredByBot: true
         });

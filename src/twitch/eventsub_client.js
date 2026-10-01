@@ -7,32 +7,11 @@
 // bot-token session for public/bot-authorized events across joined channels.
 // Pure dependencies: reads zero process.env.
 
+import { EventSubSubscriptions, matchesSubscription as matchesDesiredSubscription } from './eventsub_subscriptions.js';
+import { EventSubSocket as WebSocketSession } from './eventsub_socket.js';
 const cleanName = (value) => String(value || '').replace('#', '').trim().toLowerCase();
 const channelKey = (channel) => `#${cleanName(channel)}`;
 const CHAT_NOTIFICATION_TYPE = 'channel.chat.notification';
-
-function asText(data) {
-    if (typeof data === 'string') return data;
-    if (data instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(data))) {
-        return data.toString('utf8');
-    }
-    if (data && typeof data.toString === 'function') return data.toString();
-    return String(data ?? '');
-}
-
-function bindSocket(ws, { onMessage, onClose, onError, onOpen }) {
-    if (typeof ws.on === 'function') {
-        ws.on('open', () => onOpen?.());
-        ws.on('message', (data) => onMessage(asText(data)));
-        ws.on('close', () => onClose());
-        ws.on('error', (err) => onError(err));
-        return;
-    }
-    ws.onopen = () => onOpen?.();
-    ws.onmessage = (event) => onMessage(asText(event?.data ?? event));
-    ws.onclose = () => onClose();
-    ws.onerror = (err) => onError(err);
-}
 
 function actorFrom(event, { anonymous = false, prefix = 'user' } = {}) {
     if (anonymous) return { id: '', login: 'anonymous', displayName: 'Anonymous' };
@@ -188,12 +167,6 @@ const PUBLIC_SUBSCRIPTION_SPECS = [
     }
 ];
 
-function matchesSubscription(sub, spec, broadcasterId, botUserId) {
-    if (sub?.type !== spec.type || sub?.transport?.method !== 'websocket') return false;
-    const expected = spec.condition(broadcasterId, botUserId);
-    return Object.entries(expected).every(([key, value]) => String(sub?.condition?.[key] || '') === String(value));
-}
-
 /**
  * Normalizes a bot-session `channel.chat.message` notification into the
  * transport's uniform observation shape. Emote ranges are synthesized from
@@ -266,636 +239,104 @@ function normalizeChatNotice(message, nowFn) {
     };
 }
 
-/**
- * Private WebSocket engine shared by every session family: welcome handshake,
- * keepalive watchdog, reconnect-url resume, and backoff reconnection.
- * Policy hooks: `onNotification` receives raw notification envelopes and
- * `onResubscribe` fires after an unexpected (non-resume) re-welcome so owners
- * can re-apply their Helix subscriptions against the new session.
- */
-class WebSocketSession {
-    #wsImpl;
-    #setTimeoutFn;
-    #clearTimeoutFn;
-    #wsUrl;
-    #welcomeTimeoutMs;
-    #keepaliveGraceMs;
-    #reconnectBaseMs;
-    #reconnectMaxMs;
-    #isStopped;
-    #onNotification;
-    #onResubscribe;
-
-    #socket = null;
-    #sessionId = null;
-    #connectPromise = null;
-    #connectResolve = null;
-    #connectReject = null;
-    #welcomeTimer = null;
-    #keepaliveTimer = null;
-    #keepaliveSec = 10;
-    #reconnectTimer = null;
-    #reconnectAttempt = 0;
-    #hadLiveSession = false;
-    #halted = false;
-
-    constructor({
-        wsImpl,
-        nowFn,
-        setTimeoutFn,
-        clearTimeoutFn,
-        wsUrl,
-        welcomeTimeoutMs,
-        keepaliveGraceMs,
-        reconnectBaseMs,
-        reconnectMaxMs,
-        isStopped,
-        onNotification,
-        onResubscribe
-    }) {
-        this.#wsImpl = wsImpl;
-        this.#setTimeoutFn = setTimeoutFn;
-        this.#clearTimeoutFn = clearTimeoutFn;
-        this.#wsUrl = wsUrl;
-        this.#welcomeTimeoutMs = welcomeTimeoutMs;
-        this.#keepaliveGraceMs = keepaliveGraceMs;
-        this.#reconnectBaseMs = reconnectBaseMs;
-        this.#reconnectMaxMs = reconnectMaxMs;
-        this.#isStopped = isStopped;
-        this.#onNotification = onNotification;
-        this.#onResubscribe = onResubscribe;
-    }
-
-    get sessionId() {
-        return this.#sessionId;
-    }
-
-    get connected() {
-        return Boolean(this.#socket && this.#sessionId);
-    }
-
-    /**
-     * Permanently stops this session: closes the socket and halts its
-     * reconnection loop. Twitch deletes websocket-transport subscriptions
-     * once their socket drops, so no Helix DELETE round-trip is needed here.
-     */
-    stop() {
-        this.#halted = true;
-        this.teardown();
-    }
-
-    /** True when either the owner (client-wide) or this session is stopped. */
-    #reconnectHalted() {
-        return this.#halted || this.#isStopped();
-    }
-
-    async ensureConnected() {
-        if (this.#sessionId && this.#socket) return;
-        if (this.#connectPromise) return this.#connectPromise;
-        return this.open(this.#wsUrl);
-    }
-
-    async open(url, { isResume = false } = {}) {
-        this.#clearTimers();
-        const ws = new this.#wsImpl(url);
-        this.#socket = ws;
-
-        this.#connectPromise = new Promise((resolve, reject) => {
-            this.#connectResolve = resolve;
-            this.#connectReject = reject;
-        });
-
-        this.#welcomeTimer = this.#setTimeoutFn(() => {
-            const err = new Error('EventSub connection timed out waiting for session_welcome');
-            if (this.#connectReject) {
-                this.#connectReject(err);
-                this.#connectReject = null;
-                this.#connectResolve = null;
-            }
-            this.#connectPromise = null;
-            this.#cleanupSocket(ws);
-            if (this.#socket === ws) {
-                this.#socket = null;
-                this.#sessionId = null;
-            }
-            if (!this.#reconnectHalted()) this.#scheduleReconnect();
-        }, this.#welcomeTimeoutMs);
-        this.#welcomeTimer?.unref?.();
-
-        bindSocket(ws, {
-            onOpen: () => {},
-            onMessage: (data) => this.#handleRawMessage(data, ws, isResume),
-            onClose: () => this.#handleSocketClose(ws, isResume),
-            onError: (err) => this.#handleSocketError(err)
-        });
-
-        return this.#connectPromise;
-    }
-
-    teardown() {
-        this.#clearTimers();
-        if (this.#connectReject) {
-            this.#connectReject(new Error('EventSub disconnected'));
-            this.#connectReject = null;
-            this.#connectResolve = null;
-            this.#connectPromise = null;
-        }
-        this.#cleanupSocket(this.#socket);
-        this.#socket = null;
-        this.#sessionId = null;
-    }
-
-    #handleRawMessage(raw, ws, isResume) {
-        let message;
-        try {
-            message = JSON.parse(raw);
-            if (!message || typeof message !== 'object') throw new Error('Invalid JSON payload');
-        } catch (error) {
-            console.warn('[EventSub] Failed to parse message JSON:', error?.message || error);
-            return;
-        }
-
-        const metadata = message?.metadata || {};
-        const payload = message?.payload || {};
-
-        switch (metadata.message_type) {
-            case 'session_welcome': {
-                if (this.#welcomeTimer) {
-                    this.#clearTimeoutFn(this.#welcomeTimer);
-                    this.#welcomeTimer = null;
-                }
-                this.#sessionId = payload.session?.id || null;
-                this.#reconnectAttempt = 0;
-                this.#keepaliveSec = Number(payload.session?.keepalive_timeout_seconds) || 10;
-                this.#armKeepalive(this.#keepaliveSec);
-
-                if (this.#connectResolve) {
-                    this.#connectResolve();
-                    this.#connectResolve = null;
-                    this.#connectReject = null;
-                }
-                this.#connectPromise = null;
-
-                // Resume migrations preserve server-side subscriptions; clean
-                // reconnects land on a fresh session and must re-apply them.
-                if (this.#hadLiveSession && !isResume) {
-                    this.#onResubscribe();
-                }
-                this.#hadLiveSession = true;
-                break;
-            }
-            case 'session_keepalive': {
-                this.#resetKeepalive();
-                break;
-            }
-            case 'notification': {
-                this.#resetKeepalive();
-                this.#onNotification(message);
-                break;
-            }
-            case 'session_reconnect': {
-                const reconnectUrl = payload.session?.reconnect_url;
-                if (reconnectUrl) {
-                    this.#resumeTo(reconnectUrl);
-                }
-                break;
-            }
-            case 'revocation': {
-                console.warn(
-                    `[EventSub] Subscription revoked: type=${payload.subscription?.type}, status=${payload.subscription?.status}`
-                );
-                break;
-            }
-            default:
-                break;
-        }
-    }
-
-    async #resumeTo(reconnectUrl) {
-        const oldSocket = this.#socket;
-        try {
-            await this.open(reconnectUrl, { isResume: true });
-            this.#cleanupSocket(oldSocket);
-        } catch (err) {
-            console.warn('[EventSub] Reconnect URL resume failed, falling back to clean reconnect:', err.message);
-            this.#cleanupSocket(oldSocket);
-            if (!this.#reconnectHalted()) this.#scheduleReconnect(0, false);
-        }
-    }
-
-    #handleSocketClose(ws, isResume) {
-        // Idempotent: cleanup-driven re-entrant closes and stale migrated
-        // sockets must not re-trigger rejection or reconnection.
-        if (ws !== this.#socket) return;
-        this.#socket = null;
-        this.#sessionId = null;
-        this.#cleanupSocket(ws);
-        if (this.#connectReject) {
-            this.#connectReject(new Error('EventSub connection closed'));
-            this.#connectReject = null;
-            this.#connectResolve = null;
-            this.#connectPromise = null;
-        }
-        if (!this.#reconnectHalted()) {
-            this.#scheduleReconnect(undefined, false);
-        }
-    }
-
-    #handleSocketError(err) {
-        console.warn('[EventSub] WebSocket error:', err?.message || err);
-    }
-
-    #armKeepalive(keepaliveSec) {
-        if (this.#keepaliveTimer) {
-            this.#clearTimeoutFn(this.#keepaliveTimer);
-            this.#keepaliveTimer = null;
-        }
-        const timeoutMs = keepaliveSec * 1000 + this.#keepaliveGraceMs;
-        this.#keepaliveTimer = this.#setTimeoutFn(() => {
-            console.warn('[EventSub] Keepalive watchdog timeout; reconnecting...');
-            this.#cleanupSocket(this.#socket);
-            this.#socket = null;
-            this.#sessionId = null;
-            if (!this.#reconnectHalted()) this.#scheduleReconnect(0, false);
-        }, timeoutMs);
-        this.#keepaliveTimer?.unref?.();
-    }
-
-    #resetKeepalive() {
-        this.#armKeepalive(this.#keepaliveSec);
-    }
-
-    #scheduleReconnect(delayMs, isResume = false) {
-        if (this.#reconnectTimer) {
-            this.#clearTimeoutFn(this.#reconnectTimer);
-            this.#reconnectTimer = null;
-        }
-        if (this.#reconnectHalted()) return;
-
-        let waitMs = delayMs;
-        if (waitMs === undefined) {
-            waitMs = Math.min(this.#reconnectBaseMs * Math.pow(2, this.#reconnectAttempt), this.#reconnectMaxMs);
-            this.#reconnectAttempt++;
-        }
-
-        this.#reconnectTimer = this.#setTimeoutFn(async () => {
-            this.#reconnectTimer = null;
-            if (this.#reconnectHalted()) return;
-            try {
-                await this.open(this.#wsUrl, { isResume });
-            } catch (err) {
-                console.error('[EventSub] Reconnection attempt failed:', err?.message || err);
-            }
-        }, waitMs);
-        this.#reconnectTimer?.unref?.();
-    }
-
-    #clearTimers() {
-        if (this.#welcomeTimer) {
-            this.#clearTimeoutFn(this.#welcomeTimer);
-            this.#welcomeTimer = null;
-        }
-        if (this.#keepaliveTimer) {
-            this.#clearTimeoutFn(this.#keepaliveTimer);
-            this.#keepaliveTimer = null;
-        }
-        if (this.#reconnectTimer) {
-            this.#clearTimeoutFn(this.#reconnectTimer);
-            this.#reconnectTimer = null;
-        }
-    }
-
-    #cleanupSocket(ws) {
-        if (!ws) return;
-        try {
-            if (typeof ws.close === 'function') ws.close();
-        } catch {
-            // ignore
-        }
-    }
-}
-
-class BroadcasterSession {
+/** Owns a family's desired channels; socket mechanics and subscription policy remain separate. */
+class EventSession {
     #helix;
-    #desired = null;
+    #specs;
+    #userId;
+    #getAccessToken;
+    #desired = new Map();
     #lifecycle;
+    #subscriptions;
+    #label;
 
-    constructor(options) {
+    constructor({ helix, specs, userId, getAccessToken, onNotification, lifecycle, label }) {
+        this.#helix = helix;
+        this.#specs = specs;
+        this.#userId = userId;
+        this.#getAccessToken = getAccessToken;
+        this.#label = label;
+        this.#subscriptions = new EventSubSubscriptions(helix, { ...lifecycle, label });
         this.#lifecycle = new WebSocketSession({
-            ...options,
-            onResubscribe: () => this.applySubscriptions().catch((err) => {
-                console.warn('[EventSub] Failed to re-subscribe channel on reconnect:', err?.message || err);
-            })
+            ...lifecycle, label, onNotification,
+            onResubscribe: () => this.#subscriptions.sessionChanged({ sessionId: this.sessionId, resumed: false }),
+            onResumed: previousSessionId => this.#subscriptions.sessionChanged({ sessionId: this.sessionId, previousSessionId, resumed: true }),
+            onDisconnected: () => this.#subscriptions.disconnected(),
+            onRevocation: sub => this.#subscriptions.revoke(sub)
         });
-        this.#helix = options.helix;
     }
 
-    get sessionId() {
-        return this.#lifecycle.sessionId;
-    }
-
-    get connected() {
-        return this.#lifecycle.connected;
-    }
+    get sessionId() { return this.#lifecycle.sessionId; }
+    get connected() { return this.#lifecycle.connected; }
+    get hasDesiredChannels() { return this.#desired.size > 0; }
 
     setDesired(item) {
-        this.#desired = item;
+        const id = String(item.broadcasterUserId);
+        const previous = this.#desired.get(id);
+        this.#desired.set(id, item);
+        this.#syncDesired();
+        if (previous && previous.accessToken !== item.accessToken) void this.reauthorize();
     }
 
-    stop() {
-        this.#lifecycle.stop();
+    addChannel(broadcasterUserId, broadcasterChannel) {
+        this.setDesired({ broadcasterUserId: String(broadcasterUserId), broadcasterChannel: cleanName(broadcasterChannel) });
     }
 
-    teardown() {
-        this.#lifecycle.teardown();
+    #item(desired, spec) {
+        return {
+            type: spec.type,
+            version: spec.version,
+            condition: spec.condition(desired.broadcasterUserId, desired.moderatorUserId || this.#userId || desired.broadcasterUserId),
+            broadcasterChannel: desired.broadcasterChannel,
+            getAccessToken: desired.getAccessToken || this.#getAccessToken || (() => Promise.resolve(desired.accessToken))
+        };
     }
 
-    async ensureConnected() {
-        return this.#lifecycle.ensureConnected();
+    #syncDesired() {
+        this.#subscriptions.setDesired([...this.#desired.values()].flatMap(desired => this.#specs.map(spec => this.#item(desired, spec))));
     }
 
-    async applySubscriptions() {
-        const desired = this.#desired;
-        if (!desired || !this.#lifecycle.sessionId) return;
-        for (const spec of BROADCASTER_SUBSCRIPTION_SPECS) {
-            try {
-                await this.#helix.request('/eventsub/subscriptions', {
-                    method: 'POST',
-                    accessToken: desired.accessToken,
-                    broadcasterChannel: desired.broadcasterChannel,
-                    body: {
-                        type: spec.type,
-                        version: spec.version,
-                        condition: spec.condition(desired.broadcasterUserId, desired.moderatorUserId),
-                        transport: { method: 'websocket', session_id: this.#lifecycle.sessionId }
-                    }
-                });
-            } catch (err) {
-                const status = err?.status;
-                if (status === 409) continue;
-                if (status === 401 || status === 403) {
-                    console.warn(
-                        `[EventSub] Skipping ${spec.type} for ${desired.broadcasterChannel}: missing scope (${status})`
-                    );
-                    continue;
-                }
-                console.warn(
-                    `[EventSub] Failed to subscribe ${spec.type} for ${desired.broadcasterChannel}:`,
-                    err?.message || err
-                );
-            }
-        }
-    }
-}
-
-/**
- * Shared public/bot-authorized session. One WebSocket carries every public
- * subscription spec for every joined channel; access tokens resolve fresh
- * through `getAccessToken` because bot tokens rotate.
- * The socket exists only while at least one desired channel remains:
- * the first addition connects it, the final removal stops it terminally.
- */
-class PublicEventSession {
-    #botUserId;
-    #getAccessToken;
-    #helix;
-    #lifecycle;
-    #desired = new Map(); // broadcasterUserId -> login
-    #appliedIn = new Map(); // broadcasterUserId:type -> sessionId already subscribed
-
-    constructor({ helix, botUserId, getAccessToken, onNotification, lifecycle }) {
-        this.#helix = helix;
-        this.#botUserId = String(botUserId || '');
-        this.#getAccessToken = getAccessToken;
-        this.#lifecycle = new WebSocketSession({
-            ...lifecycle,
-            onNotification,
-            onResubscribe: () => this.applySubscriptions().catch((err) => {
-                console.warn('[EventSub] Failed to re-subscribe public events on reconnect:', err?.message || err);
-            })
-        });
+    botChatHealth(broadcasterUserId) {
+        const desired = this.#desired.get(String(broadcasterUserId));
+        if (!this.connected || !desired) return { state: 'disconnected' };
+        return this.#subscriptions.health(this.#item(desired, this.#specs.find(spec => spec.type === BOT_CHAT_SUBSCRIPTION_TYPE)));
     }
 
-    get sessionId() {
-        return this.#lifecycle.sessionId;
-    }
+    ensureConnected() { return this.#lifecycle.ensureConnected(); }
+    applySubscriptions() { return this.#subscriptions.reconcile(); }
+    reauthorize() { return this.#subscriptions.reauthorize(); }
+    stop() { this.#subscriptions.stop(); this.#lifecycle.stop(); }
+    teardown() { this.#subscriptions.stop(); this.#lifecycle.teardown(); }
 
-    get connected() {
-        return this.#lifecycle.connected;
-    }
-
-    get hasDesiredChannels() {
-        return this.#desired.size > 0;
-    }
-
-    addChannel(broadcasterUserId, login) {
-        this.#desired.set(String(broadcasterUserId), cleanName(login));
-    }
-
-    stop() {
-        this.#lifecycle.stop();
-    }
-
-    teardown() {
-        this.#lifecycle.teardown();
-    }
-
-    async ensureConnected() {
-        return this.#lifecycle.ensureConnected();
-    }
-
-    async applySubscriptions() {
-        const sessionId = this.#lifecycle.sessionId;
-        if (!sessionId || this.#desired.size === 0) return;
-        const pending = [...this.#desired.keys()].flatMap((broadcasterUserId) =>
-            PUBLIC_SUBSCRIPTION_SPECS
-                .filter((spec) => this.#appliedIn.get(this.#appliedKey(broadcasterUserId, spec)) !== sessionId)
-                .map((spec) => ({ broadcasterUserId, spec }))
-        );
-        if (pending.length === 0) return;
-        let token = null;
-        try {
-            token = await this.#getAccessToken();
-        } catch (err) {
-            console.warn('[EventSub] Public EventSub token unavailable:', err?.message || err);
-            return;
-        }
-        for (const { broadcasterUserId, spec } of pending) {
-            const login = this.#desired.get(broadcasterUserId);
-            try {
-                await this.#createSubscription(token, broadcasterUserId, sessionId, spec);
-                this.#markApplied(broadcasterUserId, spec, sessionId);
-            } catch (err) {
-                const status = err?.status;
-                if (status === 401 || status === 403) {
-                    console.warn(`[EventSub] Skipping ${spec.type} for ${login}: missing scope (${status})`);
-                    continue;
-                }
-                if (status === 409) {
-                    await this.#recoverFromConflict(token, broadcasterUserId, login, sessionId, spec);
-                    continue;
-                }
-                console.warn(
-                    `[EventSub] Failed to subscribe ${spec.type} for ${login}:`,
-                    err?.message || err
-                );
-            }
-        }
-    }
-
-    #appliedKey(broadcasterUserId, spec) {
-        return `${broadcasterUserId}:${spec.type}`;
-    }
-
-    #markApplied(broadcasterUserId, spec, sessionId) {
-        this.#appliedIn.set(this.#appliedKey(broadcasterUserId, spec), sessionId);
-    }
-
-    #createSubscription(token, broadcasterUserId, sessionId, spec) {
-        return this.#helix.request('/eventsub/subscriptions', {
-            method: 'POST',
-            accessToken: token,
-            body: {
-                type: spec.type,
-                version: spec.version,
-                condition: spec.condition(broadcasterUserId, this.#botUserId),
-                transport: { method: 'websocket', session_id: sessionId }
-            }
-        });
-    }
-
-    /**
-     * Session-aware 409 recovery. A conflict is either an idempotent duplicate
-     * already attached to the current socket (treat as applied, delete nothing)
-     * or a stale leftover from a dead previous session (delete it, retry
-     * creation once). Anything that cannot be proven deterministically stays
-     * unapplied so the next reconnect resync retries it - never marked applied
-     * merely to silence the error.
-     */
-    async #recoverFromConflict(token, broadcasterUserId, login, sessionId, spec) {
-        let matches;
-        try {
-            matches = await this.#findSubscriptions(token, broadcasterUserId, spec);
-        } catch (err) {
-            console.warn(`[EventSub] Failed to inspect conflicting ${spec.type} for ${login}:`, err?.message || err);
-            return false;
-        }
-
-        if (matches.some((sub) => sub?.status === 'enabled' && String(sub?.transport?.session_id || '') === sessionId)) {
-            this.#markApplied(broadcasterUserId, spec, sessionId);
-            return true;
-        }
-
-        const staleIds = matches.map((sub) => sub?.id).filter(Boolean);
-        if (staleIds.length === 0) {
-            console.warn(
-                `[EventSub] Conflicting ${spec.type} for ${login} has no inspectable subscription; leaving unapplied`
-            );
-            return false;
-        }
-
-        for (const subId of staleIds) {
-            try {
-                await this.#helix.request('/eventsub/subscriptions', {
-                    method: 'DELETE',
-                    query: { id: subId },
-                    accessToken: token
-                });
-            } catch (err) {
-                if (err?.status !== 404) {
-                    console.warn(`[EventSub] Failed to delete stale bot chat subscription ${subId}:`, err?.message || err);
-                    return false;
-                }
-            }
-        }
-
-        try {
-            await this.#createSubscription(token, broadcasterUserId, sessionId, spec);
-        } catch (err) {
-            console.warn(
-                `[EventSub] Failed to re-create ${spec.type} for ${login} after stale cleanup:`,
-                err?.message || err
-            );
-            return false;
-        }
-        this.#markApplied(broadcasterUserId, spec, sessionId);
-        return true;
-    }
-
-    async #findSubscriptions(token, broadcasterUserId, spec) {
-        const matches = [];
-        let after = '';
-        do {
-            const page = await this.#helix.request('/eventsub/subscriptions', {
-                query: { first: 100, ...(after ? { after } : {}) },
-                accessToken: token
-            });
-            for (const sub of page?.data || []) {
-                if (!matchesSubscription(sub, spec, broadcasterUserId, this.#botUserId)) continue;
-                matches.push(sub);
-            }
-            after = page?.pagination?.cursor || '';
-        } while (after);
-        return matches;
-    }
-
-    /**
-     * Removes one channel's chat subscriptions via Helix DELETE so the shared
-     * socket stops delivering it while other channels remain subscribed.
-     * Listing (instead of tracking created IDs) also cleans subscriptions
-     * orphaned by lost 409 responses across restarts.
-     */
     async removeChannel(broadcasterUserId) {
-        const id = String(broadcasterUserId ?? '');
+        const id = String(broadcasterUserId);
+        const desired = this.#desired.get(id);
         this.#desired.delete(id);
-        for (const spec of PUBLIC_SUBSCRIPTION_SPECS) {
-            this.#appliedIn.delete(this.#appliedKey(id, spec));
-        }
-        if (!id || !this.#botUserId) return;
-
-        let token = null;
+        this.#syncDesired();
+        const sessionId = this.sessionId;
+        if (!desired || !sessionId) return;
+        const items = this.#specs.map(spec => this.#item(desired, spec));
         try {
-            token = await this.#getAccessToken();
-        } catch (err) {
-            console.warn('[EventSub] Public EventSub unsubscription token unavailable:', err?.message || err);
-            return;
-        }
-
-        let after = '';
-        do {
-            let page;
-            try {
-                page = await this.#helix.request('/eventsub/subscriptions', {
-                    query: { first: 100, ...(after ? { after } : {}) },
-                    accessToken: token
+            const accessToken = await items[0].getAccessToken();
+            let after;
+            do {
+                const page = await this.#helix.request('/eventsub/subscriptions', {
+                    accessToken, retry401: false, signal: AbortSignal.timeout(10_000),
+                    query: { first: 100, ...(after ? { after } : {}) }
                 });
-            } catch (err) {
-                console.warn('[EventSub] Failed to list public EventSub subscriptions:', err?.message || err);
-                return;
-            }
-            for (const sub of page?.data || []) {
-                const spec = PUBLIC_SUBSCRIPTION_SPECS.find((candidate) =>
-                    matchesSubscription(sub, candidate, id, this.#botUserId)
-                );
-                if (!spec) continue;
-                if (!sub?.id) continue;
-                try {
+                for (const sub of page?.data || []) {
+                    if (!sub.id || sub.transport?.session_id !== sessionId || !items.some(item => matchesDesiredSubscription(sub, item))) continue;
                     await this.#helix.request('/eventsub/subscriptions', {
-                        method: 'DELETE',
-                        query: { id: sub.id },
-                        accessToken: token
+                        method: 'DELETE', query: { id: sub.id }, accessToken, retry401: false, signal: AbortSignal.timeout(10_000)
                     });
-                } catch (err) {
-                    if (err?.status !== 404) {
-                        console.warn(`[EventSub] Failed to delete ${spec.type} subscription ${sub.id}:`, err?.message || err);
-                    }
                 }
-            }
-            after = page?.pagination?.cursor || '';
-        } while (after);
+                after = page?.pagination?.cursor;
+            } while (after);
+        } catch (error) {
+            console.warn(`[EventSub:${this.#label}] Removing subscriptions for ${desired.broadcasterChannel} failed (HTTP ${error.status || 'unknown'})`);
+        }
     }
 }
-
 export class EventSubClient {
     #helix;
     #wsImpl;
@@ -909,6 +350,7 @@ export class EventSubClient {
     #reconnectMaxMs;
     #dedupeTtlMs;
     #dedupeMaxSize;
+    #randomFn;
 
     #sessions = new Map(); // broadcasterUserId -> BroadcasterSession
     #eventHandlers = [];
@@ -927,6 +369,7 @@ export class EventSubClient {
         nowFn = Date.now,
         setTimeoutFn = setTimeout,
         clearTimeoutFn = clearTimeout,
+        randomFn = Math.random,
         wsUrl = 'wss://eventsub.wss.twitch.tv/ws',
         welcomeTimeoutMs = 10_000,
         keepaliveGraceMs = 5_000,
@@ -943,6 +386,7 @@ export class EventSubClient {
         this.#nowFn = nowFn;
         this.#setTimeoutFn = setTimeoutFn;
         this.#clearTimeoutFn = clearTimeoutFn;
+        this.#randomFn = randomFn;
         this.#wsUrl = wsUrl;
         this.#welcomeTimeoutMs = welcomeTimeoutMs;
         this.#keepaliveGraceMs = keepaliveGraceMs;
@@ -953,6 +397,7 @@ export class EventSubClient {
     }
 
     get connected() {
+        if (this.publicSessionConnected) return true;
         for (const session of this.#sessions.values()) {
             if (session.connected) return true;
         }
@@ -1000,7 +445,7 @@ export class EventSubClient {
         this.#publicSession = null;
     }
 
-    async subscribeChannel({ broadcasterUserId, broadcasterChannel, accessToken, moderatorUserId }) {
+    async subscribeChannel({ broadcasterUserId, broadcasterChannel, accessToken, getAccessToken, moderatorUserId }) {
         if (!broadcasterUserId) return;
         this.#stopped = false;
 
@@ -1015,6 +460,7 @@ export class EventSubClient {
             broadcasterUserId: id,
             broadcasterChannel: cleanName(broadcasterChannel),
             accessToken,
+            getAccessToken,
             moderatorUserId: moderatorUserId || id
         });
 
@@ -1051,10 +497,11 @@ export class EventSubClient {
         if (!this.#botUserId || !this.#botTokenProvider) return;
         this.#stopped = false;
         if (!this.#publicSession) this.#publicSession = this.#createPublicSession();
-        this.#publicSession.addChannel(broadcasterUserId, broadcasterChannel);
-        await this.#publicSession.ensureConnected();
-        if (this.#stopped) return;
-        await this.#publicSession.applySubscriptions();
+        const session = this.#publicSession;
+        session.addChannel(broadcasterUserId, broadcasterChannel);
+        await session.ensureConnected();
+        if (this.#stopped || this.#publicSession !== session) return;
+        await session.applySubscriptions();
     }
 
     /**
@@ -1076,28 +523,50 @@ export class EventSubClient {
         return Boolean(this.#publicSession?.connected);
     }
 
-    #createSession(broadcasterUserId) {
-        return new BroadcasterSession({
-            broadcasterUserId,
-            helix: this.#helix,
+    getBotChatObservationHealth(broadcasterUserId) {
+        return this.#publicSession?.botChatHealth(broadcasterUserId) || { state: 'disconnected' };
+    }
+
+    async reauthorizePublicSession() {
+        await this.#publicSession?.reauthorize();
+    }
+
+    async reauthorizeBroadcasterSession(broadcasterUserId) {
+        await this.#sessions.get(String(broadcasterUserId))?.reauthorize();
+    }
+
+    #createLifecycleOptions() {
+        return {
             wsImpl: this.#wsImpl,
             nowFn: this.#nowFn,
             setTimeoutFn: this.#setTimeoutFn,
             clearTimeoutFn: this.#clearTimeoutFn,
+            randomFn: this.#randomFn,
             wsUrl: this.#wsUrl,
             welcomeTimeoutMs: this.#welcomeTimeoutMs,
             keepaliveGraceMs: this.#keepaliveGraceMs,
             reconnectBaseMs: this.#reconnectBaseMs,
             reconnectMaxMs: this.#reconnectMaxMs,
-            isStopped: () => this.#stopped,
-            onNotification: (message) => this.#dispatchNotification(message)
+            isStopped: () => this.#stopped
+        };
+    }
+
+    #createSession(broadcasterUserId) {
+        return new EventSession({
+            helix: this.#helix,
+            specs: BROADCASTER_SUBSCRIPTION_SPECS,
+            label: `broadcaster:${broadcasterUserId}`,
+            onNotification: (message) => this.#dispatchNotification(message),
+            lifecycle: this.#createLifecycleOptions()
         });
     }
 
     #createPublicSession() {
-        return new PublicEventSession({
+        return new EventSession({
             helix: this.#helix,
-            botUserId: this.#botUserId,
+            specs: PUBLIC_SUBSCRIPTION_SPECS,
+            userId: this.#botUserId,
+            label: 'public:bot',
             getAccessToken: () => this.#botTokenProvider(),
             onNotification: (message) => {
                 if (message?.metadata?.subscription_type === BOT_CHAT_SUBSCRIPTION_TYPE) {
@@ -1109,18 +578,7 @@ export class EventSubClient {
                 }
                 this.#dispatchNotification(message);
             },
-            lifecycle: {
-                wsImpl: this.#wsImpl,
-                nowFn: this.#nowFn,
-                setTimeoutFn: this.#setTimeoutFn,
-                clearTimeoutFn: this.#clearTimeoutFn,
-                wsUrl: this.#wsUrl,
-                welcomeTimeoutMs: this.#welcomeTimeoutMs,
-                keepaliveGraceMs: this.#keepaliveGraceMs,
-                reconnectBaseMs: this.#reconnectBaseMs,
-                reconnectMaxMs: this.#reconnectMaxMs,
-                isStopped: () => this.#stopped
-            }
+            lifecycle: this.#createLifecycleOptions()
         });
     }
 

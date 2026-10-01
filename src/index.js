@@ -17,6 +17,7 @@ import { createHelixTools } from './twitch/helix_actions.js';
 import { WebServer } from './web/web_server.js';
 import { createExecutionTrace } from './utils/execution_trace.js';
 import { ImageDownloader } from './utils/image_downloader.js';
+import { shutdownRuntime } from './utils/shutdown.js';
 
 const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
@@ -251,14 +252,7 @@ async function shutdown(signal) {
     if (shutdownPromise) return shutdownPromise;
     console.log(`[Shutdown] ${signal} received; draining runtime state.`);
     shutdownPromise = (async () => {
-        emotes.dispose();
-        const stopped = await Promise.allSettled([transport.stop(), server.stop()]);
-        for (const result of stopped) {
-            if (result.status === 'rejected') {
-                console.error('[Shutdown] Runtime stop failed:', result.reason?.message || result.reason);
-            }
-        }
-        await storage.dispose();
+        await shutdownRuntime({ transport, server, emotes, storage });
         process.exitCode = 0;
     })();
     return shutdownPromise;
