@@ -38,14 +38,16 @@ function cloneCatalog(catalog) {
 }
 
 function canonicalModelId(model) {
-    const name = String(model?.name || model?.id || model || '').trim();
-    const marker = '/models/';
-    if (name.includes(marker)) return name.slice(name.lastIndexOf(marker) + marker.length);
-    return name.replace(/^models\//, '').split('/').at(-1);
+    const name = typeof model === 'string' ? model : model?.name || model?.id;
+    if (typeof name !== 'string') return '';
+    // Only Google base-model resources can be sent as bare IDs to this provider.
+    const match = name.trim().match(/^(?:(?:(?:projects\/[^/]+\/locations\/[^/]+\/)?publishers\/google\/)?models\/)?([^/]+)$/);
+    return match?.[1] || '';
 }
 
 function isImageModel(id) {
-    return /^gemini-\d+(?:\.\d+)*-(?:flash(?:-lite)?|pro)-image(?:-[a-z0-9]+)*$/.test(id);
+    return /^gemini-\d+(?:\.\d+)*-(?:flash(?:-lite)?|pro)-image(?:-[a-z0-9]+)*$/.test(id)
+        || /^(?:gemini-)?nano-banana-(?:\d+(?:\.\d+)*|pro)(?:-[a-z0-9]+)*$/.test(id);
 }
 
 function isVeoModel(id) {
@@ -64,18 +66,38 @@ function isMusicModel(id) {
     return /^lyria-\d+(?:\.\d+)*-(?:clip|pro)(?:-[a-z0-9]+)*$/.test(id);
 }
 
+// Keep catalog filtering and saved-target validation on the same generation families.
+// Descriptions and image/audio inputs do not establish media output support.
+function mediaTypeForModel(id) {
+    if (isImageModel(id)) return 'image';
+    if (isVeoModel(id) || isOmniVideoModel(id)) return 'video';
+    if (isTtsModel(id)) return 'tts';
+    if (isMusicModel(id)) return 'music';
+    return null;
+}
+
+function supportsGenerationAction(model, id, type) {
+    // Vertex discovery omits actions. Interactions models have no corresponding
+    // models API action, so their supported family remains the routing constraint.
+    const action = type === 'image' || type === 'tts' ? 'generateContent'
+        : isVeoModel(id) ? 'predictLongRunning' : null;
+    return !action || !Array.isArray(model?.supportedActions) || model.supportedActions.includes(action);
+}
+
 function classifyGoogleModels(models) {
     const catalog = { image: [], video: [], tts: [], music: [] };
     const seen = new Set();
     for (const model of models || []) {
         const id = canonicalModelId(model);
         if (!id || seen.has(id)) continue;
+        const type = mediaTypeForModel(id);
+        if (!type || !supportsGenerationAction(model, id, type)) continue;
         seen.add(id);
-        if (isImageModel(id)) catalog.image.push({ provider: 'google', id });
-        else if (isVeoModel(id)) catalog.video.push({ provider: 'google', id, durations: [4, 6, 8] });
-        else if (isOmniVideoModel(id)) catalog.video.push({ provider: 'google', id });
-        else if (isTtsModel(id)) catalog.tts.push({ provider: 'google', id, voices: [...GOOGLE_TTS_VOICES], defaultVoice: 'Kore' });
-        else if (isMusicModel(id)) catalog.music.push({ provider: 'google', id });
+        catalog[type].push({
+            provider: 'google', id,
+            ...(isVeoModel(id) ? { durations: [4, 6, 8] } : {}),
+            ...(type === 'tts' ? { voices: [...GOOGLE_TTS_VOICES], defaultVoice: 'Kore' } : {})
+        });
     }
     for (const type of Object.keys(catalog)) catalog[type].sort((left, right) => left.id.localeCompare(right.id));
     return catalog;
@@ -111,12 +133,13 @@ function translateGoogleError(error, mediaType) {
 
 async function modelList(pager) {
     if (Array.isArray(pager)) return pager;
-    if (Array.isArray(pager?.page)) return pager.page;
+    // SDK Pager.page is only the current page; its iterator fetches the rest.
     if (pager?.[Symbol.asyncIterator]) {
         const models = [];
         for await (const model of pager) models.push(model);
         return models;
     }
+    if (Array.isArray(pager?.page)) return pager.page;
     if (pager?.[Symbol.iterator]) return [...pager];
     return [];
 }
@@ -290,11 +313,15 @@ export class GoogleProvider {
         return this.#catalogRefresh;
     }
 
-    #assertTarget(type, target) {
+    #resolveTarget(type, target) {
         if (!this.supports(type)) {
             throw new BotError('MEDIA_PROVIDER_UNAVAILABLE', { params: { provider: this.id, mediaType: type } });
         }
-        if (!target?.model) throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
+        const model = canonicalModelId(target?.model);
+        if (!model || mediaTypeForModel(model) !== type) {
+            throw new BotError('MEDIA_MODEL_UNAVAILABLE', { params: { mediaType: type } });
+        }
+        return { ...target, model };
     }
 
     async #referenceInput(prompt, type) {
@@ -425,7 +452,7 @@ export class GoogleProvider {
     }
 
     async generate({ type, prompt, target = {} } = {}) {
-        this.#assertTarget(type, target);
+        target = this.#resolveTarget(type, target);
         try {
             if (type === 'image') return await this.#generateImage(prompt, target);
             if (type === 'video' && isVeoModel(target.model)) return await this.#generateVeo(prompt, target);
