@@ -101,7 +101,9 @@ const HTTP_STATUS_TO_KEY = {
     502: 'HTTP_500',
     503: 'HTTP_500',
     521: 'HTTP_521',
-    504: 'HTTP_504'
+    504: 'HTTP_504',
+    // Google reports its ~60s request deadline as 504 DEADLINE_EXCEEDED or 499 CANCELLED.
+    499: 'HTTP_504'
 };
 
 const NETWORK_CODE_TO_KEY = {
@@ -354,11 +356,7 @@ export class ErrorHandler {
         const status = readStatus(input);
         if (typeof status === 'number' && status >= 400) {
             const key = HTTP_STATUS_TO_KEY[status] || 'HTTP_UNKNOWN';
-            return this.#descriptor(key, {
-                ...params,
-                statusCode: status,
-                message: sanitizeParam(input.message || 'Unknown error')
-            }, { status });
+            return this.#descriptor(key, { ...params, statusCode: status }, { status });
         }
 
         if (input.name === 'AbortError') {

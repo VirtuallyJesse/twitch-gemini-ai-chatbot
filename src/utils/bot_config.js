@@ -206,7 +206,7 @@ Until this section is customized, you are in default mode. If chatters ask who y
         HTTP_500: "🔧 Server Error. Google's servers are having issues. Try again in 30 seconds.",
         HTTP_521: '🔧 Server Down. Origin server is offline. Try again later.',
         HTTP_504: '⏱️ Gateway Timeout. Server took too long. Try again.',
-        HTTP_UNKNOWN: '❌ HTTP Error {statusCode}: {message}.',
+        HTTP_UNKNOWN: '❌ HTTP Error {statusCode}. Ask the bot owner to fix this.',
         RENDER_NETWORK_ERROR: '🌐 Network Error. Could not reach external services. Try again.',
         JSON_PARSE_ERROR: '📄 Parse Error. Ask the bot owner to fix this.',
         UNKNOWN_ERROR: '❌ Unknown Error. Ask the bot owner to fix this.'
