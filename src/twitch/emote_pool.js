@@ -1,7 +1,7 @@
 // src/twitch/emote_pool.js
 //
 // Deep EmotePool module: single source of truth for channel emote state across chat
-// routing, AI prompt generation, reply decoration, and web gallery rendering.
+// routing, AI prompt generation, reply composition, and web gallery rendering.
 // Hydrates from Redis cache on boot, synchronizes real-time via 7TV EventAPI and
 // BTTV WebSockets with conditional ETag polling for FFZ, and emits live updates.
 
@@ -24,6 +24,8 @@ const EMPTY_VIEW = { tokens: [], match: null, space: null, pool: [] };
 const EMOTE_ONLY = /^(?:\s*emote:\S+\s*)+$/;
 const WORD = '\\p{L}\\p{N}_';
 const URL_SPLIT = /(https?:\/\/\S+)/g;
+const MARKER_PREFIX = /(?<!\S)(?:appended_)?emote:/g;
+const MARKED_EMOTE = /(?<!\S)(?:appended_)?emote:\S+/;
 const MAX_OBSERVED_TWITCH_EMOTES = 512;
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -59,18 +61,24 @@ function createDefaultProviders(fetchImpl) {
 export function getEmoteHarness(appendEnabled = false) {
   const parts = [
     '<emotes>',
-    'emote:NAME identifies a Twitch emote in conversational text and supplied chat context.',
-    'Treat emote:NAME tokens as opaque unless the user\'s request makes the emote relevant.',
-    'You may reproduce emotes observed in supplied context when relevant or explicitly requested, preserving their exact spelling and case. Do not invent emotes.',
+    'emote:NAME marks a Twitch emote in conversational text and supplied chat context: a small image chatters post in chat. You cannot see it; you know an emote only from its name and from how chatters use it in the supplied conversation and ambient chat.',
+    'Chatters post an emote as a reaction or punchline in place of words: laughing at something, mocking someone, joining a chat-wide spam. It is never a signature or sign-off, and a message that already says something in words usually needs none.',
+    'Reply in words by default. Use an emote only when it is the reaction itself, its meaning is clear from how this chat uses it, and your reply would lose something without it. Your earlier replies are not a pattern to continue.',
+    'Emotes in a chatter\'s message are their reaction; respond to what they said, not to the emote names, unless they ask about an emote.',
+    'When you use one, copy a name observed in conversational text or supplied chat context with exact spelling and case. Do not invent emotes.',
+    'If the system instructions ask for a different emote style, follow them.',
     'Unmarked emote-like text in previous bot replies does not establish that an emote exists.',
     'Thought summaries are model-generated reasoning, not emote evidence, even when they contain emote:NAME markers.'
   ];
   if (appendEnabled) {
-    parts.push('The application may automatically append a channel emote to your response. You do not choose an automatically appended emote and should not claim to know why a particular emote was selected.');
+    parts.push('appended_emote:NAME at the end of your earlier replies marks an emote the application added after you replied. Chat saw it as part of your message, so treat it as something you said, but you did not choose it: do not explain how it got there or claim to know why it was picked. Ending your replies with an emote is not your job.');
   }
   parts.push('</emotes>');
   return parts.join('\n');
 }
+
+/** Memory form of an emote the application appended; see `EmotePool.composeReply`. */
+export const appendedEmoteMarker = (name) => `appended_emote:${name}`;
 
 export class EmotePool {
   #storage;
@@ -283,27 +291,36 @@ export class EmotePool {
     };
   }
 
-  decorateReply(channel, rawReply, { appendEmote = true, maxLength = null } = {}) {
-    const raw = String(rawReply ?? '');
-    const hasTaggedEmote = /(?<!\S)emote:\S+/.test(raw);
+  /**
+   * Turns model or template text into the chat message and its conversational
+   * memory form from one append decision. Every marker in the input counts as
+   * model-written, so only the emote this call appends is remembered as
+   * `appended_emote:NAME`; pass model text, never memory text. With `append`,
+   * one random pool emote is added when appending is enabled, the text has no
+   * emote, and it fits within `maxLength`.
+   * @returns {{ chat: string, memory: string, appended: string|null }}
+   */
+  composeReply(channel, text, { append = false, maxLength = null } = {}) {
+    const raw = String(text ?? '');
     const view = this.#view(channel);
     const hasBareEmote = Boolean(view.space) && raw.split(URL_SPLIT).some(segment => {
       if (/^https?:\/\//.test(segment)) return false;
       view.space.lastIndex = 0;
       return view.space.test(segment);
     });
-    let out = raw.replace(/(?<!\S)emote:/g, '').replace(/\s+/g, ' ').trim();
-    if (!out) return out;
+    let chat = raw.replace(MARKER_PREFIX, '').replace(/\s+/g, ' ').trim();
+    if (!chat) return { chat, memory: chat, appended: null };
 
-    out = this.#spaceEmotes(view, out);
+    chat = this.#spaceEmotes(view, chat);
+    const memory = this.flagText(channel, chat);
 
-    if (appendEmote && this.#cfg.appendEnabled && !hasTaggedEmote && !hasBareEmote) {
+    if (append && this.#cfg.appendEnabled && !MARKED_EMOTE.test(raw) && !hasBareEmote) {
       const emote = this.#randomEmote(view);
-      if (emote && (!maxLength || out.length + emote.length + 1 <= maxLength)) {
-        out = `${out} ${emote}`;
+      if (emote && (!maxLength || chat.length + emote.length + 1 <= maxLength)) {
+        return { chat: `${chat} ${emote}`, memory: `${memory} ${appendedEmoteMarker(emote)}`, appended: emote };
       }
     }
-    return out;
+    return { chat, memory, appended: null };
   }
 
   getHarnessInstructions() {
@@ -319,11 +336,6 @@ export class EmotePool {
   flagText(channel, text) {
     if (text == null || text === '') return text;
     return this.#flag(this.#view(channel), String(text), this.#nativeNames.get(channelKey(channel)) || new Set());
-  }
-
-  /** Prepare completed model text for memory; model-written markers are not evidence. */
-  prepareModelText(channel, text) {
-    return this.flagText(channel, this.decorateReply(channel, text, { appendEmote: false }));
   }
 
   /* ── Internal State & Helpers ────────────────────────────── */

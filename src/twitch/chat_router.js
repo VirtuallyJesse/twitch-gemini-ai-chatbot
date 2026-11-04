@@ -475,11 +475,20 @@ export class ChatRouter {
         }
     }
 
+    /**
+     * Chat budget for a composed AI reply. Reserves room for a leading @tag
+     * whenever delivery could add one, including the reply-parent fallback.
+     */
+    #replyBudget(trigger) {
+        const { username } = deliveryActor(trigger);
+        const tagLength = this.replyMode !== 'off' && username ? username.length + 2 : 0;
+        return { maxLength: this.maxMessageLength - tagLength };
+    }
+
     async #deliverResponse(transport, {
         channel,
         text,
         trigger = {},
-        decorateAi = false,
         trace = null
     }) {
         trigger = trigger || {};
@@ -493,11 +502,6 @@ export class ChatRouter {
             let delivered = String(text ?? '').trim();
             if (mode === 'tag') delivered = addLeadingTargetTag(delivered, actor);
             if (mode === 'reply') delivered = stripLeadingTargetTag(delivered, actor);
-            if (decorateAi) {
-                delivered = this.emotePool.decorateReply(channel, delivered, {
-                    maxLength: this.maxMessageLength
-                });
-            }
             return delivered;
         };
 
@@ -680,7 +684,7 @@ export class ChatRouter {
                 if (result.success) {
                     this.aiEngine.commitConversationTurn(channel, {
                         userParts: [{ type: 'text', text: conversationPrompt }],
-                        modelParts: [{ type: 'text', text: reply }]
+                        memoryText: result.memoryText
                     });
                 }
                 const routeResult = {
@@ -740,13 +744,13 @@ export class ChatRouter {
                         isBroadcaster: !!message.isBroadcaster,
                         isMod: !!message.isMod
                     },
+                    chatReply: this.#replyBudget(message),
                     trace
                 });
                 const reply = await this.#deliverResponse(transport, {
                     channel,
                     text: rawResponse,
                     trigger: message,
-                    decorateAi: true,
                     trace
                 });
                 return finish({ kind: 'ai', channel, command: aiCommand, sent: true, reply });
@@ -875,6 +879,7 @@ export class ChatRouter {
                             ],
                             overrideFileContext: this.systemInstructions,
                             disableTools: true,
+                            chatReply: this.#replyBudget(event.user),
                             caller: {
                                 loginName: event.user?.login || '',
                                 isBroadcaster: false,
@@ -902,8 +907,7 @@ export class ChatRouter {
                 const delivered = await this.#deliverResponse(transport, {
                     channel,
                     text: reply,
-                    trigger: event.user,
-                    decorateAi: source === 'ai'
+                    trigger: event.user
                 });
                 return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source };
             }
@@ -927,6 +931,7 @@ export class ChatRouter {
                         ],
                         overrideFileContext: this.systemInstructions,
                         disableTools: true,
+                        chatReply: this.#replyBudget(event.user),
                         caller: {
                             loginName: event.user?.login || '',
                             isBroadcaster: false,
@@ -954,8 +959,7 @@ export class ChatRouter {
             const delivered = await this.#deliverResponse(transport, {
                 channel,
                 text: reply,
-                trigger: event.user,
-                decorateAi: source === 'ai'
+                trigger: event.user
             });
             return { kind: 'event', channel, eventKind, sent: true, reply: delivered, source };
         } catch (error) {

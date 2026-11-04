@@ -1244,8 +1244,8 @@ export class WebServer {
                             isMod: false
                         }
                     });
-                    const reply = this.#emotePool?.decorateReply
-                        ? this.#emotePool.decorateReply(null, raw, { maxLength: 499 })
+                    const reply = this.#emotePool?.composeReply
+                        ? this.#emotePool.composeReply(null, raw, { append: true, maxLength: 499 }).chat
                         : raw;
                     res.json({ ok: true, reply });
                 } finally {

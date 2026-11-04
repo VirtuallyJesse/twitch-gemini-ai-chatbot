@@ -4,7 +4,7 @@ import { ImageDownloader } from '../utils/image_downloader.js';
 import { ToolDispatcher } from './tool_dispatcher.js';
 import { assertInteractionSucceeded } from './interaction_response.js';
 import { DEFAULT_CHAT_MODEL, normalizeChatModel } from '../utils/chat_models.js';
-import { getEmoteHarness } from '../twitch/emote_pool.js';
+import { appendedEmoteMarker, getEmoteHarness } from '../twitch/emote_pool.js';
 
 const DEFAULT_MODEL_ATTEMPT_TIMEOUT_MS = 35_000;
 const ALLOWED_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
@@ -170,38 +170,52 @@ export class AIEngine {
 
     /**
      * Records a conversational turn that was completed outside generate(), such
-     * as a media response after Twitch accepts the exact delivered text.
+     * as a media response after Twitch accepts it. `memoryText` is the memory
+     * form from `EmotePool.composeReply`, stored as given.
      */
-    commitConversationTurn(channel, { userParts, modelParts } = {}) {
+    commitConversationTurn(channel, { userParts, memoryText } = {}) {
         if (!Array.isArray(userParts) || userParts.length === 0) {
             throw new TypeError('commitConversationTurn requires non-empty userParts');
         }
-        if (!Array.isArray(modelParts) || modelParts.length === 0) {
-            throw new TypeError('commitConversationTurn requires non-empty modelParts');
+        if (typeof memoryText !== 'string' || !memoryText.trim()) {
+            throw new TypeError('commitConversationTurn requires non-empty memoryText');
         }
 
         this.#checkHistoryLength(channel);
-        this.#rememberConversation(channel, userParts, [{ type: 'model_output', content: modelParts }]);
+        const history = this.getHistory(channel);
+        history.push({ type: 'user_input', content: this.#prepareConversationParts(channel, userParts) });
+        history.push({ type: 'model_output', content: [{ type: 'text', text: memoryText }] });
     }
 
     #prepareConversationParts(channel, parts, model = false) {
         return structuredClone(parts).map(part => part.type === 'text'
             ? { ...part, text: (model
-                ? this.#emotePool?.prepareModelText(channel, part.text)
+                ? this.#emotePool?.composeReply(channel, part.text).memory
                 : this.#emotePool?.flagText(channel, part.text)) ?? part.text }
             : part);
     }
 
-    // Normalize completed conversational text only. Whole thought blocks,
-    // including summaries, must replay unchanged across turns; the emote harness
-    // excludes them from evidence. Active tool and length-retry steps stay raw.
+    // Normalize completed conversational text only, so memory matches what chat
+    // saw; an emote the application appended is marked on the final text part.
+    // Whole thought blocks, including summaries, must replay unchanged across
+    // turns; the emote harness excludes them from evidence. Active tool and
+    // length-retry steps stay raw.
     // https://ai.google.dev/gemini-api/docs/thinking#thought-signatures
-    #rememberConversation(channel, userParts, modelSteps) {
+    #rememberConversation(channel, userParts, modelSteps, appendedEmote = null) {
         const history = this.getHistory(channel);
-        history.push({ type: 'user_input', content: this.#prepareConversationParts(channel, userParts) });
-        history.push(...modelSteps.map(step => step.type === 'model_output'
+        const steps = modelSteps.map(step => step.type === 'model_output'
             ? { ...structuredClone(step), content: this.#prepareConversationParts(channel, step.content, true) }
-            : structuredClone(step)));
+            : structuredClone(step));
+        const finalText = steps.findLast(step => step.type === 'model_output')?.content.findLast(part => part.type === 'text');
+        if (appendedEmote && finalText) finalText.text = `${finalText.text} ${appendedEmoteMarker(appendedEmote)}`;
+        history.push({ type: 'user_input', content: this.#prepareConversationParts(channel, userParts) });
+        history.push(...steps);
+    }
+
+    /** Chat-ready form of `text`, or `text` itself when the caller delivers raw text. */
+    #composeChat(channel, text, chatReply) {
+        if (!chatReply || !this.#emotePool) return text;
+        return this.#emotePool.composeReply(channel, text, { append: true, maxLength: chatReply.maxLength }).chat;
     }
 
     #checkHistoryLength(channel) {
@@ -678,6 +692,7 @@ export class AIEngine {
         overrideFileContext,
         caller,
         recordMemory,
+        chatReply,
         started,
         trace
     }) {
@@ -786,7 +801,7 @@ export class AIEngine {
             trace?.markFailed?.(key);
             console.log(`   ${COLORS.red}✗ Tool Error:${COLORS.reset} ${errMsg} (${key})`);
             this.#logFooter();
-            return errMsg;
+            return this.#composeChat(channel, errMsg, chatReply);
         }
 
         this.#logSection('GEMINI RESPONSE');
@@ -797,7 +812,7 @@ export class AIEngine {
         if (!agentResponse.trim()) {
             trace?.markFailed?.('GEMINI_EMPTY_RESPONSE');
             this.#logFooter();
-            return this.errorHandler.format('GEMINI_EMPTY_RESPONSE');
+            return this.#composeChat(channel, this.errorHandler.format('GEMINI_EMPTY_RESPONSE'), chatReply);
         }
 
         // Length retry loop
@@ -844,7 +859,7 @@ export class AIEngine {
             trace?.markFailed?.('Gemini returned an empty response');
             console.log(`   ${COLORS.red}✗${COLORS.reset} ${errMsg}`);
             this.#logFooter();
-            return errMsg;
+            return this.#composeChat(channel, errMsg, chatReply);
         }
 
         this.#logSubsection('Text Response', COLORS.green);
@@ -860,15 +875,23 @@ export class AIEngine {
         console.log(`\n   ${COLORS.green}✓ Complete${COLORS.reset} │ ${agentResponse.length} chars │ ${elapsed}s`);
         this.#logFooter();
 
+        // One append decision serves both chat and memory.
+        const reply = chatReply && this.#emotePool
+            ? this.#emotePool.composeReply(channel, agentResponse, { append: true, maxLength: chatReply.maxLength })
+            : null;
         if (recordMemory) {
-            this.#rememberConversation(channel, memoryUserParts, latestSuccessfulSteps);
+            this.#rememberConversation(channel, memoryUserParts, latestSuccessfulSteps, reply?.appended);
         }
 
-        return agentResponse;
+        return reply ? reply.chat : agentResponse;
     }
 
     /**
-     * Generates an AI response for a prompt.
+     * Generates an AI response for a prompt. With `chatReply: { maxLength }`,
+     * returns chat-ready text (markers stripped, an appended emote when enabled
+     * and it fits), and memory records the same reply with an appended emote
+     * marked as `appended_emote:NAME`; otherwise returns raw
+     * model text for callers that compose their own reply.
      * @param {string} prompt
      * @param {object} options
      * @returns {Promise<string>}
@@ -884,6 +907,7 @@ export class AIEngine {
         disableTools = false,
         caller = null,
         recordMemory = true,
+        chatReply = null,
         trace = null
     } = {}) {
         const started = Date.now();
@@ -902,13 +926,14 @@ export class AIEngine {
                 overrideFileContext,
                 caller,
                 recordMemory,
+                chatReply,
                 started,
                 trace
             });
         } catch (error) {
             trace?.markFailed?.(error?.message || String(error));
             this.#logFooter();
-            return this.errorHandler.format(error);
+            return this.#composeChat(channel, this.errorHandler.format(error), chatReply);
         }
     }
 

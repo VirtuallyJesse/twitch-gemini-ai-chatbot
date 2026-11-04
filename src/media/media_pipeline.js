@@ -352,22 +352,13 @@ export class MediaPipeline {
             presentation = fallback;
         }
 
-        let decorated = presentation;
-        try {
-            if (this.emotes && typeof this.emotes.decorateReply === 'function') {
-                decorated = this.emotes.decorateReply(
-                    channel,
-                    presentation,
-                    { maxLength: this.maxLength }
-                ) || presentation;
-            }
-        } catch (error) {
-            console.error('[Media] Reply decoration failed:', error);
-        }
-
-        let replyText = ensureExactUrl(decorated, mediaUrl);
-        replyText = fitReplyAroundUrl(replyText, mediaUrl, this.maxLength);
-        return replyText;
+        // Fit the URL before appending so chat and memory keep the same emote.
+        // Composing strips markers; spacing glued emotes can add a few
+        // characters, as on the AI path.
+        const fitted = fitReplyAroundUrl(ensureExactUrl(presentation, mediaUrl), mediaUrl, this.maxLength);
+        const { chat, memory } = this.emotes?.composeReply?.(channel, fitted, { append: true, maxLength: this.maxLength })
+            ?? { chat: fitted, memory: fitted };
+        return { replyText: chat, memoryText: memory };
     }
 
     async synthesize({
@@ -490,7 +481,7 @@ export class MediaPipeline {
 
             await this.#saveEntry(mediaEntry);
 
-            const replyText = await this.#presentMedia({
+            const { replyText, memoryText } = await this.#presentMedia({
                 channel,
                 username,
                 prompt: cleanPrompt,
@@ -503,6 +494,7 @@ export class MediaPipeline {
             return {
                 success: true,
                 replyText,
+                memoryText,
                 mediaEntry
             };
         } catch (error) {
