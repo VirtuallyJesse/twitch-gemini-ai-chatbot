@@ -26,18 +26,23 @@ function byteCountFromBase64(data) {
     return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
 }
 
-function makeSanitizer(redactions) {
+/** Returns a function that replaces every configured secret in text with [REDACTED]. */
+export function createRedactor(redactions) {
     const secrets = [...new Set((redactions || [])
         .map((value) => String(value || ''))
         .filter((value) => value.length >= 4))];
 
-    const redactText = (value) => {
+    return (value) => {
         let result = String(value ?? '');
         for (const secret of secrets) {
             result = result.split(secret).join('[REDACTED]');
         }
         return result;
     };
+}
+
+function makeSanitizer(redactions) {
+    const redactText = createRedactor(redactions);
 
     const sanitize = (value, key = '', seen = new WeakSet()) => {
         if (SECRET_KEY.test(key)) return '[REDACTED]';

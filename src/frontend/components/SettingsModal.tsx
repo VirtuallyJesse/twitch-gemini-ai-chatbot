@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Activity, AlertTriangle, Bell, Loader2, Sliders, Sparkles, Terminal, X } from 'lucide-react';
+import { Activity, AlertTriangle, Bell, FileDown, Loader2, Sliders, Sparkles, Terminal, X } from 'lucide-react';
 import type { BotSettings, ConfigDomain, MediaCatalog } from '../lib/types';
 import { api } from '../lib/api';
 import { channelLabel } from '../lib/channel';
@@ -173,7 +173,7 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = 
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <div className="w-36 sm:w-44 md:w-48 shrink-0 border-r border-line bg-surface-2/40 p-1.5 sm:p-2">
+          <div className="flex w-36 sm:w-44 md:w-48 shrink-0 flex-col border-r border-line bg-surface-2/40 p-1.5 sm:p-2">
             <nav className="flex flex-col gap-1">
               {([
                 ['config', 'Configuration', Sliders], ['persona', 'Persona', Sparkles], ['stream-actions', 'Stream Actions', Activity], ['commands', 'Commands', Terminal],
@@ -184,6 +184,9 @@ function SettingsSession({ onClose, botUsername = 'Twitch Bot', botAuthorized = 
                 </button>
               ))}
             </nav>
+            <a href="/api/admin/logs" download title="Recent console output, for troubleshooting" className="mt-auto flex items-center gap-2 rounded-lg px-2.5 sm:px-3 py-2 text-[11.5px] font-medium text-faint transition-colors hover:bg-surface-2 hover:text-ink">
+              <FileDown size={13} className="shrink-0" /><span className="truncate">Download logs</span>
+            </a>
           </div>
 
           <div className="relative flex min-h-0 flex-1 flex-col">

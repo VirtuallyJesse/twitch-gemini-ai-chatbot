@@ -16,6 +16,7 @@ import { ChatRouter } from './twitch/chat_router.js';
 import { createHelixTools } from './twitch/helix_actions.js';
 import { WebServer } from './web/web_server.js';
 import { createExecutionTrace } from './utils/execution_trace.js';
+import { ConsoleLog } from './utils/console_log.js';
 import { ImageDownloader } from './utils/image_downloader.js';
 import { shutdownRuntime } from './utils/shutdown.js';
 
@@ -23,17 +24,22 @@ const env = process.env;
 const bool = (v, fallback) => (v === undefined || v === null || v === '' ? fallback : String(v) === 'true');
 const csv = (v) => String(v || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
+const redactions = [
+    ...String(env.GEMINI_API_KEY || '').split(','),
+    env.TWITCH_CLIENT_SECRET,
+    env.TWITCH_REFRESH_TOKEN,
+    env.UPSTASH_REDIS_REST_TOKEN,
+    env.TAVILY_API_KEY,
+    env.POLLINATIONS_API_KEY,
+    env.YOUTUBE_API_KEY
+];
+
+const consoleLog = new ConsoleLog({ redactions });
+consoleLog.capture(process.stdout, process.stderr);
+
 const executionTrace = createExecutionTrace({
     enabled: env.AI_VERBOSE === 'true',
-    redactions: [
-        ...String(env.GEMINI_API_KEY || '').split(','),
-        env.TWITCH_CLIENT_SECRET,
-        env.TWITCH_REFRESH_TOKEN,
-        env.UPSTASH_REDIS_REST_TOKEN,
-        env.TAVILY_API_KEY,
-        env.POLLINATIONS_API_KEY,
-        env.YOUTUBE_API_KEY
-    ]
+    redactions
 });
 
 let googleBackend;
@@ -51,6 +57,7 @@ const storage = new Storage({
     restToken: env.UPSTASH_REDIS_REST_TOKEN,
     cursorSecret: env.TWITCH_CLIENT_SECRET
 });
+consoleLog.persistTo(storage);
 
 const configStore = new ConfigStore({ storage, defaults: createFactoryDefaults(env) });
 const bootConfig = await configStore.getAll();
@@ -208,6 +215,7 @@ const server = new WebServer({
     configStore,
     chatRouter,
     helixActions: helixActionSuite,
+    consoleLog,
     adminUsernames: csv(env.ADMIN_USERNAMES),
     clientId: env.TWITCH_CLIENT_ID || '',
     clientSecret: env.TWITCH_CLIENT_SECRET || '',
@@ -253,7 +261,7 @@ async function shutdown(signal) {
     if (shutdownPromise) return shutdownPromise;
     console.log(`[Shutdown] ${signal} received; draining runtime state.`);
     shutdownPromise = (async () => {
-        await shutdownRuntime({ transport, server, emotes, storage });
+        await shutdownRuntime({ transport, server, emotes, consoleLog, storage });
         process.exitCode = 0;
     })();
     return shutdownPromise;

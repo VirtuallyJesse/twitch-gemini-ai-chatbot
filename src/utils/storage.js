@@ -305,6 +305,17 @@ export class MemoryStorageAdapter {
         }
     }
 
+    async appendValue(key, value) {
+        try {
+            const next = (this.kv.get(String(key)) ?? '') + String(value);
+            this.kv.set(String(key), next);
+            return Buffer.byteLength(next);
+        } catch (error) {
+            console.error('[Storage] Memory write failed:', error.message);
+            return null;
+        }
+    }
+
     async deleteValue(key) {
         try {
             this.kv.delete(String(key));
@@ -791,6 +802,16 @@ export class UpstashRedisAdapter {
         }
     }
 
+    async appendValue(key, value) {
+        try {
+            const data = await this.request('/', ['APPEND', String(key), String(value)]);
+            return Number.isInteger(data?.result) ? data.result : null;
+        } catch (error) {
+            console.error('[Storage] API Error:', error.message);
+            return null;
+        }
+    }
+
     async deleteValue(key) {
         try {
             const data = await this.request('/', ['DEL', String(key)]);
@@ -926,6 +947,11 @@ export class Storage {
 
     setValue(key, value) {
         return this.adapter.setValue(key, value);
+    }
+
+    /** Appends text to a string value; resolves to the new byte length, or null on failure. */
+    appendValue(key, value) {
+        return this.adapter.appendValue(key, value);
     }
 
     deleteValue(key) {

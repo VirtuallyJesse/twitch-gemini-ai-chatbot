@@ -96,6 +96,7 @@ export class WebServer {
     #configStore;
     #chatRouter;
     #helixActions;
+    #consoleLog;
     #clientId;
     #clientSecret;
     #sessionSecret;
@@ -147,6 +148,7 @@ export class WebServer {
             configStore = null,
             chatRouter = null,
             helixActions = null,
+            consoleLog = null,
             adminUsernames = [],
             clientId = '',
             clientSecret = '',
@@ -187,6 +189,7 @@ export class WebServer {
         this.#configStore = configStore;
         this.#chatRouter = chatRouter;
         this.#helixActions = helixActions;
+        this.#consoleLog = consoleLog;
         this.#clientId = String(clientId || '').trim();
         this.#clientSecret = String(clientSecret || '').trim();
         this.#sessionSecret = sessionSecret || (isDevMock
@@ -1263,6 +1266,17 @@ export class WebServer {
         this.#app.get('/api/admin/status', async (req, res) => {
             if (!this.#requireAdmin(req, res)) return;
             res.json(await this.#adminDiagnostics());
+        });
+
+        this.#app.get('/api/admin/logs', async (req, res) => {
+            if (!this.#requireAdmin(req, res)) return;
+            if (!this.#consoleLog) return res.status(404).json({ error: 'not_found' });
+            const text = await this.#consoleLog.text();
+            const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+            res.type('text/plain; charset=utf-8')
+                .set('Cache-Control', 'no-store')
+                .attachment(`bot-logs-${stamp}.txt`)
+                .send(text);
         });
 
         this.#app.get('/api/channel-status', async (req, res) => {
