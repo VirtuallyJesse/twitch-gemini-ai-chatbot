@@ -24,8 +24,10 @@ const EMPTY_VIEW = { tokens: [], match: null, space: null, pool: [] };
 const EMOTE_ONLY = /^(?:\s*emote:\S+\s*)+$/;
 const WORD = '\\p{L}\\p{N}_';
 const URL_SPLIT = /(https?:\/\/\S+)/g;
-const MARKER_PREFIX = /(?<!\S)(?:appended_)?emote:/g;
-const MARKED_EMOTE = /(?<!\S)(?:appended_)?emote:\S+/;
+const MARKER_PREFIX = /(?<!\S)emote:/g;
+const MARKED_EMOTE = /(?<!\S)emote:\S+/;
+const APPENDED_TOKEN = /(?<!\S)appended_emote:\S*/g;
+const APPENDED_PREFIX = /(?<!\S)appended_(?=emote:)/g;
 const MAX_OBSERVED_TWITCH_EMOTES = 512;
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -293,15 +295,19 @@ export class EmotePool {
 
   /**
    * Turns model or template text into the chat message and its conversational
-   * memory form from one append decision. Every marker in the input counts as
-   * model-written, so only the emote this call appends is remembered as
-   * `appended_emote:NAME`; pass model text, never memory text. With `append`,
-   * one random pool emote is added when appending is enabled, the text has no
-   * emote, and it fits within `maxLength`.
+   * memory form from one append decision. Only the emote this call appends is
+   * remembered as `appended_emote:NAME`; pass model text, never memory text.
+   * The application owns that marker, so a model-written `appended_emote:NAME`
+   * is dropped whole and the append decision runs as if it were absent; an
+   * input made only of such markers keeps them as model emotes instead. With
+   * `append`, one random pool emote is added when appending is enabled, the
+   * text has no emote, and it fits within `maxLength`.
    * @returns {{ chat: string, memory: string, appended: string|null }}
    */
   composeReply(channel, text, { append = false, maxLength = null } = {}) {
-    const raw = String(text ?? '');
+    const input = String(text ?? '');
+    const withoutAppended = input.replace(APPENDED_TOKEN, ' ');
+    const raw = withoutAppended.trim() ? withoutAppended : input.replace(APPENDED_PREFIX, '');
     const view = this.#view(channel);
     const hasBareEmote = Boolean(view.space) && raw.split(URL_SPLIT).some(segment => {
       if (/^https?:\/\//.test(segment)) return false;
