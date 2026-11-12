@@ -1,7 +1,8 @@
 // Product choices shared by config, the engine, and the dashboard selector.
 export const CHAT_MODELS = Object.freeze([
     Object.freeze({ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }),
-    Object.freeze({ id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' })
+    Object.freeze({ id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' }),
+    Object.freeze({ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite' })
 ]);
 export const DEFAULT_CHAT_MODEL = CHAT_MODELS[0].id;
 
