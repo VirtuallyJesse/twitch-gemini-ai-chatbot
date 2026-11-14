@@ -9,7 +9,7 @@
     "dev": "node local_dev.js",
     "dev:mock": "vite build && node dev_mock.js",
     "build": "vite build",
-    "test": "node --test"
+    "test": "node --permission --allow-fs-read=* --allow-addons --test --test-isolation=none --test-skip-pattern=disk_io"
   },
   "engines": {
     "node": ">=20"
